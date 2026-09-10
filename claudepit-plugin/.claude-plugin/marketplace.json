@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claudepit",
+  "description": "Companion marketplace for the Claude Cockpit app.",
+  "owner": {
+    "name": "claudepit"
+  },
+  "plugins": [
+    {
+      "name": "claudepit",
+      "description": "Drive the Claude Cockpit app from a session: set the active path and open cards.",
+      "source": "./",
+      "version": "0.1.0",
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{ "model": "opus",
+  "env": { "ANTHROPIC_MODEL": "claude-sonnet", "ANTHROPIC_AUTH_TOKEN": "secrettoken1234" },
+  "mcpServers": { "pencil": { "command": "/bin/pencil", "args": ["--app","desktop"], "transport": "stdio" } },
+  "hooks": { "SessionStart": [ { "hooks": [ { "type":"command", "command":"echo hi" } ] } ] },
+  "enabledPlugins": { "coolplug@acme": true } }

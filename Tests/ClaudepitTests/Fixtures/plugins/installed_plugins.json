@@ -1,0 +1,4 @@
+{ "version": 2, "plugins": {
+  "coolplug@acme": [ { "scope": "user",
+    "installPath": "__FX__/cache/acme/coolplug/1.0.0",
+    "version": "1.0.0" } ] } }

@@ -1,0 +1,5 @@
+{
+  "name": "claudepit",
+  "version": "0.1.0",
+  "description": "Drive the Claude Cockpit app from a session: set the active path and open cards."
+}

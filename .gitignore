@@ -1,0 +1,68 @@
+# ── Swift / SwiftPM ────────────────────────────────────────────────────────
+.build/
+.swiftpm/
+DerivedData/
+*.dSYM/
+*.dSYM.zip
+
+# Package.resolved is deliberately NOT ignored. This is an application, not a
+# library, so pinning exact dependency versions is what makes a fresh clone
+# build the same way on someone else's machine.
+
+# ── Xcode ─────────────────────────────────────────────────────────────────
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# ── Build output from Tools/make-app.sh ───────────────────────────────────
+build/
+*.app
+*.zip
+
+# ── Signing material (never commit these) ─────────────────────────────────
+*.p12
+*.pem
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+
+# ── Secrets / local env ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.local
+secrets.json
+
+# ── Claude Code local state ───────────────────────────────────────────────
+# settings.json IS committed: it is the shared project config, and the app
+# reconciles its machine-specific hook paths on launch (see CLAUDE.md,
+# "Machine Portability"). These are per-machine or throwaway:
+.claude/settings.local.json
+.claude/settings.json.backup.*
+.claude/scheduled_tasks.json
+.claude/scheduled_tasks.lock
+
+# ── Logs / temp ───────────────────────────────────────────────────────────
+*.log
+*.tmp
+tmp/
+
+# ── macOS ─────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon
+
+# ── Editors ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

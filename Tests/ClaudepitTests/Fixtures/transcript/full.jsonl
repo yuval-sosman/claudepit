@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"do a thing"},"timestamp":"2026-07-28T10:00:00.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"on it"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"swift build","description":"build"}}]},"timestamp":"2026-07-28T10:00:01.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"Compiling...","is_error":false}]},"timestamp":"2026-07-28T10:00:02.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"mcp__pencil__get_editor_state","input":{}}]},"timestamp":"2026-07-28T10:00:03.000Z"}

@@ -1,0 +1,40 @@
+import SwiftUI
+import AppKit
+
+/// Makes the hosting NSWindow use desktop-sampling vibrancy (real glass).
+struct VibrancyView: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = .underWindowBackground
+        v.blendingMode = .behindWindow
+        v.state = .active
+        return v
+    }
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
+
+// ponytail: bare-executable launch (no .app bundle) starts non-regular, so
+// the window never becomes key and TextField keyboard input is dead. Force it.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+@main
+struct ClaudepitApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @StateObject private var app = AppState()
+
+    var body: some Scene {
+        WindowGroup {
+            ZStack {
+                VibrancyView().ignoresSafeArea()
+                ContentView(app: app)
+            }
+            .onAppear { app.startWatching() }
+        }
+        .windowStyle(.hiddenTitleBar)
+    }
+}
