@@ -6,20 +6,40 @@ struct HomeSection: View {
     @ObservedObject var app: AppState
     @State private var plans: [PlanFile] = []
 
+    /// Width `HomeSection.body` was proposed, measured by the background probe on the root
+    /// stack. `0` until the first measurement lands — `HomeLayout.columnWidths` returns nil
+    /// there, so the very first frame renders single-column.
+    @State private var contentWidth: CGFloat = 0
+
     private var attention: [AttentionItem] {
         buildAttention(tasks: app.tasks, worktrees: app.worktrees)
     }
 
     var body: some View {
         LazyVStack(spacing: 16) {
-            identityCard
-            if !attention.isEmpty { attentionCard }
             if app.activePath != nil {
-                statsStripCard
-                tasksPipelineCard
-                recentCard
+                identityHeader
+                if !attention.isEmpty { attentionCard }
+                responsiveBody
+            } else {
+                welcomePanel
             }
         }
+        // Load-bearing, and it must precede `.background`. `.background(...)` is sized to the
+        // root stack's own reported frame, and a (Lazy)VStack reports max(child widths) — it
+        // does not clamp to the proposal. In the two-column branch the HStack's children carry
+        // fixed widths computed from the PREVIOUS contentWidth, so on a narrowing window the
+        // stack keeps reporting the old width, the probe re-reports a stale value, and the
+        // layout would widen but never narrow. This makes the measured frame equal the
+        // proposed width regardless of child overflow.
+        .frame(maxWidth: .infinity)
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { contentWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { contentWidth = proxy.size.width }
+            }
+        )
         .onAppear {
             app.reloadSessions()
             app.loadTasks()
@@ -49,21 +69,91 @@ struct HomeSection: View {
             .sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
-    // MARK: - Identity card
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            app.setActivePath(url)
+        }
+    }
 
-    private var identityCard: some View {
+    // MARK: - Welcome panel (no active project)
+
+    private var welcomePanel: some View {
         GlassCard {
-            if let base = app.activePath {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(base.lastPathComponent)
-                            .font(.title2)
-                            .bold()
-                        Text(String(Paths.slug(for: base).prefix(40)))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fontDesign(.monospaced)
-                    }
+            VStack(spacing: 14) {
+                Image(systemName: "house")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.secondary)
+                Text("Claudepit")
+                    .font(.title2.bold())
+                Text("A GUI for Claude Code — sessions, tasks, plans, and settings.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Open…") { chooseFolder() }
+                    .buttonStyle(.borderedProminent)
+                if !app.recentPaths.isEmpty { recentsBlock }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 28)
+        }
+    }
+
+    /// Recent projects list. One child of the outer `VStack(spacing: 14)` so the panel's
+    /// spacing does not leak between rows — rows sit 2pt apart, matching `PathBar`.
+    private var recentsBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Divider().opacity(0.15).padding(.bottom, 6)
+            Text("Recent Projects")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 2)
+            ForEach(app.recentPaths, id: \.self) { p in recentRow(p) }
+        }
+        .frame(maxWidth: 320)
+    }
+
+    /// Mirrors `PathBar.recentPopover`'s row (PathBar.swift:83-105) without its
+    /// checkmark/highlight branch, which keys off `p == app.activePath` and is dead here.
+    private func recentRow(_ p: URL) -> some View {
+        Button {
+            app.setActivePath(p)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                Text(p.lastPathComponent)
+                    .font(.subheadline)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Identity header
+
+    @ViewBuilder private var identityHeader: some View {
+        if let base = app.activePath {
+            GlassCard {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(base.lastPathComponent)
+                        .font(.headline)
+                    Text(String(Paths.slug(for: base).prefix(40)))
+                        .font(.caption)
+                        .fontDesign(.monospaced)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer()
                     HStack(spacing: 6) {
                         attentionBadge
@@ -72,25 +162,36 @@ struct HomeSection: View {
                     }
                 }
                 .padding(.horizontal, 20)
-                .padding(.vertical, 16)
-            } else {
-                VStack(spacing: 10) {
-                    Text("Open a project to get started")
-                        .foregroundStyle(.secondary)
-                    Button("Open…") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseDirectories = true
-                        panel.canChooseFiles = false
-                        panel.allowsMultipleSelection = false
-                        if panel.runModal() == .OK, let url = panel.url {
-                            app.setActivePath(url)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(.vertical, 10)
             }
+        }
+    }
+
+    // MARK: - Responsive region
+
+    /// Two columns when the measured width allows it, one otherwise. Holds no content itself.
+    /// `contentWidth` starts at 0, so the first frame after entering Home renders single-column
+    /// and the next frame is two-column — accepted, not eliminated: removing it would need the
+    /// width to outlive the view (an AppState field), which is out of scope.
+    @ViewBuilder private var responsiveBody: some View {
+        if let cols = HomeLayout.columnWidths(width: contentWidth) {
+            HStack(alignment: .top, spacing: HomeLayout.columnSpacing) {
+                leftColumn.frame(width: cols.left)
+                recentCard.frame(width: cols.right)
+            }
+        } else {
+            VStack(spacing: 16) {
+                statsGridCard
+                tasksPipelineCard
+                recentCard
+            }
+        }
+    }
+
+    private var leftColumn: some View {
+        VStack(spacing: 16) {
+            statsGridCard
+            tasksPipelineCard
         }
     }
 
@@ -121,30 +222,44 @@ struct HomeSection: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Needs attention").font(.headline)
-                VStack(spacing: 4) {
+                VStack(spacing: 2) {
                     ForEach(attention.prefix(6)) { item in
-                        Button { jump(to: item.target) } label: {
-                            HStack(spacing: 8) {
-                                Circle()
-                                    .fill(dotColor(item.severity))
-                                    .frame(width: 8, height: 8)
-                                Text(item.title)
-                                    .font(.body)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(item.reason)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .buttonStyle(.plain)
+                        attentionRow(item)
                     }
+                }
+                if attention.count > 6 {
+                    Text("+\(attention.count - 6) more")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
         }
+    }
+
+    private func attentionRow(_ item: AttentionItem) -> some View {
+        Button { jump(to: item.target) } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Circle()
+                    .fill(dotColor(item.severity))
+                    .frame(width: 10, height: 10)
+                    .padding(.top, 5)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title)
+                        .font(.body)
+                        .lineLimit(1)
+                    Text(item.reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func dotColor(_ s: AttentionSeverity) -> Color {
@@ -163,16 +278,20 @@ struct HomeSection: View {
         }
     }
 
-    // MARK: - Stats strip card
+    // MARK: - Stats grid card
 
-    private var statsStripCard: some View {
+    private var statsGridCard: some View {
         let doneCount = app.tasks.filter { $0.status == .done }.count
         let inFlight = app.tasks.filter {
             $0.status == .running || $0.status == .blocked || $0.status == .awaitingReview
         }.count
         let activeSessions = app.sessions.filter(\.isActive).count
         return GlassCard {
-            HStack(spacing: 0) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 92), spacing: 8)],
+                alignment: .leading,
+                spacing: 12
+            ) {
                 statTile("Tasks", "\(app.tasks.count)") { app.selected = .tasks }
                 statTile("Done", "\(doneCount)/\(app.tasks.count)") { app.selected = .tasks }
                 statTile("In Flight", "\(inFlight)") { app.selected = .tasks }
@@ -243,6 +362,8 @@ struct HomeSection: View {
                 Text(phase.shortTitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 ZStack {
                     Circle()
                         .fill(badgeBackground)
