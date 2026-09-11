@@ -64,6 +64,28 @@ func hookScriptsChecks() -> [Bool] {
         try expect(s.hasSuffix("\" \"$EVENT\" \"$MSG\""), "emits the hook JSON last")
     })
 
+    results.append(check("the hook gates on the transcript before doing any memory work") {
+        let s = HookScripts.memoryHook
+        try expect(s.contains("transcript_path"), "reads the transcript path from the hook input")
+        try expect(s.contains("TOUCHED"), "computes a touched-a-file verdict")
+        // The silent exit must come before the log read, or a no-change session still pays for it.
+        let gate = s.range(of: "if [[ \"${TOUCHED:-1}\" == \"0\" ]]; then")
+        let logRead = s.range(of: "WRITES_SINCE_DREAM=$(")
+        try expect(gate != nil && logRead != nil, "gate and log read both present")
+        if let gate, let logRead {
+            try expect(gate.lowerBound < logRead.lowerBound, "gate precedes the log read")
+        }
+        try expect(!s.contains("{\"name\":\"Edit\""), "matches tool_use blocks, not raw transcript text")
+    })
+
+    results.append(check("both the reminder and the strategy tell Claude to skip a no-change session") {
+        try expect(HookScripts.memoryHookReminder.contains("skip the memory pass entirely"),
+                   "reminder carries the skip clause")
+        let p = HookScripts.memorySystemPrompt
+        try expect(p.contains("### When to skip"), "strategy has a skip section")
+        try expect(p.contains("No memory pass means no log entry"), "log section covers the skip case")
+    })
+
     results.append(check("task command bodies are non-empty and carry their front matter") {
         for cmd in HookScripts.taskCommands {
             try expect(cmd.body.hasPrefix("---\ndescription:"), "\(cmd.filename) has front matter")

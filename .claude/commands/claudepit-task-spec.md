@@ -1,7 +1,10 @@
 ---
 description: Write a design spec for a Claudepit task (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are writing the design spec for a task tracked by Claudepit. The task name, description, and
 requirements are in the arguments. If a brainstorm file exists at `brainstormPath=`, read it —

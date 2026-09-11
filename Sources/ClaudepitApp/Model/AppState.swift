@@ -91,6 +91,9 @@ final class AppState: ObservableObject {
     @Published var focusTaskID: String?      // set to jump the Tasks page to a specific task
     @Published var returnToTaskID: String?   // set before a plan deep-link so PlanDetailView can offer "Back to task"
     @Published var herdrSessions: [String: Herdr.AgentEntry] = [:]
+    /// Every live herdr agent, session-bound or not. Task agents report no `agent_session`, so
+    /// `herdrSessions` (keyed by session id) never contains them — the Tasks board reads this.
+    @Published var herdrAgents: [Herdr.AgentEntry] = []
     /// Cached `claude auth status`. nil until the first check finishes — views render
     /// nothing while it's nil rather than flashing a banner on every launch.
     /// Deliberately a *stored* value: resolving it needs a subprocess, and a `Process`
@@ -129,6 +132,8 @@ final class AppState: ObservableObject {
     let appConfig = AppConfigStore()
     private var watcher: FileWatcher?
     private var sessionLoadTask: Task<Void, Never>?
+    /// Live-agent poll, running only while some task is in flight — see `syncTaskPolling()`.
+    private var taskPollTimer: Timer?
 
     init() {
         // Restore persisted paths before reload so sessions/memory load correctly
@@ -264,6 +269,7 @@ final class AppState: ObservableObject {
         reloadMemory()
         loadTasks()
         driveBlockedTasks()
+        driveRunningTasks()
         plansChangeToken += 1
         restartWatching()
     }
@@ -280,10 +286,21 @@ final class AppState: ObservableObject {
                 self.reloadWorktrees()
             }
         }
+        refreshHerdrAgents()
+    }
+
+    /// Re-read `herdr agent list` into both projections: `herdrSessions` (keyed by Claude session
+    /// id, for the Sessions/Worktrees rows) and `herdrAgents` (every agent, including the task
+    /// agents that carry no session id at all — see `Herdr.AgentEntry`).
+    func refreshHerdrAgents() {
         Task { [weak self] in
             let entries = await Herdr.agentList()
-            let map = Dictionary(uniqueKeysWithValues: entries.map { ($0.sessionID, $0) })
-            await MainActor.run { self?.herdrSessions = map }
+            let map = Dictionary(entries.compactMap { e in e.sessionID.map { ($0, e) } },
+                                 uniquingKeysWith: { a, _ in a })
+            await MainActor.run {
+                self?.herdrSessions = map
+                self?.herdrAgents = entries
+            }
         }
     }
 
@@ -330,10 +347,48 @@ final class AppState: ObservableObject {
         // Brainstorm hand-off: the phase runs in herdr and writes a YAML deliverable. Parse it on load
         // and merge new suggestions by id, preserving any already-accepted/dismissed decisions.
         for i in loaded.indices {
+            healArtifactLinks(into: &loaded[i], projectSlug: slug)
             mergeBrainstormSuggestions(into: &loaded[i], projectSlug: slug)
         }
         tasks = loaded
         tasksChangeToken += 1
+        syncTaskPolling()
+    }
+
+    /// An agent working in a herdr pane produces no file-system event of its own, so the
+    /// FileWatcher alone can leave a running task's card stale for minutes. Poll herdr while —
+    /// and only while — some task is actually in flight; idle projects cost nothing.
+    private func syncTaskPolling() {
+        let active = tasks.contains { $0.status == .running || $0.status == .blocked }
+        if active {
+            guard taskPollTimer == nil else { return }
+            taskPollTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.refreshHerdrAgents()
+                    self.driveRunningTasks()
+                    self.driveBlockedTasks()
+                }
+            }
+        } else {
+            taskPollTimer?.invalidate()
+            taskPollTimer = nil
+        }
+    }
+
+    /// Adopt any phase deliverable sitting on disk that the record never recorded — a phase the
+    /// runner landed before the file was written, or one that finished while the app was closed,
+    /// otherwise leaves e.g. `specPath` nil and the detail view's "Review spec" button disabled for
+    /// a spec.md that plainly exists. Persists only when something was actually filled in.
+    private func healArtifactLinks(into task: inout ProjectTask, projectSlug: String) {
+        guard let healed = TaskTransition.healArtifactLinks(task, projectSlug: projectSlug) else { return }
+        task = healed
+        let links = healed.links
+        try? TaskStore.shared.update(id: task.id, projectSlug: projectSlug) {
+            $0.links.brainstormPath = $0.links.brainstormPath ?? links.brainstormPath
+            $0.links.specPath = $0.links.specPath ?? links.specPath
+            $0.links.reviewPath = $0.links.reviewPath ?? links.reviewPath
+        }
     }
 
     /// Parse `brainstorm.yaml` (if present) and add any suggestions whose id isn't already tracked.
@@ -509,6 +564,22 @@ final class AppState: ObservableObject {
             driving.insert(task.id)
             Task { [weak self] in
                 await TaskRunner.shared.resolveBlocked(task, projectSlug: slug, projectRoot: base)
+                await MainActor.run { self?.driving.remove(task.id) }
+            }
+        }
+    }
+
+    /// Poll each `.running` task's live herdr agent. A hand-off phase (brainstorm) runs without
+    /// `--wait`, so nothing else moves it off `.running`; neither does a `--wait` phase whose app
+    /// was quit mid-run. TaskRunner lands it in `.blocked`/`.awaitingReview`/`.failed` and rewrites
+    /// task.json (the FileWatcher then reloads it).
+    private func driveRunningTasks() {
+        guard let base = activePath else { return }
+        let slug = Paths.slug(for: base)
+        for task in tasks where task.status == .running && !driving.contains(task.id) {
+            driving.insert(task.id)
+            Task { [weak self] in
+                await TaskRunner.shared.resolveRunning(task, projectSlug: slug, projectRoot: base)
                 await MainActor.run { self?.driving.remove(task.id) }
             }
         }

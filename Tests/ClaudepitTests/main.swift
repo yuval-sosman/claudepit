@@ -33,6 +33,7 @@ let groups: [(String, () -> [Bool])] = [
     ("ManagedInstaller", managedInstallerChecks),
     ("HookScripts", hookScriptsChecks),
     ("TaskCommandGuard", taskCommandGuardChecks),
+    ("TaskPrompt", taskPromptChecks),
     ("TaskModel", taskModelChecks),
     ("TopicStore", topicStoreChecks),
     ("BrainstormChangeSource", brainstormChangeSourceChecks),

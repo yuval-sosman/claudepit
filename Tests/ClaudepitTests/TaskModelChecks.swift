@@ -231,5 +231,90 @@ func taskModelChecks() -> [Bool] {
                    "adjacent phases must not share an agent name")
     })
 
+    results.append(check("phaseNeedsReview: brainstorm goes quiet once every suggestion is resolved") {
+        func sugg(_ id: String, accepted: Bool?) -> BrainstormSuggestion {
+            BrainstormSuggestion(id: id, kind: .requirement, value: "r\(id)", rationale: "", accepted: accepted)
+        }
+        var t = ProjectTask.empty
+        t.phase = .brainstorm; t.status = .awaitingReview
+
+        try expect(t.phaseNeedsReview, "no suggestions parsed yet → still needs a look")
+
+        t.links.brainstormSuggestions = [sugg("a", accepted: true), sugg("b", accepted: nil)]
+        try expect(t.phaseNeedsReview, "one pending suggestion → needs review")
+
+        t.links.brainstormSuggestions = [sugg("a", accepted: true), sugg("b", accepted: false)]
+        try expect(!t.phaseNeedsReview, "all accepted/dismissed → phase done, not waiting")
+    })
+
+    results.append(check("phaseNeedsReview: an artifact phase is done once its deliverable is linked") {
+        var t = ProjectTask.empty
+        t.status = .awaitingReview
+
+        // Parked on a phase with no deliverable recorded → it still wants you.
+        for phase in [TaskPhase.writeSpec, .createPlan, .codeReview] {
+            t.phase = phase
+            try expect(t.phaseNeedsReview, "\(phase.rawValue) without its artifact needs you")
+        }
+
+        // Deliverable produced → phase done. NOT "waiting until the user opens the file".
+        t.links.specPath = "/t/spec.md"; t.links.planPath = "/t/plan.md"; t.links.reviewPath = "/t/review.md"
+        for phase in [TaskPhase.writeSpec, .createPlan, .codeReview] {
+            t.phase = phase
+            try expect(!t.phaseNeedsReview, "\(phase.rawValue) with its artifact is done")
+        }
+        // Each phase reads only its OWN link.
+        t.links.specPath = nil; t.phase = .createPlan
+        try expect(!t.phaseNeedsReview, "createPlan ignores a missing specPath")
+
+        t = ProjectTask.empty; t.status = .awaitingReview
+        t.phase = .implement
+        try expect(!t.phaseNeedsReview, "implement has no deliverable — landing here means it finished")
+        t.phase = nil
+        try expect(!t.phaseNeedsReview, "no phase → nothing outstanding")
+    })
+
+    results.append(check("expectedArtifact: only the phases with a fixed filename have one") {
+        let slug = "p", id = "abc123"
+        func path(_ phase: TaskPhase?) -> String? {
+            TaskTransition.expectedArtifact(phase: phase, projectSlug: slug, taskID: id)?.lastPathComponent
+        }
+        try expectEqual(path(.brainstorm), "brainstorm.yaml", "brainstorm deliverable")
+        try expectEqual(path(.writeSpec), "spec.md", "spec deliverable")
+        try expectEqual(path(.codeReview), "review.md", "review deliverable")
+        // createPlan picks its own filename under plansDir; implement writes no file. Both are
+        // discoverable only from the agent's CLAUDEPIT_ARTIFACT marker.
+        try expect(path(.createPlan) == nil, "createPlan has no fixed deliverable")
+        try expect(path(.implement) == nil, "implement has no deliverable")
+        try expect(path(nil) == nil, "no phase → no deliverable")
+    })
+
+    results.append(check("healArtifactLinks adopts on-disk deliverables the record missed") {
+        let slug = "claudepit-check-\(UUID().uuidString.prefix(8))"
+        let dir = Paths.taskDir(projectSlug: slug, id: "t1")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: Paths.projectsRoot.appending(path: slug)) }
+
+        var t = ProjectTask(id: "t1", phase: .writeSpec, status: .awaitingReview)
+        try expect(TaskTransition.healArtifactLinks(t, projectSlug: slug) == nil,
+                   "nothing on disk → no change")
+
+        try Data("# spec".utf8).write(to: dir.appending(path: "spec.md"))
+        let healed = TaskTransition.healArtifactLinks(t, projectSlug: slug)
+        try expectEqual(healed?.links.specPath, dir.appending(path: "spec.md").path, "specPath adopted")
+        try expect(healed?.links.reviewPath == nil, "review.md absent → still nil")
+
+        // Heals earlier phases too, not just the current one.
+        try Data("# review".utf8).write(to: dir.appending(path: "review.md"))
+        t.phase = .implement
+        try expectEqual(TaskTransition.healArtifactLinks(t, projectSlug: slug)?.links.reviewPath,
+                        dir.appending(path: "review.md").path, "past phase healed while on implement")
+
+        // Never overwrites a path the runner already recorded.
+        t.links.specPath = "/somewhere/else/spec.md"
+        let again = TaskTransition.healArtifactLinks(t, projectSlug: slug)
+        try expectEqual(again?.links.specPath, "/somewhere/else/spec.md", "existing link preserved")
+    })
+
     return results
 }

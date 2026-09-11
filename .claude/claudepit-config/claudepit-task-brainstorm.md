@@ -1,7 +1,10 @@
 ---
 description: Brainstorm approaches for a Claudepit task (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are brainstorming with the user to REFINE a task tracked by Claudepit. This runs BEFORE the
 spec phase, and its only output is a sharper task definition. The task name, description, and

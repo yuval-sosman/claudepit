@@ -10,17 +10,28 @@ extension Priority {
     }
 }
 
-/// Live herdr state for a task's current phase pane. Rank orders "needs attention" first.
-enum TaskLiveState: Int { case waiting = 0, working = 1, none = 2 }
+/// Live herdr state for a task's current phase agent.
+enum TaskLiveState { case waiting, working, idle, none }
 
 extension AppState {
-    /// Match the live agent by paneID (works for all phases; sessionIDs are only captured on implement).
-    /// Claude Code rests at "blocked" whenever it awaits input, so blocked == waiting-for-user.
+    /// The live agent for the task's current phase, if herdr still has one.
+    ///
+    /// Matched by agent NAME first — `task-<id>-<phase>`, which TaskRunner owns — and only then by
+    /// pane id, since panes get recycled between phases while names don't. Reads `herdrAgents`
+    /// rather than `herdrSessions`: task agents carry no `agent_session`, so the session-keyed map
+    /// never contains them (that mismatch is why the board's live state was dead).
     func liveState(of task: ProjectTask) -> TaskLiveState {
-        guard let pane = task.worktree?.paneID,
-              let s = herdrSessions.values.first(where: { $0.paneID == pane })?.status
-        else { return .none }
-        return s == "blocked" ? .waiting : (s == "working" ? .working : .none)
+        let name = TaskRunner.agentName(id: task.id, phase: task.phase)
+        var entry = herdrAgents.first { $0.name == name }
+        if entry == nil, let pane = task.worktree?.paneID {
+            entry = herdrAgents.first { $0.paneID == pane }
+        }
+        switch entry?.status {
+        case Herdr.AgentState.working: return .working
+        case Herdr.AgentState.blocked: return .waiting   // Claude rests at "blocked" when it asks you something
+        case Herdr.AgentState.idle:    return .idle      // at its prompt — the turn is over
+        default:                       return .none      // no agent / "unknown"
+        }
     }
 }
 
@@ -28,17 +39,19 @@ extension AppState {
 /// a pane is alive it wins — it's the real-time state) and the persisted task
 /// status both fold into these. Raw value = sort rank (needs-you first, done last).
 enum CardState: Int, CaseIterable {
-    case waiting = 0     // needs you: agent blocked, phase awaiting review, or dependency-blocked
+    case waiting = 0     // needs you: agent blocked, or a finished phase with a decision outstanding
     case running = 1     // live agent generating OR a phase executing
     case failed = 2      // last phase failed — retry it
-    case notStarted = 3  // backlog — not started yet
-    case done = 4        // complete
+    case phaseDone = 3   // phase finished and you've dealt with it — send it to the next phase
+    case notStarted = 4  // backlog — not started yet
+    case done = 5        // whole task complete
 
     var color: Color {
         switch self {
         case .waiting:    return .orange
         case .running:    return .green
         case .failed:     return .red
+        case .phaseDone:  return .mint
         case .notStarted: return .secondary
         case .done:       return .blue
         }
@@ -48,15 +61,17 @@ enum CardState: Int, CaseIterable {
         case .waiting:    return "Waiting"
         case .running:    return "Running"
         case .failed:     return "Failed"
+        case .phaseDone:  return "Phase done"
         case .notStarted: return "Not started"
         case .done:       return "Done"
         }
     }
     var help: String {
         switch self {
-        case .waiting:    return "Needs you — agent is waiting for input, or a phase finished and is ready to review"
+        case .waiting:    return "Needs you — the agent is asking something, or a phase stopped without producing its artifact"
         case .running:    return "A phase is actively running in herdr"
         case .failed:     return "Last phase failed — retry it"
+        case .phaseDone:  return "This phase finished and nothing is pending from you — send it to the next phase"
         case .notStarted: return "Not started — still in the backlog"
         case .done:       return "Task complete"
         }
@@ -67,19 +82,34 @@ enum CardState: Int, CaseIterable {
 }
 
 extension AppState {
-    /// Resolve the single merged card state. Live herdr state wins over persisted status.
+    /// Resolve the single merged card state.
+    ///
+    /// The terminal statuses decide on their own — a backlog/done/failed task is what it says it
+    /// is, and a stale agent still sitting in its pane must not override that. For a task that is
+    /// genuinely in flight, the live agent is the truth about *right now*: `working` → Running,
+    /// `blocked` → Waiting. An `idle` agent (or none at all) tells us nothing the persisted status
+    /// doesn't already say, so it defers to it.
+    ///
+    /// `.awaitingReview` deliberately splits in two via `phaseNeedsReview`: it means "the agent
+    /// stopped", which is not the same as "you still owe it something". A phase that produced its
+    /// deliverable reads Phase done — it does not stay Waiting until you open the file.
     func cardState(of task: ProjectTask) -> CardState {
+        switch task.status {
+        case .backlog: return .notStarted
+        case .failed:  return .failed
+        case .done:    return .done
+        case .running, .blocked, .awaitingReview: break
+        }
         switch liveState(of: task) {
-        case .waiting: return .waiting     // agent blocked at prompt → needs you
-        case .working: return .running     // agent generating
-        case .none: break
+        case .working:     return .running
+        case .waiting:     return .waiting
+        case .idle, .none: break
         }
         switch task.status {
-        case .backlog:                        return .notStarted
-        case .running:                        return .running
-        case .awaitingReview, .blocked:       return .waiting   // both need your action
-        case .failed:                         return .failed
-        case .done:                           return .done
+        case .blocked:        return .waiting
+        case .running:        return .running     // launching, or the agent hasn't surfaced yet
+        case .awaitingReview: return task.phaseNeedsReview ? .waiting : .phaseDone
+        default:              return .notStarted  // unreachable — the first switch took these
         }
     }
 }

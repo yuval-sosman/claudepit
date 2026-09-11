@@ -1,7 +1,10 @@
 ---
 description: Turn a Claudepit task spec into an implementation plan (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are turning an approved spec (absolute `specPath=` in the arguments) into an implementation
 plan. Write for an engineer who is skilled but has ZERO context for this codebase and

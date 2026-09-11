@@ -1,7 +1,10 @@
 ---
 description: Implement a Claudepit task per its plan (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 Implement the task by following the plan at the absolute `planPath=` in the arguments. You are
 already inside the task's git worktree. This is a normal coding session; the Claudepit Sessions

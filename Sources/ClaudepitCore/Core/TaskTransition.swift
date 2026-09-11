@@ -6,6 +6,42 @@ public enum TaskTransition {
         lastMarker(in: output, marker: "CLAUDEPIT_ARTIFACT:")
     }
 
+    /// The deterministic deliverable a phase writes, matching the defaults `TaskRunner.phasePrompt`
+    /// hands the agent. nil for phases that choose their own filename (`createPlan` writes under
+    /// `plansDir`) or write no file at all (`implement`) — those are only discoverable from the
+    /// agent's `CLAUDEPIT_ARTIFACT:` marker.
+    public static func expectedArtifact(phase: TaskPhase?, projectSlug: String, taskID: String) -> URL? {
+        let dir = Paths.taskDir(projectSlug: projectSlug, id: taskID)
+        switch phase {
+        case .brainstorm: return Paths.taskBrainstormFile(projectSlug: projectSlug, id: taskID)
+        case .writeSpec:  return dir.appending(path: "spec.md")
+        case .codeReview: return dir.appending(path: "review.md")
+        case .createPlan, .implement, .none: return nil
+        }
+    }
+
+    /// Point a task's links at any deterministic deliverable that exists on disk but was never
+    /// recorded. Returns nil when nothing changed.
+    ///
+    /// The runner records links from the agent's scrollback marker when a phase lands, and that can
+    /// miss: a phase that finished after the app stopped observing it (or one the runner landed
+    /// early, before the file was written) leaves `specPath`/`reviewPath` nil with the file sitting
+    /// right there — and the detail view's "Review spec" button disabled for an artifact that
+    /// plainly exists. Checked for EVERY phase, not just the current one, so a task that has since
+    /// moved on still heals its earlier links.
+    public static func healArtifactLinks(_ task: ProjectTask, projectSlug: String) -> ProjectTask? {
+        func existing(_ phase: TaskPhase) -> String? {
+            guard let u = expectedArtifact(phase: phase, projectSlug: projectSlug, taskID: task.id),
+                  FileManager.default.fileExists(atPath: u.path) else { return nil }
+            return u.path
+        }
+        var t = task
+        if t.links.brainstormPath == nil { t.links.brainstormPath = existing(.brainstorm) }
+        if t.links.specPath == nil       { t.links.specPath = existing(.writeSpec) }
+        if t.links.reviewPath == nil     { t.links.reviewPath = existing(.codeReview) }
+        return t == task ? nil : t
+    }
+
     /// Next phase in the task's planned list after `current` (nil current → first planned; nil if last/not-found).
     public static func nextPlannedPhase(after current: TaskPhase?, in planned: [TaskPhase]) -> TaskPhase? {
         guard let current else { return planned.first }

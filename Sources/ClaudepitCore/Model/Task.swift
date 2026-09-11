@@ -245,6 +245,35 @@ public struct ProjectTask: Codable, Identifiable, Sendable, Equatable {
         return v
     }
 
+    /// Whether the current phase still has something waiting on the USER.
+    /// Only meaningful while `status == .awaitingReview` — that status means "the agent stopped",
+    /// which is not the same as "you still owe it something".
+    ///
+    /// The test is **"does it still need you"**, not "have you looked at it yet". A phase that
+    /// produced its deliverable is finished: the card reads Phase done and Next is the obvious move.
+    /// It must not keep claiming to be Waiting merely because the spec/plan/review hasn't been
+    /// opened — that made Waiting mean everything, and so nothing.
+    ///
+    /// Two things genuinely still want you: brainstorm suggestions left undecided (the one phase
+    /// with an in-app accept/dismiss flow), and a phase parked here without its deliverable.
+    /// A non-nil link is the artifact test — every writer of these paths (`TaskRunner.routeArtifact`,
+    /// `TaskTransition.healArtifactLinks`) sets one only for a file that exists, which keeps this
+    /// property pure enough to call from a SwiftUI view body.
+    public var phaseNeedsReview: Bool {
+        switch phase {
+        case .none: return false
+        case .brainstorm:
+            // Zero parsed suggestions counts as outstanding: the deliverable landed in a shape we
+            // couldn't read, and the panel asks the user to continue in herdr or move on.
+            let s = links.brainstormSuggestions
+            return s.isEmpty || s.contains { $0.accepted == nil }
+        case .writeSpec:  return links.specPath == nil
+        case .createPlan: return links.planPath == nil
+        case .codeReview: return links.reviewPath == nil
+        case .implement:  return false   // no deliverable of its own — landing here means it finished
+        }
+    }
+
     /// Fields touched by pending brainstorm suggestions — drives the "ready for review" affordance.
     public var pendingBrainstormFields: Set<VersionField> {
         var out: Set<VersionField> = []

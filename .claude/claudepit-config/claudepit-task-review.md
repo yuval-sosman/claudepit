@@ -1,7 +1,10 @@
 ---
 description: Code-review a Claudepit task's diff (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are the final code reviewer for this task. The work is UNCOMMITTED in this worktree — plain
 `git diff` misses new files — so build the review surface first. The review is read-only: never

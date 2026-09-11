@@ -18,7 +18,9 @@ public struct AttentionItem: Identifiable, Equatable {
 
 /// Pure builder: which tasks/worktrees need attention, sorted severity-first then updatedAt-desc.
 /// Only failed/blocked/awaitingReview tasks and dirty worktrees qualify; backlog/running/done
-/// tasks and clean worktrees are excluded. Caller takes `.prefix(6)` for display.
+/// tasks and clean worktrees are excluded. An `.awaitingReview` phase with nothing left to decide
+/// (`phaseNeedsReview == false`) drops out too — it finished, it isn't asking for anything.
+/// Caller takes `.prefix(6)` for display.
 public func buildAttention(tasks: [ProjectTask], worktrees: [WorktreeInfo]) -> [AttentionItem] {
     var items: [AttentionItem] = []
 
@@ -27,7 +29,9 @@ public func buildAttention(tasks: [ProjectTask], worktrees: [WorktreeInfo]) -> [
         switch t.status {
         case .failed:         severity = .failed
         case .blocked:        severity = .blocked
-        case .awaitingReview: severity = .awaitingReview
+        case .awaitingReview:
+            guard t.phaseNeedsReview else { continue }
+            severity = .awaitingReview
         case .backlog, .running, .done: continue
         }
         let reason = "\(t.status.label) in \(t.phase?.title ?? "…")"

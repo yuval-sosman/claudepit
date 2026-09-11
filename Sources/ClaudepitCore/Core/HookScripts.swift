@@ -93,6 +93,20 @@ You maintain a persistent feature-oriented memory for this project at:
 ### What to save
 Save a memory entry for every feature or meaningful change, or a decision made about a feature — including small ones.
 
+### When to skip — do nothing, and do it fast
+The default is to do nothing. Run a memory pass only if this session actually changed the project:
+code written or edited, a feature added or changed, a bug fixed, config or a hook changed, a test
+added, or a design decision made that the code does not already state.
+
+Skip the pass entirely — no file reads, no writes, no log entry, no mention of memory — when the
+session was a question answered, code explained, a search or review with no edits, a command run,
+or an attempt that was abandoned with nothing left behind.
+
+Decide this from the work you just did, in one step, before opening anything. Never read MEMORY.md
+or a topic file to work out whether there is something to save; reading first is the slow path and
+it is wrong. When in doubt on a session that *did* change code, write; when the session changed
+nothing, skip.
+
 ### File structure
 - MEMORY.md — index only. One line per topic file. Keep it under 20 lines.
 - One topic file per feature domain (e.g. session-loading.md, hooks.md, settings-injection.md).
@@ -116,14 +130,15 @@ The current session ID is in the `session_id` field of the hook input JSON, or a
 2. Does the array contain the current session ID? ✓
 
 ### Writing rules
-- Recall before writing: read MEMORY.md first, then read any relevant topic pages in full. Never rely on the index summary alone when precision matters.
+- Recall before writing, but only what you are about to touch: read MEMORY.md, then read in full only the topic pages covering the areas this session changed. Never rely on the index summary alone for a page you are editing, and never read the whole memory/ directory to write one page.
 - Update, don't duplicate: update existing pages rather than creating new ones. Only create a new page when the topic is genuinely new.
 - Merge aggressively: if a topic file already covers the area, add to it. If two topic files cover the same domain, consolidate them before the session ends.
 - Cross-references: every topic file must end with a `## See also` section listing links to related pages using standard markdown links [Page Title](./file.md). Never use wikilink syntax [[PageName]]. Keep all cross-links in this section — do not scatter them in the body.
 - Sources traceability: when a page is compiled from a knowledge base document, record it in a `sources` frontmatter field so compiled knowledge traces back to raw inputs.
 - Rewrite the "current behavior" section to reflect reality, not history. A memory file that describes old behavior is worse than no memory file.
 - Keep memory content up-to-date, coherent and organised. Rename or delete files that are no longer relevant.
-- Write memory at the end of any session where code was written, a feature was built, or a decision was made. When in doubt, write — missing a memory entry is worse than a minor one.
+- Write memory at the end of any session where code was written, a feature was built, or a decision was made — and only then (see "When to skip" above).
+- Scope the pass to this session's changes. Do not audit, re-verify, or reorganise unrelated pages; that is what the dreaming cycle is for.
 
 ## Memory Log
 
@@ -131,6 +146,7 @@ A log of memory activity is maintained at:
   ~/.claude/projects/<project-slug>/memory/log.json
 
 ### Maintaining the log
+- No memory pass means no log entry. A session that changed nothing appends nothing.
 - After a memory pass in which you wrote, updated, renamed, or deleted any topic .md files:
   1. Update the `sessions` array in each touched file's frontmatter (append current session ID if not present).
   2. Immediately append ONE log entry covering the whole pass before ending the conversation:
@@ -150,13 +166,15 @@ A log of memory activity is maintained at:
 - If log.json does not exist yet, create it as an empty JSON array [] before appending.
 
 ### How dreaming is triggered
-The Stop hook reads log.json and counts write entries since the last dream entry.
+The Stop hook first checks whether this session touched a file at all; if it did not, it injects
+nothing and no memory work happens. Otherwise it reads log.json and counts write entries since the
+last dream entry.
 When the count reaches 10, it injects the full 11-step dreaming consolidation prompt instead of the normal memory reminder.
 That prompt runs the 11 steps in a subagent (Task tool, latest Sonnet model) rather than inline, so consolidation doesn't burn the session's own context.
 The count resets after each dream — the next dream triggers after 10 more writes.
 """
 
-    public static let memoryHookReminder = "When you finish implementing something, always use the Custom Memory Strategy to maintain memory for these changes. Do not wait for the user to ask. Do it before session stops."
+    public static let memoryHookReminder = "When you finish implementing something, always use the Custom Memory Strategy to maintain memory for these changes. Do not wait for the user to ask. Do it before session stops. If this session implemented, changed, or decided nothing, skip the memory pass entirely — write nothing, read nothing, log nothing, and say nothing about memory. Judge that from the work you just did, never by reading memory files first. When you do write, touch only the topic files this session's work actually affects."
 
     /// The dreaming prompt, shared by the display constant below and by the generated hook script.
     /// Tokens: `{{COUNT}}` (writes since the last dream), `{{SESSION_ID}}`, `{{TS}}` (epoch expression).
@@ -212,15 +230,76 @@ set -euo pipefail
 EVENT="${1:-Stop}"
 HOOK_INPUT=$(cat)
 
+# One python pass for every field we need — this hook fires on every Stop, so interpreter
+# startups are the whole cost when there is nothing to remember.
+FIELDS=$(echo "$HOOK_INPUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for k in ('stop_hook_active', 'session_id', 'cwd', 'transcript_path'):
+    print(d.get(k, '') or '')
+" 2>/dev/null || true)
+IS_ACTIVE=$(sed -n 1p <<< "$FIELDS")
+SESSION_ID=$(sed -n 2p <<< "$FIELDS")
+PROJECT_DIR=$(sed -n 3p <<< "$FIELDS")
+TRANSCRIPT=$(sed -n 4p <<< "$FIELDS")
+
 # Bail if already inside a stop hook turn — prevents infinite loop
-IS_ACTIVE=$(echo "$HOOK_INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null || echo "False")
 if [[ "$IS_ACTIVE" == "True" ]]; then
   echo '{"continue": true}'
   exit 0
 fi
 
-SESSION_ID=$(echo "$HOOK_INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || true)
-PROJECT_DIR=$(echo "$HOOK_INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null || true)
+# Fast path: a session that never wrote a file has nothing to remember, so inject nothing at
+# all — no reminder, no dreaming, no memory read. The transcript is scanned for tool calls only
+# (never raw text: every transcript embeds a system prompt that mentions "git commit" and the
+# like, so a plain grep would match on every session). A false positive costs only the normal
+# reminder, which the strategy's own skip rule then short-circuits.
+if [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]]; then
+  TOUCHED=$(python3 - "$TRANSCRIPT" 2>/dev/null << 'PYEOF'
+import json, re, sys
+
+WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+SHELL_WRITE = re.compile(
+    r"(?:^|[\s;&|(])(?:sed\s+-i|tee|mv|cp|rm|mkdir|touch|patch|install)\b"
+    r"|>{1,2}\s*(?!/dev/)[^\s&|;]"
+    r"|<<"
+    r"|git\s+(?:commit|apply|revert|rebase|merge|mv|rm|checkout\s+-b|switch\s+-c)\b")
+
+def wrote(block):
+    name = block.get("name", "")
+    if name in WRITE_TOOLS:
+        return True
+    if name in ("Bash", "BashOutput"):
+        cmd = (block.get("input") or {}).get("command") or ""
+        return bool(SHELL_WRITE.search(cmd))
+    return False
+
+try:
+    with open(sys.argv[1], errors="ignore") as fh:
+        for line in fh:
+            if '"tool_use"' not in line:
+                continue
+            try:
+                content = (json.loads(line).get("message") or {}).get("content")
+            except Exception:
+                continue
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and wrote(block):
+                    print(1)
+                    sys.exit(0)
+    print(0)
+except Exception:
+    print(1)
+PYEOF
+) || TOUCHED=1
+  if [[ "${TOUCHED:-1}" == "0" ]]; then
+    echo '{"continue": true}'
+    exit 0
+  fi
+fi
+
 SLUG="${PROJECT_DIR//\//-}"
 LOG_FILE="$HOME/.claude/projects/${SLUG}/memory/log.json"
 
@@ -255,16 +334,21 @@ print(json.dumps({'continue': True, 'hookSpecificOutput': {'hookEventName': sys.
 " "$EVENT" "$MSG"
 """#
 
-    // Slash-commands run inside each task's worktree. $ARGUMENTS carries space-separated key=value
-    // pairs (taskDir= plansDir= specPath= planPath= reviewPath= brainstormPath= worktreePath=
-    // attachmentsDir= today= name=). Each command writes its artifact to the absolute path in
-    // $ARGUMENTS, THEN prints the marker LAST (last-marker-wins in TaskTransition).
+    // Slash-commands run inside each task's worktree. $ARGUMENTS carries the app's phase brief
+    // (see TaskRunner.phasePrompt): markdown sections for the task itself, then a `## Paths` block
+    // of one `key=value` per line (taskDir= plansDir= specPath= planPath= reviewPath=
+    // brainstormPath= worktreePath= attachmentsDir= today=). Each command writes its artifact to
+    // the absolute path in $ARGUMENTS, THEN prints the marker LAST (last-marker-wins in
+    // TaskTransition).
 
     public static let taskCommandBrainstorm = """
 ---
 description: Brainstorm approaches for a Claudepit task (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are brainstorming with the user to REFINE a task tracked by Claudepit. This runs BEFORE the
 spec phase, and its only output is a sharper task definition. The task name, description, and
@@ -361,7 +445,10 @@ CLAUDEPIT_ARTIFACT: <the absolute brainstormPath you wrote>
 ---
 description: Write a design spec for a Claudepit task (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are writing the design spec for a task tracked by Claudepit. The task name, description, and
 requirements are in the arguments. If a brainstorm file exists at `brainstormPath=`, read it —
@@ -436,7 +523,10 @@ CLAUDEPIT_ARTIFACT: <the absolute specPath you wrote>
 ---
 description: Turn a Claudepit task spec into an implementation plan (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are turning an approved spec (absolute `specPath=` in the arguments) into an implementation
 plan. Write for an engineer who is skilled but has ZERO context for this codebase and
@@ -536,7 +626,10 @@ CLAUDEPIT_ARTIFACT: <the absolute plan .md path under plansDir>
 ---
 description: Implement a Claudepit task per its plan (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 Implement the task by following the plan at the absolute `planPath=` in the arguments. You are
 already inside the task's git worktree. This is a normal coding session; the Claudepit Sessions
@@ -620,7 +713,10 @@ CLAUDEPIT_ARTIFACT: <the absolute planPath you implemented>
 ---
 description: Code-review a Claudepit task's diff (app-owned; regenerated on launch).
 ---
-Arguments: $ARGUMENTS
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
 
 You are the final code reviewer for this task. The work is UNCOMMITTED in this worktree — plain
 `git diff` misses new files — so build the review surface first. The review is read-only: never

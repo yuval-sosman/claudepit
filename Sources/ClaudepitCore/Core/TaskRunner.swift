@@ -12,6 +12,15 @@ public actor TaskRunner {
         "task-\(id)-\(phase?.commandName ?? "start")"
     }
 
+    /// Task ids whose phase is mid-launch: pane opening, `agent start` retrying, prompt in flight.
+    /// `resolveRunning` must ignore these — an agent that is up but has not yet received its prompt
+    /// reports `idle`, which would otherwise be read as "the turn finished".
+    private var launching: Set<String> = []
+
+    /// Last `state_change_seq` acted on per agent name — lets the blocked poll skip the scrollback
+    /// read while an agent sits unchanged at its prompt. See `seqChanged`.
+    private var lastSeenSeq: [String: Int] = [:]
+
 
     // MARK: - Public API
 
@@ -40,49 +49,104 @@ public actor TaskRunner {
         }
     }
 
-    /// Recover a `.blocked` task by its DELIVERABLE, not agent status. The user answers the blocked
-    /// agent directly in herdr; agent status is unreliable (Claude Code rests at "blocked" whenever it's
-    /// awaiting input — even after finishing — and the task's stored pane/tab may no longer match a live
-    /// agent). So: if the phase's expected artifact FILE now exists, route it and land `.awaitingReview`.
-    /// Phases without a deterministic on-disk deliverable (createPlan/implement) can't self-heal
-    /// here — the user advances them manually. Called on each FileWatcher tick by AppState.
-    public func resolveBlocked(_ task: ProjectTask, projectSlug: String, projectRoot: URL) async {
-        guard task.status == .blocked else { return }
-        guard let artifact = Self.expectedArtifact(task, projectSlug: projectSlug),
-              FileManager.default.fileExists(atPath: artifact.path) else { return }
+    /// Move a `.running` task on when its agent stops. Hand-off phases (`openInHerdr`, no `--wait`)
+    /// have no observer at all, and a `--wait` phase whose app was quit mid-run is in the same
+    /// position — without this poll they sit on `.running` forever.
+    ///
+    /// Claude reports `idle` when it finishes a turn and returns to its prompt (`done` is in
+    /// herdr's status enum but the Claude detection manifest never emits it), so `idle`/`done`
+    /// both mean "turn over". `blocked` means it is asking the user something. Anything else
+    /// (`working`, `unknown`) means keep waiting. Called on each watcher tick / poll by AppState.
+    public func resolveRunning(_ task: ProjectTask, projectSlug: String, projectRoot: URL) async {
+        guard task.status == .running, !launching.contains(task.id) else { return }
         var t = task
-        switch t.phase {
-        case .brainstorm: t.links.brainstormPath = artifact.path
-        case .writeSpec:  t.links.specPath = artifact.path
-        case .codeReview: t.links.reviewPath = artifact.path
-        default: break
+        let name = Self.agentName(id: t.id, phase: t.phase)
+        guard let obj = await herdr(["agent", "get", name], cwd: nil) else { return }  // herdr unreachable
+        guard let status = agentStatus(obj) else {
+            // herdr answered but knows no such agent (pane closed, herdr restarted). The phase
+            // cannot still be running: land it on its deliverable if one exists, else fail it so
+            // the UI offers Retry instead of spinning on a card that will never change.
+            if let a = Self.expectedArtifact(t, projectSlug: projectSlug),
+               FileManager.default.fileExists(atPath: a.path) {
+                await landFinishedTurn(&t, projectSlug: projectSlug, projectRoot: projectRoot)
+            } else {
+                fail(&t, projectSlug)
+            }
+            return
         }
-        t.status = .awaitingReview
-        t.updatedAt = Date().timeIntervalSince1970
-        try? TaskStore.shared.save(t, projectSlug: projectSlug)
+        switch status {
+        case Herdr.AgentState.blocked:
+            t.status = .blocked
+            saveIfChanged(t, original: task, projectSlug: projectSlug)
+        case Herdr.AgentState.idle, Herdr.AgentState.done:
+            await landFinishedTurn(&t, projectSlug: projectSlug, projectRoot: projectRoot)
+        default:
+            break   // working / unknown — still in flight
+        }
     }
 
-    /// The deterministic deliverable path a phase writes (matches `phasePrompt`'s kv defaults).
-    /// nil for phases with no fixed on-disk file (createPlan picks its own plans filename; implement
-    /// produces no artifact file).
-    private static func expectedArtifact(_ task: ProjectTask, projectSlug: String) -> URL? {
-        switch task.phase {
-        case .brainstorm: return Paths.taskBrainstormFile(projectSlug: projectSlug, id: task.id)
-        case .writeSpec:  return Paths.taskDir(projectSlug: projectSlug, id: task.id).appending(path: "spec.md")
-        case .codeReview: return Paths.taskDir(projectSlug: projectSlug, id: task.id).appending(path: "review.md")
-        default: return nil
+    /// Recover a `.blocked` task — one whose agent stopped without finishing its phase, or that is
+    /// sitting on a prompt in herdr. Nothing else moves it: the user replies in the pane, not here.
+    ///
+    /// The DELIVERABLE is checked first and needs no subprocess at all — it also still works when
+    /// the agent is gone (herdr restarted, pane closed, stored pane/tab stale). Failing that, ask
+    /// the live agent, and if its turn is over re-run the full landing (which reads the scrollback
+    /// marker — the only way `createPlan`/`implement` can ever report done).
+    /// Called on each FileWatcher tick / poll by AppState.
+    public func resolveBlocked(_ task: ProjectTask, projectSlug: String, projectRoot: URL) async {
+        guard task.status == .blocked, !launching.contains(task.id) else { return }
+        var t = task
+        if let artifact = Self.expectedArtifact(t, projectSlug: projectSlug),
+           FileManager.default.fileExists(atPath: artifact.path) {
+            switch t.phase {
+            case .brainstorm: t.links.brainstormPath = artifact.path
+            case .writeSpec:  t.links.specPath = artifact.path
+            case .codeReview: t.links.reviewPath = artifact.path
+            default: break
+            }
+            t.status = .awaitingReview
+            t.updatedAt = Date().timeIntervalSince1970
+            try? TaskStore.shared.save(t, projectSlug: projectSlug)
+            return
         }
+        // No on-disk deliverable yet (createPlan/implement never have one). Fall back to the agent.
+        let name = Self.agentName(id: t.id, phase: t.phase)
+        guard let obj = await herdr(["agent", "get", name], cwd: nil),
+              let status = agentStatus(obj),
+              status == Herdr.AgentState.idle || status == Herdr.AgentState.done else { return }
+        // An agent idling at its prompt with nothing to show stays idle indefinitely, and this runs
+        // every few seconds — so only pay for the scrollback read when herdr says something actually
+        // changed since we last looked. `state_change_seq` moves on every status transition.
+        guard seqChanged(obj, for: name) else { return }
+        await landFinishedTurn(&t, projectSlug: projectSlug, projectRoot: projectRoot)
+    }
+
+    /// True when this agent's `state_change_seq` differs from the last one we acted on (and records
+    /// the new value). Missing seq → always true, so a herdr without it degrades to polling.
+    private func seqChanged(_ obj: [String: Any], for name: String) -> Bool {
+        guard let agent = (obj["result"] as? [String: Any])?["agent"] as? [String: Any],
+              let seq = agent["state_change_seq"] as? Int else { return true }
+        guard lastSeenSeq[name] != seq else { return false }
+        lastSeenSeq[name] = seq
+        return true
+    }
+
+    /// The deterministic deliverable path the current phase writes. See `TaskTransition`.
+    private static func expectedArtifact(_ task: ProjectTask, projectSlug: String) -> URL? {
+        TaskTransition.expectedArtifact(phase: task.phase, projectSlug: projectSlug, taskID: task.id)
     }
 
     public func answer(_ task: ProjectTask, projectSlug: String, projectRoot: URL, text: String) async {
         guard task.worktree?.paneID != nil else { return }
         var t = task
-        let result = await herdr(["agent", "prompt", Self.agentName(id: t.id, phase: t.phase), text,
-                                  "--wait", "--until", "blocked", "--until", "done",
-                                  "--timeout", "600000"], cwd: projectRoot)
+        launching.insert(t.id)
         t.status = .running
         t.updatedAt = Date().timeIntervalSince1970
         try? TaskStore.shared.save(t, projectSlug: projectSlug)
+        let name = Self.agentName(id: t.id, phase: t.phase)
+        await herdr(["agent", "prompt", name, text], cwd: projectRoot)
+        let result = await waitForTurn(name, cwd: projectRoot, timeoutMS: "600000")
+        launching.remove(t.id)
         await observe(&t, promptResult: result, projectSlug: projectSlug, projectRoot: projectRoot)
     }
 
@@ -91,6 +155,8 @@ public actor TaskRunner {
     /// mirrors the Worktrees resume-session button, so repeated clicks don't spam the live session.
     public func openInHerdr(_ task: ProjectTask, phase: TaskPhase, projectSlug: String, projectRoot: URL) async {
         var t = task
+        launching.insert(t.id)
+        defer { launching.remove(t.id) }
         t.phase = phase
         let commands = Self.taskCommands(for: projectRoot)
         guard Self.commandAvailable(for: phase, in: commands) else {
@@ -106,9 +172,11 @@ public actor TaskRunner {
         }
         // Fresh tab+pane+session (closes the previous phase's tab).
         guard let pane = await openPhaseTab(&t, phase: phase, projectSlug: projectSlug) else { return }
-        // Hand-off: the agent runs interactively in herdr (no --wait, so we can't observe it).
-        // Leave the record in awaitingReview so the user keeps control (Next/Retry re-drive it).
-        t.status = .awaitingReview
+        // Hand-off: the agent runs interactively in herdr (no --wait, so we can't observe it here).
+        // It IS running, so say so — `AppState.driveRunningTasks` polls the live agent and lands the
+        // task in `.awaitingReview`/`.blocked` when it stops. Marking it awaitingReview up front (as
+        // this used to) made every hand-off phase read "Waiting" for its entire run.
+        t.status = .running
         // No observe() runs on a hand-off, so pin the deliverable path here (deterministic, matches
         // what phasePrompt passes the agent) — else AppState's merge + the UI file-exists check,
         // which both key off links.brainstormPath, never fire and the panel stays stuck.
@@ -271,6 +339,11 @@ public actor TaskRunner {
             return
         }
 
+        // Held for the whole phase: the task is `.running` from here on, and resolveRunning must
+        // not race the launch (a not-yet-prompted agent reads as `idle`) or this very observer.
+        launching.insert(task.id)
+        defer { launching.remove(task.id) }
+
         let commands = Self.taskCommands(for: projectRoot)
         guard Self.commandAvailable(for: phase, in: commands) else {
             fail(&task, projectSlug); return
@@ -337,13 +410,36 @@ public actor TaskRunner {
         }
         guard await agentReady(agentName) else { return nil }   // never came up → observe() fails the phase
         let prompt = Self.phasePrompt(task, phase: phase, projectSlug: projectSlug)
-        var args = ["agent", "prompt", agentName, prompt]
+        let cwd = URL(filePath: wtPath)
+        await herdr(["agent", "prompt", agentName, prompt], cwd: cwd)
         // Implement gets a longer window: it is always subagent-driven (one implementer per plan
         // task plus reviews), so 30 min genuinely runs out on multi-task plans (the wait still
-        // returns early on blocked/done — the timeout only caps a phase that never yields).
+        // returns early on idle/blocked — the timeout only caps a phase that never yields).
         let timeoutMS = phase == .implement ? "3600000" : "1800000"
-        if wait { args += ["--wait", "--until", "blocked", "--until", "done", "--timeout", timeoutMS] }
-        return await herdr(args, cwd: URL(filePath: wtPath))
+        return await waitForTurn(agentName, cwd: cwd, timeoutMS: wait ? timeoutMS : nil)
+    }
+
+    /// Wait for the agent to pick the prompt up, then (when `timeoutMS` is given) for its turn to
+    /// end. Returns the terminal `agent wait` JSON, or nil on a hand-off (`timeoutMS == nil`).
+    ///
+    /// The pick-up wait is not optional. Claude sits at `idle` whenever it is at its prompt —
+    /// including the instant BEFORE our prompt reaches it — so waiting straight for `idle` would
+    /// return immediately and report a phase that never ran as finished. Waiting for `working`
+    /// first makes the later `idle` mean what we need it to mean, for this wait and for
+    /// `resolveRunning`'s poll alike. It is bounded, so a turn that somehow completes inside the
+    /// window just falls through to the real wait.
+    private func waitForTurn(_ agentName: String, cwd: URL?, timeoutMS: String?) async -> [String: Any]? {
+        await herdr(["agent", "wait", agentName, "--until", Herdr.AgentState.working,
+                     "--timeout", "20000"], cwd: cwd)
+        guard let timeoutMS else { return nil }
+        // `done` is in herdr's status enum but its Claude manifest never emits it — `idle` is how a
+        // finished turn actually reports. Waiting only on blocked/done (as this used to) meant every
+        // waited phase ran out its 30-minute timeout and then landed in `.failed`.
+        return await herdr(["agent", "wait", agentName,
+                            "--until", Herdr.AgentState.idle,
+                            "--until", Herdr.AgentState.blocked,
+                            "--until", Herdr.AgentState.done,
+                            "--timeout", timeoutMS], cwd: cwd)
     }
 
     /// The named agent exists and is interactive-ready (source of truth = `agent list`).
@@ -354,7 +450,7 @@ public actor TaskRunner {
         return agents.contains { ($0["name"] as? String) == name && ($0["interactive_ready"] as? Bool) == true }
     }
 
-    /// Post-prompt: route artifact by phase, always land in `.awaitingReview` (no chaining).
+    /// Post-`--wait`: route the artifact and land the task (no chaining to the next phase).
     private func observe(_ task: inout ProjectTask, promptResult: [String: Any]?,
                          projectSlug: String, projectRoot: URL) async {
         if task.phase == .implement { await captureSessionID(into: &task, projectSlug: projectSlug) }
@@ -364,34 +460,74 @@ public actor TaskRunner {
             task.status = .blocked; task.updatedAt = Date().timeIntervalSince1970
             try? TaskStore.shared.save(task, projectSlug: projectSlug); return
         }
-        guard statusIsDone(w) else { fail(&task, projectSlug); return }
+        // Anything else (a `{"error":{"code":"timeout"}}` payload, `unknown`) is a phase that
+        // never yielded — fail it so the UI offers Retry.
+        guard statusIsFinished(w) else { fail(&task, projectSlug); return }
 
-        await resolvePhaseArtifact(&task, projectSlug: projectSlug, projectRoot: projectRoot)
+        await landFinishedTurn(&task, projectSlug: projectSlug, projectRoot: projectRoot)
     }
 
-    /// Read the agent's scrollback for the current phase, route the parsed artifact into `task.links`,
-    /// and land the task in `.awaitingReview`. Shared by `observe` (post-`--wait`) and `resolveBlocked`
-    /// (FileWatcher poll of a blocked task the user answered in herdr).
-    private func resolvePhaseArtifact(_ task: inout ProjectTask, projectSlug: String, projectRoot: URL) async {
+    /// The agent's turn ended — decide where the task lands.
+    ///
+    /// **A finished turn is not a finished phase.** Claude reports `idle` whenever it is back at its
+    /// prompt, and that includes stopping *mid-phase* to ask the user something. Observed on the
+    /// writeSpec phase of task 5c0769f7: the agent paused to ask a question, we read that as "done"
+    /// and parked the task in `.awaitingReview` with no `specPath` — then it worked another twelve
+    /// minutes and wrote spec.md, which nothing was left watching for.
+    ///
+    /// So the deliverable decides, not the status: a turn that produced neither the phase's
+    /// `CLAUDEPIT_ARTIFACT:` marker nor its expected file lands in `.blocked` ("go answer it in
+    /// herdr"), and `resolveBlocked` promotes it to `.awaitingReview` when the artifact appears.
+    private func landFinishedTurn(_ task: inout ProjectTask, projectSlug: String, projectRoot: URL) async {
+        let original = task
+        let produced = await routeArtifact(&task, projectSlug: projectSlug, projectRoot: projectRoot)
+        task.status = produced ? .awaitingReview : .blocked
+        saveIfChanged(task, original: original, projectSlug: projectSlug)
+    }
+
+    /// Persist only when something other than the timestamp actually moved. The pollers call into
+    /// here every few seconds; writing unconditionally would bump `updatedAt`, wake the FileWatcher,
+    /// and reload the task list on a loop forever.
+    private func saveIfChanged(_ task: ProjectTask, original: ProjectTask, projectSlug: String) {
+        var compare = task; compare.updatedAt = original.updatedAt
+        guard compare != original else { return }
+        var out = task; out.updatedAt = Date().timeIntervalSince1970
+        try? TaskStore.shared.save(out, projectSlug: projectSlug)
+    }
+
+    /// Read the agent's scrollback for the current phase and route the parsed artifact into
+    /// `task.links`. Returns whether the phase actually yielded its deliverable.
+    @discardableResult
+    private func routeArtifact(_ task: inout ProjectTask, projectSlug: String, projectRoot: URL) async -> Bool {
         let agentName = Self.agentName(id: task.id, phase: task.phase)
         let phase = task.phase
         let out = await herdrRaw(["agent", "read", agentName, "--source", "recent-unwrapped", "--lines", "400"],
                                  cwd: projectRoot) ?? ""
+        // Marker first; then the deterministic path the prompt handed the agent, but only if that
+        // file actually landed. The fallback matters when the scrollback is gone (herdr restarted,
+        // pane closed) — without it the links stay empty and the detail panel has nothing to open.
+        let marked = TaskTransition.parseArtifact(from: out)
+        let expected: String? = {
+            guard let u = Self.expectedArtifact(task, projectSlug: projectSlug),
+                  FileManager.default.fileExists(atPath: u.path) else { return nil }
+            return u.path
+        }()
         switch phase {
-        case .brainstorm:  task.links.brainstormPath = TaskTransition.parseArtifact(from: out) ?? task.links.brainstormPath
-        case .writeSpec:   task.links.specPath = TaskTransition.parseArtifact(from: out) ?? task.links.specPath
-        case .createPlan:  task.links.planPath = TaskTransition.parseArtifact(from: out) ?? task.links.planPath
+        case .brainstorm:  task.links.brainstormPath = marked ?? expected ?? task.links.brainstormPath
+        case .writeSpec:   task.links.specPath = marked ?? expected ?? task.links.specPath
+        case .createPlan:  task.links.planPath = marked ?? task.links.planPath
         case .codeReview:
-            task.links.reviewPath = TaskTransition.parseArtifact(from: out) ?? task.links.reviewPath
+            task.links.reviewPath = marked ?? expected ?? task.links.reviewPath
             let parsed = TaskTransition.parseFindings(from: out)
             if !parsed.isEmpty { task.links.reviewFindings = parsed }
         case .implement:   await captureSessionID(into: &task, projectSlug: projectSlug)
         case .none:        break
         }
-
-        task.status = .awaitingReview
-        task.updatedAt = Date().timeIntervalSince1970
-        try? TaskStore.shared.save(task, projectSlug: projectSlug)
+        // Every task command ends by echoing `CLAUDEPIT_ARTIFACT:` (implement included — it echoes
+        // back the planPath), so the marker is the one universal "the phase is finished" signal.
+        // `expected` covers the case where the marker has scrolled away but the file is on disk.
+        // `implement` writes no file of its own, so only the marker can speak for it.
+        return marked != nil || expected != nil
     }
 
     private func fail(_ task: inout ProjectTask, _ slug: String) {
@@ -407,8 +543,13 @@ public actor TaskRunner {
         return Herdr.paneID(fromJSON: obj)
     }
 
-    private func statusIsBlocked(_ obj: [String: Any]) -> Bool { agentStatus(obj) == "blocked" }
-    private func statusIsDone(_ obj: [String: Any]) -> Bool { agentStatus(obj) == "done" }
+    private func statusIsBlocked(_ obj: [String: Any]) -> Bool { agentStatus(obj) == Herdr.AgentState.blocked }
+    /// The agent's turn is over. `idle` (Claude back at its prompt) is the one that actually
+    /// fires — see `Herdr.AgentState` — but accept `done` too in case a manifest starts emitting it.
+    private func statusIsFinished(_ obj: [String: Any]) -> Bool {
+        let s = agentStatus(obj)
+        return s == Herdr.AgentState.idle || s == Herdr.AgentState.done
+    }
     private func agentStatus(_ obj: [String: Any]) -> String? {
         (obj["result"] as? [String: Any])
             .flatMap { $0["agent"] as? [String: Any] }
@@ -460,10 +601,22 @@ public actor TaskRunner {
         return await currentBranch(root)
     }
 
-    private static func phasePrompt(_ task: ProjectTask, phase: TaskPhase, projectSlug: String) -> String {
+    /// The prompt a phase's agent receives.
+    ///
+    /// Line 1 is the phase's slash-command, alone — Claude Code hands EVERYTHING after it to the
+    /// command as `$ARGUMENTS`, newlines included, so the rest is a structured markdown brief a
+    /// human can read in the herdr pane instead of a one-line `key=value` blob. The `key=value`
+    /// lines survive verbatim (one per line, under `## Paths`) because every task command reads
+    /// its paths by name ("the absolute `specPath=` in the arguments").
+    ///
+    /// The second line names the command explicitly: it is the phase's only instruction set, it is
+    /// the file the user can edit/disable in App Settings, and it must not be visually buried.
+    static func phasePrompt(_ task: ProjectTask, phase: TaskPhase, projectSlug: String) -> String {
         let dir = Paths.taskDir(projectSlug: projectSlug, id: task.id).path
         let brainstorm = Paths.taskBrainstormFile(projectSlug: projectSlug, id: task.id).path
         let today = Self.todayString()
+        let command = "/claudepit-task-\(phase.commandName)"
+
         var kv: [String]
         if phase == .brainstorm {
             // Brainstorm is a PRE-SPEC step: send ONLY the task definition + brainstormPath.
@@ -480,24 +633,71 @@ public actor TaskRunner {
                   "reviewPath=\(dir)/review.md",
                   "worktreePath=\(wtPath)", "today=\(today)"]
         }
-        if !task.name.isEmpty { kv.append("name=\(task.name)") }
         // Attachments live in <taskDir>/attachments/ — always point the agent at them (all phases)
         // so images/docs the user attached are usable context, mirroring the other kv fields.
         let attachDir = Paths.taskAttachmentsDir(projectSlug: projectSlug, id: task.id)
         let attachments = (try? FileManager.default.contentsOfDirectory(atPath: attachDir.path)) ?? []
         let visibleAttachments = attachments.filter { !$0.hasPrefix(".") }.sorted()
-        if !visibleAttachments.isEmpty {
-            kv.append("attachmentsDir=\(attachDir.path)")
-        }
-        let reqs = task.requirements.map { "- \($0)" }.joined(separator: "\n")
-        var extra = ""
+        if !visibleAttachments.isEmpty { kv.append("attachmentsDir=\(attachDir.path)") }
+
+        var out: [String] = [command, ""]
+        out.append("You are running the **\(phase.title)** phase\(Self.stepSuffix(phase, in: task.plannedPhases)) "
+                   + "of Claudepit task `\(task.id)`.")
+        out.append("`\(command)` (invoked on the first line) is your complete instruction set for this "
+                   + "phase — follow it exactly. Everything below is its arguments.")
+
+        out.append("")
+        out.append("## Task")
+        out.append(task.name.isEmpty ? "_(unnamed — see the description)_" : task.name)
+        let meta = Self.metaLines(task)
+        if !meta.isEmpty { out += meta }
+
+        // Task definition is the brief for the pre-spec phases; downstream phases argue from the
+        // spec/plan instead (passed as paths), so repeating it there would compete with them.
         if phase == .brainstorm || phase == .writeSpec {
-            extra = "\nTask: \(task.name)\n\(task.description)\nRequirements:\n\(reqs)"
+            out.append("")
+            out.append("## Description")
+            let desc = task.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(desc.isEmpty ? "_(none given — clarify with the user)_" : desc)
+
+            out.append("")
+            out.append("## Requirements")
+            out += task.requirements.isEmpty ? ["_(none recorded yet)_"] : task.requirements.map { "- \($0)" }
         }
+
         if !visibleAttachments.isEmpty {
-            extra += "\nAttachments (in attachmentsDir):\n" + visibleAttachments.map { "- \($0)" }.joined(separator: "\n")
+            out.append("")
+            out.append("## Attachments")
+            out.append("User-provided context — read every file below from `attachmentsDir`:")
+            out += visibleAttachments.map { "- \($0)" }
         }
-        return "/claudepit-task-\(phase.commandName) \(kv.joined(separator: " "))\(extra)"
+
+        out.append("")
+        out.append("## Paths (absolute — use exactly as given)")
+        // A key whose artifact doesn't exist yet is stated in words rather than emitted as a bare
+        // `key=` — an empty value reads as a path and the agent resolves it against the cwd.
+        out += kv.filter { !$0.hasSuffix("=") }
+        let missing = kv.filter { $0.hasSuffix("=") }.map { String($0.dropLast()) }
+        if !missing.isEmpty {
+            out.append("")
+            out.append("Not produced yet (no file exists for these): \(missing.joined(separator: ", ")).")
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// " (step 2 of 5)" when the phase is part of the task's pipeline, else "".
+    private static func stepSuffix(_ phase: TaskPhase, in planned: [TaskPhase]) -> String {
+        guard let idx = planned.firstIndex(of: phase) else { return "" }
+        return " (step \(idx + 1) of \(planned.count))"
+    }
+
+    /// Optional one-line task facts — emitted only when they carry information.
+    private static func metaLines(_ task: ProjectTask) -> [String] {
+        var out: [String] = []
+        if let topic = task.topic, !topic.isEmpty { out.append("Topic: \(topic)") }
+        if task.priority != .normal { out.append("Priority: \(task.priority.label)") }
+        if !task.tags.isEmpty { out.append("Tags: \(task.tags.joined(separator: ", "))") }
+        return out.isEmpty ? [] : [""] + out
     }
 
     static func kebab(_ s: String) -> String {

@@ -71,10 +71,26 @@ public enum Herdr {
             .flatMap { $0["pane_id"] as? String }
     }
 
+    /// One row of `herdr agent list`.
+    ///
+    /// `sessionID` is **optional**: herdr only reports `agent_session` for agents it has managed
+    /// to bind to a Claude session, and a task agent started into a fresh worktree pane reports
+    /// none at all. Requiring one used to drop every task agent from the list, which silently
+    /// disabled the Tasks board's live running/waiting indicator. `name` is the agent's herdr
+    /// name (`task-<id>-<phase>` for tasks) — the stable way to find a task's agent, since pane
+    /// ids get recycled.
     public struct AgentEntry: Sendable {
-        public let sessionID: String
+        public let sessionID: String?
+        public let name: String?
         public let paneID: String
         public let status: String
+    }
+
+    /// Agent status vocabulary herdr reports (`AgentStatus` in its API schema).
+    /// Note that the Claude detection manifest only ever emits `idle`/`working`/`blocked`/
+    /// `unknown` — **never `done`** — so "the turn finished" reads as `idle`, not `done`.
+    public enum AgentState {
+        public static let idle = "idle", working = "working", blocked = "blocked", done = "done"
     }
 
     public struct WorktreeCreateResult: Sendable {
@@ -120,11 +136,11 @@ public enum Herdr {
               let result = obj["result"] as? [String: Any],
               let agents = result["agents"] as? [[String: Any]] else { return [] }
         return agents.compactMap { a in
-            guard let session = a["agent_session"] as? [String: Any],
-                  let sid = session["value"] as? String,
-                  let pane = a["pane_id"] as? String,
+            guard let pane = a["pane_id"] as? String,
                   let status = a["agent_status"] as? String else { return nil }
-            return AgentEntry(sessionID: sid, paneID: pane, status: status)
+            let sid = (a["agent_session"] as? [String: Any])?["value"] as? String
+            return AgentEntry(sessionID: (sid?.isEmpty == false) ? sid : nil,
+                              name: a["name"] as? String, paneID: pane, status: status)
         }
     }
 
