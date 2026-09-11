@@ -30,8 +30,8 @@ public struct PlanQARunner {
         """
     }
 
-    public static func improve(_ prompt: String, configDir: String? = nil) async throws -> String {
-        return try await ask(prompt, configDir: configDir)
+    public static func improve(_ prompt: String, cwd: URL? = nil) async throws -> String {
+        return try await ask(prompt, cwd: cwd)
     }
 
     public static func buildPrompt(
@@ -63,7 +63,11 @@ public struct PlanQARunner {
         return parts.joined(separator: "\n")
     }
 
-    public static func ask(_ prompt: String, configDir: String? = nil) async throws -> String {
+    /// `cwd` is the project the answer is about — the app's active path. It lets the
+    /// model read the repo it's being asked about; without it the subprocess inherits
+    /// wherever the app happened to be launched from. Writes are auto-denied in `-p`
+    /// mode, so this grants reads only.
+    public static func ask(_ prompt: String, cwd: URL? = nil) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             Task.detached(priority: .userInitiated) {
                 guard let claudePath = resolveClaudePath() else {
@@ -72,17 +76,10 @@ public struct PlanQARunner {
                 }
                 let p = Process()
                 p.executableURL = URL(filePath: "/usr/bin/env")
-                p.arguments = [claudePath, "-p",
-                               "--no-session-persistence",
-                               "--bare",
-                               "--output-format", "text"]
-
-                var env = ProcessInfo.processInfo.environment
-                let current = env["PATH"] ?? ""
-                env["PATH"] = ([current] + Executable.searchDirs()).joined(separator: ":")
-                // ponytail: use real ~/.claude so credentials are available; --bare prevents hooks from firing
-                env["CLAUDE_CONFIG_DIR"] = configDir ?? "\(NSHomeDirectory())/.claude"
-                p.environment = env
+                p.arguments = ClaudeCLI.printArgs(
+                    claudePath: claudePath, extra: ["--output-format", "text"])
+                p.environment = ClaudeCLI.environment()
+                if let cwd { p.currentDirectoryURL = cwd }
 
                 let stdin = Pipe()
                 let stdout = Pipe()
@@ -108,8 +105,12 @@ public struct PlanQARunner {
 
                 let status = p.terminationStatus
                 if status != 0 {
-                    let errText = String(data: errData, encoding: .utf8) ?? ""
-                    continuation.resume(throwing: PlanQAError.processFailed(status, errText))
+                    // `Not logged in` arrives on stdout with an empty stderr, so the
+                    // message has to come from both streams or it's lost.
+                    let message = ClaudeCLI.failureMessage(
+                        stdout: String(data: outData, encoding: .utf8) ?? "",
+                        stderr: String(data: errData, encoding: .utf8) ?? "")
+                    continuation.resume(throwing: PlanQAError.processFailed(status, message))
                     return
                 }
                 let result = (String(data: outData, encoding: .utf8) ?? "")

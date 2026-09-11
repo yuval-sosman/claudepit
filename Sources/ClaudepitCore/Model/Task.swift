@@ -1,12 +1,12 @@
 import Foundation
 
 public enum TaskPhase: String, Codable, CaseIterable, Sendable {
-    case brainstorm, writeSpec, createPlan, implement, verify, codeReview
+    case brainstorm, writeSpec, createPlan, implement, codeReview
 
     public var producesArtifact: Bool {
         switch self {
         case .brainstorm, .writeSpec, .createPlan, .codeReview: return true
-        case .implement, .verify: return false   // session capture / verifyPassed instead
+        case .implement: return false   // session capture instead
         }
     }
     public var title: String {
@@ -15,7 +15,6 @@ public enum TaskPhase: String, Codable, CaseIterable, Sendable {
         case .writeSpec:   return "Write Spec"
         case .createPlan:  return "Create Plan"
         case .implement:   return "Implement"
-        case .verify:      return "Verify"
         case .codeReview:  return "Code Review"
         }
     }
@@ -25,7 +24,6 @@ public enum TaskPhase: String, Codable, CaseIterable, Sendable {
         case .writeSpec:   return "Spec"
         case .createPlan:  return "Plan"
         case .implement:   return "Impl"
-        case .verify:      return "Verify"
         case .codeReview:  return "Review"
         }
     }
@@ -37,7 +35,6 @@ public enum TaskPhase: String, Codable, CaseIterable, Sendable {
         case .writeSpec:   return "spec"
         case .createPlan:  return "plan"
         case .implement:   return "implement"
-        case .verify:      return "verify"
         case .codeReview:  return "review"
         }
     }
@@ -47,7 +44,6 @@ public enum TaskPhase: String, Codable, CaseIterable, Sendable {
         case .writeSpec:   return "doc.text"
         case .createPlan:  return "list.bullet.rectangle"
         case .implement:   return "hammer"
-        case .verify:      return "checkmark.shield"
         case .codeReview:  return "magnifyingglass"
         }
     }
@@ -127,16 +123,15 @@ public struct TaskLinks: Codable, Sendable, Equatable {
     public var planPath: String?
     public var reviewPath: String?
     public var sessionIDs: [String]
-    public var verifyPassed: Bool?
     public var reviewFindings: [ReviewFinding]
     public init(brainstormPath: String? = nil, brainstormSuggestions: [BrainstormSuggestion] = [],
                 specPath: String? = nil, planPath: String? = nil,
                 reviewPath: String? = nil, sessionIDs: [String] = [],
-                verifyPassed: Bool? = nil, reviewFindings: [ReviewFinding] = []) {
+                reviewFindings: [ReviewFinding] = []) {
         self.brainstormPath = brainstormPath; self.brainstormSuggestions = brainstormSuggestions
         self.specPath = specPath; self.planPath = planPath
         self.reviewPath = reviewPath; self.sessionIDs = sessionIDs
-        self.verifyPassed = verifyPassed; self.reviewFindings = reviewFindings
+        self.reviewFindings = reviewFindings
     }
 }
 
@@ -201,7 +196,7 @@ public struct ProjectTask: Codable, Identifiable, Sendable, Equatable {
     public var updatedAt: TimeInterval
     public var links: TaskLinks
 
-    public static let defaultPhases: [TaskPhase] = [.writeSpec, .createPlan, .implement, .verify, .codeReview]
+    public static let defaultPhases: [TaskPhase] = [.writeSpec, .createPlan, .implement, .codeReview]
 
     public init(version: Int = 2,
                 id: String = String(UUID().uuidString.prefix(8).lowercased()),

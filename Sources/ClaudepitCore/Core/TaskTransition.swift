@@ -127,14 +127,6 @@ public enum TaskTransition {
         return v
     }
 
-    /// Last-marker-wins parse of `CLAUDEPIT_VERIFY: pass|fail`.
-    public static func parseVerify(from output: String) -> Bool? {
-        guard let val = lastMarker(in: output, marker: "CLAUDEPIT_VERIFY:")?.lowercased() else { return nil }
-        if val == "pass" { return true }
-        if val == "fail" { return false }
-        return nil
-    }
-
     // MARK: - helpers
 
     private static func lastMarker(in output: String, marker: String) -> String? {

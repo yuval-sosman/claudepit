@@ -39,7 +39,12 @@ if [[ "${WRITES_SINCE_DREAM}" -ge 10 ]]; then
   MSG="When you finish implementing something, always use the Custom Memory Strategy to maintain memory for these changes. Do not wait for the user to ask. Do it before session stops.
 
 DREAMING CYCLE — your memory log has reached ${WRITES_SINCE_DREAM} writes since last consolidation.
-Before this session ends, run the full 11-step memory consolidation:
+Before this session ends, run the full 11-step memory consolidation. Do NOT run it inline in this
+session — dispatch it to a subagent so consolidation doesn't burn this session's own context.
+
+Use the Task tool to launch one general-purpose subagent on the latest Sonnet model
+(claude-sonnet-5). Give it this checklist verbatim as its prompt, including the session ID
+${SESSION_ID} for step 11, and wait for it to finish before the session ends:
 
 1. Inventory — read MEMORY.md, list memory/ recursively, find orphans
 2. Full read — read every topic file (check updated date, claims, links, sources)

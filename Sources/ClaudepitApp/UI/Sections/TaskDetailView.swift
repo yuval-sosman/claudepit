@@ -351,8 +351,8 @@ struct TaskDetailView: View {
             writeSpecPanel
         case .createPlan:
             createPlanPanel
-        case .implement, .verify:
-            implementVerifyPanel
+        case .implement:
+            implementPanel
         case .codeReview:
             codeReviewPanel
         case .none:
@@ -441,13 +441,8 @@ struct TaskDetailView: View {
         }
     }
 
-    private var implementVerifyPanel: some View {
+    private var implementPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if task.phase == .verify, let passed = task.links.verifyPassed {
-                Label(passed ? "Verification passed" : "Verification failed",
-                      systemImage: passed ? "checkmark.shield.fill" : "xmark.shield.fill")
-                    .foregroundStyle(passed ? .green : .red)
-            }
             if task.worktree != nil {
                 Button("Review changes") {
                     guard let wt = task.worktree else { return }

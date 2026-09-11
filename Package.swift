@@ -25,8 +25,7 @@ let package = Package(
             resources: [
                 .copy("Resources/d3.min.js"),
                 .copy("Resources/hooks-lifecycle.png"),
-            ],
-            swiftSettings: [.unsafeFlags(["-parse-as-library"])]
+            ]
         ),
         // Assert-based checks (no XCTest — this machine has only the CLI toolchain,
         // and XCTest/Testing ship with full Xcode). Run: `swift run ClaudepitTests`.

@@ -4,6 +4,8 @@ import Foundation
 // Add each task's check group to `groups` below.
 
 let groups: [(String, () -> [Bool])] = [
+    ("ClaudeCLI", claudeCLIChecks),
+    ("ClaudeAuth", claudeAuthChecks),
     ("JSONFile", jsonFileChecks),
     ("PluginScanner", pluginScannerChecks),
     ("ConfigScanner", configScannerChecks),
@@ -20,6 +22,7 @@ let groups: [(String, () -> [Bool])] = [
     ("WorktreeInspector", worktreeInspectorChecks),
     ("DiffHunks", diffHunksChecks),
     ("WorktreeStager", worktreeStagerChecks),
+    ("WorktreeResumer", worktreeResumerChecks),
     ("HomeAttention", homeAttentionChecks),
     ("MemoryLog", memoryLogChecks),
     ("AppConfigStore", appConfigStoreChecks),
@@ -29,6 +32,9 @@ let groups: [(String, () -> [Bool])] = [
     ("ManagedInstaller", managedInstallerChecks),
     ("HookScripts", hookScriptsChecks),
     ("TaskCommandGuard", taskCommandGuardChecks),
+    ("TaskModel", taskModelChecks),
+    ("TopicStore", topicStoreChecks),
+    ("BrainstormChangeSource", brainstormChangeSourceChecks),
 ]
 
 var results: [Bool] = []

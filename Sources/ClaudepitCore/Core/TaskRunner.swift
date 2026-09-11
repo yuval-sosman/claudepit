@@ -44,7 +44,7 @@ public actor TaskRunner {
     /// agent directly in herdr; agent status is unreliable (Claude Code rests at "blocked" whenever it's
     /// awaiting input — even after finishing — and the task's stored pane/tab may no longer match a live
     /// agent). So: if the phase's expected artifact FILE now exists, route it and land `.awaitingReview`.
-    /// Phases without a deterministic on-disk deliverable (createPlan/implement/verify) can't self-heal
+    /// Phases without a deterministic on-disk deliverable (createPlan/implement) can't self-heal
     /// here — the user advances them manually. Called on each FileWatcher tick by AppState.
     public func resolveBlocked(_ task: ProjectTask, projectSlug: String, projectRoot: URL) async {
         guard task.status == .blocked else { return }
@@ -63,8 +63,8 @@ public actor TaskRunner {
     }
 
     /// The deterministic deliverable path a phase writes (matches `phasePrompt`'s kv defaults).
-    /// nil for phases with no fixed on-disk file (createPlan picks its own plans filename; implement/verify
-    /// produce no artifact file).
+    /// nil for phases with no fixed on-disk file (createPlan picks its own plans filename; implement
+    /// produces no artifact file).
     private static func expectedArtifact(_ task: ProjectTask, projectSlug: String) -> URL? {
         switch task.phase {
         case .brainstorm: return Paths.taskBrainstormFile(projectSlug: projectSlug, id: task.id)
@@ -157,7 +157,7 @@ public actor TaskRunner {
             return wt
         }
         let branch = "task/\(task.id)-\(Self.kebab(task.name))"
-        let base = await currentBranch(projectRoot) ?? "main"
+        let base = await trunkBranch(projectRoot) ?? "main"
         // Pin the worktree under <project>/.claude/worktrees/ (the convention WorktreeScanner
         // scans + the slug that binds sessions to this project). Herdr's default location
         // (~/.herdr/worktrees/…) has a different slug, so those sessions never surface.
@@ -192,6 +192,11 @@ public actor TaskRunner {
             let data = Data(cmd.body.utf8)
             if (try? Data(contentsOf: dest)) != data { try? data.write(to: dest) }
         }
+        // Retired commands (their catalog entries are gone) linger in worktrees created by
+        // older builds — sweep them so the slash-command list doesn't offer dead phases.
+        for f in HookScripts.retiredTaskCommandFilenames {
+            try? FileManager.default.removeItem(at: dir.appending(path: f))
+        }
         // Keep them out of the branch via git's exclude file. In a LINKED worktree `.git` is a
         // FILE (not a dir), so <wt>/.git/info/exclude doesn't exist — ask git for the real path
         // (it resolves to the shared <main>/.git/info/exclude).
@@ -200,10 +205,11 @@ public actor TaskRunner {
     }
 
     /// Hard-block the agent from staging/committing in the worktree. The prompt tells it not to,
-    /// but the agent runs with --dangerously-skip-permissions; that flag skips *prompts*, NOT
-    /// `permissions.deny` rules (nor exit-2 hook blocks). A worktree-scoped settings.local.json
-    /// (discovered from the agent's cwd, never in the branch) is the only reliable enforcement.
-    /// ponytail: deny-first survives bypass mode — see docs/permissions "deny-first precedence".
+    /// but the agent runs with --permission-mode auto; that mode auto-approves via a classifier
+    /// and doesn't consult `permissions.deny` rules as part of its decision (nor exit-2 hook
+    /// blocks). A worktree-scoped settings.local.json (discovered from the agent's cwd, never in
+    /// the branch) is the only reliable enforcement.
+    /// ponytail: deny-first survives auto mode too — see docs/permissions "deny-first precedence".
     private static func installGitDenyList(inWorktree wtPath: String) {
         let dir = URL(filePath: wtPath).appending(path: ".claude")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -324,7 +330,7 @@ public actor TaskRunner {
         // ponytail: 5×2s ceiling; raise the count if slow shells still miss the prompt.
         for attempt in 0..<5 {
             await herdr(["agent", "start", agentName, "--kind", "claude", "--pane", pane,
-                         "--timeout", "120000", "--", "--dangerously-skip-permissions"],
+                         "--timeout", "120000", "--", "--permission-mode", "auto"],
                         cwd: URL(filePath: wtPath))
             if await agentReady(agentName) { break }
             if attempt < 4 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
@@ -332,7 +338,11 @@ public actor TaskRunner {
         guard await agentReady(agentName) else { return nil }   // never came up → observe() fails the phase
         let prompt = Self.phasePrompt(task, phase: phase, projectSlug: projectSlug)
         var args = ["agent", "prompt", agentName, prompt]
-        if wait { args += ["--wait", "--until", "blocked", "--until", "done", "--timeout", "1800000"] }
+        // Implement gets a longer window: it is always subagent-driven (one implementer per plan
+        // task plus reviews), so 30 min genuinely runs out on multi-task plans (the wait still
+        // returns early on blocked/done — the timeout only caps a phase that never yields).
+        let timeoutMS = phase == .implement ? "3600000" : "1800000"
+        if wait { args += ["--wait", "--until", "blocked", "--until", "done", "--timeout", timeoutMS] }
         return await herdr(args, cwd: URL(filePath: wtPath))
     }
 
@@ -375,7 +385,6 @@ public actor TaskRunner {
             task.links.reviewPath = TaskTransition.parseArtifact(from: out) ?? task.links.reviewPath
             let parsed = TaskTransition.parseFindings(from: out)
             if !parsed.isEmpty { task.links.reviewFindings = parsed }
-        case .verify:      task.links.verifyPassed = TaskTransition.parseVerify(from: out)
         case .implement:   await captureSessionID(into: &task, projectSlug: projectSlug)
         case .none:        break
         }
@@ -429,6 +438,26 @@ public actor TaskRunner {
         let b = await git(["-C", root.path, "rev-parse", "--abbrev-ref", "HEAD"])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (b?.isEmpty == false && b != "HEAD") ? b : nil
+    }
+
+    /// The project's trunk — task worktrees always fork from here, never from whatever
+    /// happens to be checked out, so a task never accidentally builds on top of someone's
+    /// half-finished branch. Prefers origin's default branch (works whether it's named
+    /// main/master/trunk/whatever); falls back to a local "main" or "master" branch when
+    /// there's no remote; falls back to the checked-out branch only if neither exists, so
+    /// worktree creation still succeeds somehow.
+    private func trunkBranch(_ root: URL) async -> String? {
+        if let ref = await git(["-C", root.path, "symbolic-ref", "refs/remotes/origin/HEAD"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let name = ref.split(separator: "/").last, !name.isEmpty {
+            return String(name)
+        }
+        for candidate in ["main", "master"] {
+            if await git(["-C", root.path, "rev-parse", "--verify", "--quiet", candidate]) != nil {
+                return candidate
+            }
+        }
+        return await currentBranch(root)
     }
 
     private static func phasePrompt(_ task: ProjectTask, phase: TaskPhase, projectSlug: String) -> String {

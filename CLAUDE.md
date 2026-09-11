@@ -121,7 +121,7 @@ Key files: `Sources/ClaudepitCore/Model/Task.swift` (model), `Core/TaskStore.swi
 
 **Auto-advance** — each phase has an `autoAdvance` flag. After a phase completes, `TaskTransition.onPhaseComplete` advances to the next phase (`status: .idle`) only if the flag is true; otherwise it holds with `.awaitingReview`. `AppState.driveIdleTasks()` re-invokes `start()` for any task left `.idle` on an advanced phase on the next watcher tick, chaining phases; a `driving` guard set prevents double-spawning.
 
-**Phase commands** — `ManagedInstaller.sync()` writes six `<project>/.claude/commands/claudepit-task-{brainstorm,spec,plan,implement,verify,review}.md` slash-commands on launch (**project-scoped**, Claudepit-managed projects only), **overwrite-if-changed**. Task **worktrees** get the same bodies: `TaskRunner.installCommands(inWorktree:commands:)` requires the caller to pass them, and `ensureWorktree` builds them with `ManagedInstaller.taskCommandBodies()` from the `projectRoot` it is already given — so a worktree receives the user's edited copies and honors the enable toggles instead of the `HookScripts` built-ins. `ManagedInstaller.migrateTaskCommandLocationsIfNeeded()` removes any stale global copies under `~/.claude/commands/` and the 4 pre-slash-command subagents under `~/.claude/agents/` — once per machine, recorded in the `completedMigrations` `UserDefaults` key. **Do not edit these files by hand** — edit the source in `HookScripts.swift` (`taskCommands` / `taskCommand*` strings).
+**Phase commands** — `ManagedInstaller.sync()` writes five `<project>/.claude/commands/claudepit-task-{brainstorm,spec,plan,implement,review}.md` slash-commands on launch (**project-scoped**, Claudepit-managed projects only), **overwrite-if-changed**, and sweeps retired ones (`HookScripts.retiredTaskCommandFilenames` — currently the removed `verify` phase's command; `TaskRunner.installCommands` runs the same sweep in worktrees). Tasks that still carry `verify` in `task.json` are healed on load by `TaskStore.remapRemovedPhases` (phase `verify` falls forward to `codeReview`). Task **worktrees** get the same bodies: `TaskRunner.installCommands(inWorktree:commands:)` requires the caller to pass them, and `ensureWorktree` builds them with `ManagedInstaller.taskCommandBodies()` from the `projectRoot` it is already given — so a worktree receives the user's edited copies and honors the enable toggles instead of the `HookScripts` built-ins. `ManagedInstaller.migrateTaskCommandLocationsIfNeeded()` removes any stale global copies under `~/.claude/commands/` and the 4 pre-slash-command subagents under `~/.claude/agents/` — once per machine, recorded in the `completedMigrations` `UserDefaults` key. **Do not edit these files by hand** — edit the source in `HookScripts.swift` (`taskCommands` / `taskCommand*` strings).
 
 **Deep links** — from a task's detail view, buttons jump to the produced artifact using the app's focus pattern (there is no `navHistory`/`NavEntry` — that was removed): `app.focusPlanPath = path; app.selected = .plans` and `app.focusSessionID = sid; app.selected = .sessions`. `PlansSection`/`SessionsSection` consume the focus fields via `.onChange`.
 
@@ -129,22 +129,59 @@ Key files: `Sources/ClaudepitCore/Model/Task.swift` (model), `Core/TaskStore.swi
 
 ## claude -p Subprocess Calls
 
-The app spawns `claude -p` subprocesses in several places. All user-facing calls **must** pass `--bare` and set `CLAUDE_CONFIG_DIR` to `~/.claude`. `CLAUDE_CONFIG_DIR` alone is insufficient — global hooks in `~/.claude/settings.json` (matcher `*`) still fire regardless. `--bare` skips hooks, LSP, plugins, and CLAUDE.md discovery.
+Every `claude` subprocess the app spawns goes through **`ClaudeCLI`**
+(`Sources/ClaudepitCore/Core/ClaudeCLI.swift`), which owns the argv and the environment.
+Do not hand-roll a `Process()` for `claude` — use `ClaudeCLI.printArgs` /
+`ClaudeCLI.resumeArgs` / `ClaudeCLI.environment()`.
 
-**Do not use a fresh temp dir** — it has no credentials and claude exits 1 with "Not logged in". Using `~/.claude` is safe because `--bare` prevents hooks from firing.
+**Isolation is `--safe-mode`, never `--bare`.** Scripted calls must not pick up the user's
+hooks — above all Claudepit's own `UserPromptSubmit` summary hook, which injects
+`additionalContext` and would contaminate every answer. `--safe-mode` suppresses hooks
+(user *and* project scope), CLAUDE.md, skills, plugins, MCP servers and auto-memory while
+leaving auth working. `--bare` suppresses the same things but **disables OAuth/keychain
+auth** — it accepts only `ANTHROPIC_API_KEY` or an `apiKeyHelper`, so on a subscription
+login every call fails with `Not logged in · Please run /login`. It was the cause of a
+total outage of Q&A, Discover and `/context`.
 
-| File | Purpose | Isolation required |
-|------|---------|-------------------|
-| `Sources/ClaudepitCore/Core/PlanQARunner.swift` | Plan & Memory Q&A, improvement generation | ✅ `--bare` + `CLAUDE_CONFIG_DIR=~/.claude` |
-| `Sources/ClaudepitCore/Core/DiscoverRunner.swift` | Semantic session search | ✅ `--bare` + `CLAUDE_CONFIG_DIR=~/.claude` |
-| `Sources/ClaudepitApp/UI/Sections/PluginsSection.swift` | `/reload-plugins` (fire-and-forget) | not needed |
-| `Sources/ClaudepitApp/UI/Sections/SessionDetailView.swift` | `/context` report (shown in popover) | ⚠️ `--bare` only — `-r` needs real `~/.claude`, so **no** `CLAUDE_CONFIG_DIR` override (would break resume) |
+**Never set `CLAUDE_CONFIG_DIR`.** Setting it *at all* — even to the default `~/.claude` —
+makes the CLI look up a keychain service name suffixed with a hash of the path
+(`Claude Code-credentials-<hash>`), which holds no credentials. `ClaudeCLI.environment()`
+never adds it, and deliberately does not strip an inherited one (a user who exports it
+globally has their credentials under that hashed entry). It also never removes `USER` —
+the keychain *account* name is derived from it.
 
-**Rule:** any new `claude -p` call that returns output shown to the user must pass `--bare` and set `CLAUDE_CONFIG_DIR` to `~/.claude`:
-```swift
-env["CLAUDE_CONFIG_DIR"] = "\(NSHomeDirectory())/.claude"
-// and in p.arguments: "--bare"
-```
+**Read failures from both streams.** `ClaudeCLI.failureMessage(stdout:stderr:)` prefers
+stderr and falls back to stdout, because an unknown flag reports on stderr while
+`Not logged in` arrives on **stdout** with an empty stderr and exit 1. Reading stderr alone
+silently discards the diagnostic that matters most.
+
+**Run in the active project.** User-facing calls take a `cwd` — the app's `activePath` (or
+the session's worktree, where one applies). Without it the subprocess inherits wherever the
+app was launched from. `--no-session-persistence` keeps these runs out of the project's
+session list.
+
+| File | Purpose | Flags |
+|------|---------|-------|
+| `Sources/ClaudepitCore/Core/PlanQARunner.swift` | Plan & Memory Q&A, improvement generation | `ClaudeCLI.printArgs` + `cwd` |
+| `Sources/ClaudepitCore/Core/DiscoverRunner.swift` | Semantic session search | `ClaudeCLI.printArgs` + `cwd` |
+| `Sources/ClaudepitApp/UI/Sections/SessionDetailView.swift` | `/context` report (shown in popover) | `ClaudeCLI.resumeArgs` + `cwd` |
+| `Sources/ClaudepitApp/UI/Sections/PluginsSection.swift` | `claude plugin …`, `/reload-plugins` | **none** — `--safe-mode` would disable the very plugins being managed |
+
+## Detecting a signed-out CLI
+
+`ClaudeAuth` (`Sources/ClaudepitCore/Core/ClaudeAuth.swift`) wraps
+`claude auth status --json`. Two behaviours to know: it **exits 1 when logged out** but
+still prints valid JSON, so the payload — not the exit code — decides; and a CLI too old to
+have the subcommand must land in `.checkFailed`, never `.loggedOut`, so an old install is
+never reported to the user as "signed out".
+
+`AppState.claudeAuth` caches the result. It is a **stored** `@Published` value on purpose:
+resolving it needs a subprocess, and a `Process` + `waitUntilExit()` reached from a SwiftUI
+view body aborts the app (same hazard documented on `Herdr.available()`). Never add a
+synchronous `claudeLoggedIn()` for views to call. It refreshes on launch, on
+`NSApplication.didBecomeActiveNotification` (only while signed out — the login flow
+finishes in a browser), on the banner's Recheck button, and whenever a failed call posts
+`.claudeAuthSuspect`. Not on `setActivePath`: auth is machine-global, not per-project.
 
 ## Cross-Section Deep Links (Focus Pattern)
 

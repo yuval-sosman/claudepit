@@ -268,6 +268,7 @@ struct MemorySection: View {
                 if showGraphQA {
                     PlanQAPanel(
                         planContent: allMemoryContent,
+                        cwd: app.activePath,
                         title: "Ask about all memory files",
                         showImprovement: false,
                         onAnswer: { answer in
@@ -361,6 +362,7 @@ struct MemorySection: View {
                 if showQA {
                     PlanQAPanel(
                         planContent: fileContent,
+                        cwd: app.activePath,
                         title: "Ask about this memory file",
                         showImprovement: false
                     )

@@ -26,7 +26,7 @@ struct PlanDetailView: View {
                     Divider().opacity(0.15)
 
                     if showQA {
-                        PlanQAPanel(planContent: content, planPath: plan.path) { newContent, _ in
+                        PlanQAPanel(planContent: content, cwd: app.activePath, planPath: plan.path) { newContent, _ in
                             pendingImproved = newContent
                             showQA = false
                         }

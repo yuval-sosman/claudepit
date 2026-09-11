@@ -42,7 +42,11 @@ public enum Executable {
     }
 
     /// A PATH value that includes the fallback locations, for subprocesses we spawn.
+    /// Deduped, since `searchDirs()` already starts with the inherited PATH and the
+    /// fallbacks usually repeat entries that were in it.
     public static func augmentedPATH() -> String {
-        searchDirs().filter { !$0.isEmpty }.joined(separator: ":")
+        var seen = Set<String>()
+        return searchDirs().filter { !$0.isEmpty && seen.insert($0).inserted }
+            .joined(separator: ":")
     }
 }

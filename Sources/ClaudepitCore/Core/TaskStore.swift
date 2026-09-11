@@ -12,13 +12,32 @@ public struct TaskStore: Sendable {
         for dir in dirs {
             let file = dir.appending(path: "task.json")
             guard let data = try? Data(contentsOf: file) else { continue }
-            if let t = try? JSONDecoder().decode(ProjectTask.self, from: data) {
-                out.append(t)
-            } else if let t = Self.remapV1(data) {
-                out.append(t)
-            }
+            if let t = Self.decode(data) { out.append(t) }
         }
         return out.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Plain decode, then the v2 removed-phase remap, then the lossy v1 remap.
+    static func decode(_ data: Data) -> ProjectTask? {
+        if let t = try? JSONDecoder().decode(ProjectTask.self, from: data) { return t }
+        if let t = remapRemovedPhases(data) { return t }
+        return remapV1(data)
+    }
+
+    /// v2 tasks written before the `verify` phase was removed still carry it in `phase` /
+    /// `plannedPhases`, so a plain decode fails. Strip it — a task parked AT verify falls forward
+    /// to codeReview (the phase that replaced it in the pipeline) — and decode again, losslessly
+    /// for every other field. The next save writes clean JSON.
+    static func remapRemovedPhases(_ data: Data) -> ProjectTask? {
+        guard var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        var touched = false
+        if var planned = obj["plannedPhases"] as? [String], planned.contains("verify") {
+            planned.removeAll { $0 == "verify" }
+            obj["plannedPhases"] = planned; touched = true
+        }
+        if obj["phase"] as? String == "verify" { obj["phase"] = "codeReview"; touched = true }
+        guard touched, let clean = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+        return try? JSONDecoder().decode(ProjectTask.self, from: clean)
     }
 
     /// v1 tasks used removed enum cases (`created`/`done`) and a non-optional `phase`, so a plain
@@ -69,8 +88,7 @@ public struct TaskStore: Sendable {
     public func update(id: String, projectSlug: String, _ mutate: (inout ProjectTask) -> Void) throws {
         let file = Paths.taskFile(projectSlug: projectSlug, id: id)
         let data = try Data(contentsOf: file)
-        let existing = (try? JSONDecoder().decode(ProjectTask.self, from: data)) ?? Self.remapV1(data)
-        guard var t = existing else { return }
+        guard var t = Self.decode(data) else { return }
         mutate(&t)
         t.updatedAt = Date().timeIntervalSince1970
         try save(t, projectSlug: projectSlug)

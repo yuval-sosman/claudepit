@@ -19,7 +19,7 @@ struct ClaudeMdDetailView: View {
                     Divider().opacity(0.15)
 
                     if showQA {
-                        PlanQAPanel(planContent: content, planPath: file.path,
+                        PlanQAPanel(planContent: content, cwd: app.activePath, planPath: file.path,
                                     contentLabel: "CLAUDE.md") { newContent, _ in
                             pendingImproved = newContent
                             showQA = false

@@ -17,15 +17,10 @@ extension TaskStatus {
 struct TasksSection: View {
     @ObservedObject var app: AppState
 
-    enum Mode: String, CaseIterable { case board = "Board", list = "List" }
-    @State private var mode: Mode = .board
-    @State private var selection: String?
-    @State private var showNew = false
-
     enum Sort: String, CaseIterable { case attention = "Needs attention", priority = "Priority", updated = "Recent" }
     @State private var sort: Sort = .attention   // default surfaces waiting tasks
 
-    // Board mode uses a JIRA-style right-side panel (not a modal sheet) for both
+    // The board uses a JIRA-style right-side panel (not a modal sheet) for both
     // task detail and new-task creation. nil = no panel.
     private enum Panel: Equatable { case task(String), new }
     @State private var panel: Panel? = nil
@@ -52,25 +47,20 @@ struct TasksSection: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             if !TaskRunner.herdrAvailable() {
-                Label("herdr not found — task execution is disabled.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                NoticeBanner(text: "herdr not found — task execution is disabled.")
                     .padding(.horizontal, 16)
             }
             content
         }
-        .sheet(isPresented: $showNew) { NewTaskSheet(app: app, onClose: { showNew = false }).frame(width: 540, height: 640) }
         .onAppear { app.loadTasks(); applyFocus() }
         .onChange(of: app.focusTaskID) { applyFocus() }
-        .onChange(of: mode) { if mode != .board { panel = nil } }   // panel is board-only
     }
 
     private func applyFocus() {
         guard let id = app.focusTaskID else { return }
         // Clear filters so a deep-linked task (e.g. createPlan Back-to-task) is always visible.
         statusFilter = nil; priorityFilter = nil; tagFilter = nil; timeFilter = .all
-        mode = .list; selection = id
+        panel = .task(id)
         app.focusTaskID = nil
     }
 
@@ -81,9 +71,6 @@ struct TasksSection: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                // Board/List toggle first, before the title.
-                SegmentedControl(selection: $mode) { Text($0.rawValue) }
-
                 Text("Tasks").font(.title2).bold()
 
                 Text("\(filtered.count) task\(filtered.count == 1 ? "" : "s")")
@@ -171,27 +158,9 @@ struct TasksSection: View {
 
     // MARK: Body
 
-    @ViewBuilder
     private var content: some View {
-        Group {
-            if mode == .list {
-                MasterDetailLayout(listWidth: 320) {
-                    GlassCard {
-                        if filtered.isEmpty { EmptyState("No tasks") }
-                        else { TaskListView(tasks: filtered, selection: $selection, app: app, sort: sort) }
-                    }
-                } detail: {
-                    if let id = selection, let t = app.tasks.first(where: { $0.id == id }) {
-                        TaskDetailView(task: t, app: app)
-                    } else {
-                        GlassCard { EmptyState("Select a task") }
-                    }
-                }
-            } else {
-                boardWithPanel
-            }
-        }
-        .padding(.horizontal, 16).padding(.bottom, 16)
+        boardWithPanel
+            .padding(.horizontal, 16).padding(.bottom, 16)
     }
 
     // Board + JIRA-style right-side panel. Wide → panel (40% w, floored 380) sits
@@ -204,8 +173,7 @@ struct TasksSection: View {
             HStack(spacing: 20) {
                 if panel == nil || sideBySide {
                     GlassCard {
-                        if filtered.isEmpty { EmptyState("No tasks") }
-                        else { TaskBoardView(tasks: filtered, app: app, sort: sort) { panel = .task($0) } }
+                        TaskBoardView(tasks: filtered, app: app, sort: sort) { panel = .task($0) }
                     }
                 }
                 if let p = panel {
@@ -236,8 +204,5 @@ struct TasksSection: View {
         }
     }
 
-    /// New Task: board mode opens the side panel; list mode keeps the modal sheet.
-    private func newTask() {
-        if mode == .board { panel = .new } else { showNew = true }
-    }
+    private func newTask() { panel = .new }
 }

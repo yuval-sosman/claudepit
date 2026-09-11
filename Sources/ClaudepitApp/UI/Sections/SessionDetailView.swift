@@ -37,6 +37,21 @@ struct SessionDetailView: View {
         return app.worktrees.first { $0.ownerSessionID == ownerID }
     }
 
+    /// Working directory for this view's `claude` subprocesses. Prefers the session's
+    /// worktree over the project root — same chain the Resume button uses (and unlike
+    /// `Paths.projectPath(for:)`, which reverses a slug by replacing every "-" with "/"
+    /// and so mangles any project path containing a hyphen).
+    private var qaWorkingDirectory: URL? {
+        if let wt = currentWorktree { return URL(filePath: wt.path) }
+        return app.activePath
+    }
+
+    /// Model of the most recent assistant response — same value shown in the last
+    /// `TurnUsageLine`, surfaced here too so it's visible without scrolling.
+    private var currentModel: String? {
+        responseUsage.max(by: { $0.key < $1.key })?.value.model
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let parent = parentSummary, let back = onBack {
@@ -75,6 +90,9 @@ struct SessionDetailView: View {
                 .padding(.horizontal, 7).padding(.vertical, 3)
                 .background(.white.opacity(0.06), in: Capsule())
                 Spacer()
+                if let model = currentModel {
+                    ModelBadge(model: model)
+                }
                 if parentSummary == nil {
                     Button {
                         app.focusSessionID = summary.id
@@ -240,7 +258,7 @@ struct SessionDetailView: View {
         }
         guard !text.isEmpty else { return }
         let prompt = HookScripts.onDemandSummaryPrompt(transcriptText: String(text.prefix(8000)))
-        guard let raw = try? await PlanQARunner.ask(prompt) else { return }
+        guard let raw = try? await PlanQARunner.ask(prompt, cwd: qaWorkingDirectory) else { return }
         let bullets = raw.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard !bullets.isEmpty else { return }
         let entry = SessionBulletSummary(bullets: bullets, updatedAt: Date())
@@ -374,25 +392,32 @@ struct SessionDetailView: View {
             .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                Button {
-                    loadingContext = true
-                    let id = summary.id
-                    let projectDir = Paths.projectPath(for: summary.projectSlug)
-                    Task.detached {
-                        let out = runContextCommand(sessionID: id, cwd: projectDir)
-                        await MainActor.run { contextReport = out; loadingContext = false }
+                // Sub-agents are sidechains within the parent's own conversation, not standalone
+                // `claude` CLI sessions — `summary.id` here is the internal agentId (the
+                // "agent-<id>.jsonl" stem), which `claude -p --resume` doesn't recognize and always
+                // rejects as "not a UUID and does not match any session title". Only offer the
+                // live /context resume for a real top-level session.
+                if parentSummary == nil {
+                    Button {
+                        loadingContext = true
+                        let id = summary.id
+                        let projectDir = qaWorkingDirectory
+                        Task.detached {
+                            let out = runContextCommand(sessionID: id, cwd: projectDir)
+                            await MainActor.run { contextReport = out; loadingContext = false }
+                        }
+                    } label: {
+                        if loadingContext {
+                            HStack(spacing: 4) { ProgressView().scaleEffect(0.6).frame(width: 12, height: 12); Text("Context…") }
+                        } else {
+                            Label("Context", systemImage: "chart.pie").labelStyle(.titleAndIcon)
+                        }
                     }
-                } label: {
-                    if loadingContext {
-                        HStack(spacing: 4) { ProgressView().scaleEffect(0.6).frame(width: 12, height: 12); Text("Context…") }
-                    } else {
-                        Label("Context", systemImage: "chart.pie").labelStyle(.titleAndIcon)
+                    .disabled(loadingContext).help("Show /context breakdown")
+                    .popover(isPresented: Binding(get: { contextReport != nil }, set: { if !$0 { contextReport = nil } }),
+                             arrowEdge: .bottom) {
+                        ContextReportView(report: contextReport ?? "").frame(width: 460, height: 560)
                     }
-                }
-                .disabled(loadingContext).help("Show /context breakdown")
-                .popover(isPresented: Binding(get: { contextReport != nil }, set: { if !$0 { contextReport = nil } }),
-                         arrowEdge: .bottom) {
-                    ContextReportView(report: contextReport ?? "").frame(width: 460, height: 560)
                 }
 
                 Spacer()
@@ -408,11 +433,18 @@ struct SessionDetailView: View {
         HStack(spacing: 4) { Text(label); Text(value.formatted()).foregroundStyle(.primary) }
     }
 
-    /// Context window for a model id. 200K covers all current Claude models; the
-    /// Sonnet 1M-context beta ("[1m]" suffix) is the only exception today.
-    /// ponytail: extend this switch if new tiers ship.
+    /// Context window for a model id. Current-gen models (Fable/Mythos 5, Opus 5, Opus 4.6–4.8,
+    /// Sonnet 5, Sonnet 4.6) default to a 1M window with no opt-in flag — Haiku and every
+    /// pre-4.6 Opus/Sonnet generation stay at 200K. The literal "[1m]" suffix is Claude Code's
+    /// marker for the older, opt-in Sonnet 4.5 1M-context beta.
+    /// ponytail: extend the allow-list below if a new tier ships at 1M by default.
     private func contextWindow(for model: String) -> Int {
-        model.contains("[1m]") ? 1_000_000 : 200_000
+        let oneMillionByDefault = ["opus-5", "opus-4-8", "opus-4-7", "opus-4-6",
+                                    "sonnet-5", "sonnet-4-6", "fable-5", "mythos-5"]
+        if model.contains("[1m]") || oneMillionByDefault.contains(where: model.contains) {
+            return 1_000_000
+        }
+        return 200_000
     }
 
     /// taskId → index of its TaskCreate event (fallback scroll target for tasks with no span).
@@ -795,7 +827,7 @@ private struct ToolRow: View {
 
             // Inline Q&A panel (same as Plans page)
             if isPlanWrite && showPlanQA {
-                PlanQAPanel(planContent: planQAContent)
+                PlanQAPanel(planContent: planQAContent, cwd: app.activePath)
                     .frame(height: 420)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.12)))
@@ -1016,7 +1048,7 @@ private struct SessionStatsView: View {
             Text("Model Details").font(.headline)
             ForEach(stats.perModel, id: \.model) { m in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(shortModel(m.model)).font(.subheadline.bold())
+                    ModelBadge(model: m.model)
                     Text("In: \(m.input.formatted()) · Out: \(m.output.formatted())")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("Cache read: \(m.cacheRead.formatted()) · write: \(m.cacheWrite.formatted())")
@@ -1054,29 +1086,52 @@ private struct SessionStatsView: View {
         }
         .font(.callout)
     }
+}
 
-    private func shortModel(_ m: String) -> String {
-        m.hasPrefix("claude-") ? String(m.dropFirst("claude-".count)) : m
+/// Small colored pill naming the model that produced a response. Color-coded by model
+/// family (not by config scope — see `ManagedBadge`'s scope palette, which this
+/// deliberately avoids) so a session or subagent transcript that switches models mid-way
+/// is scannable at a glance.
+struct ModelBadge: View {
+    let model: String
+
+    var body: some View {
+        Text(shortModel)
+            .font(.caption2).bold()
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(color.opacity(0.22), in: Capsule())
+            .foregroundStyle(color)
+    }
+
+    private var shortModel: String {
+        model.hasPrefix("claude-") ? String(model.dropFirst("claude-".count)) : model
+    }
+
+    private var color: Color {
+        let m = model.lowercased()
+        if m.contains("opus") { return .pink }
+        if m.contains("sonnet") { return .cyan }
+        if m.contains("haiku") { return .mint }
+        if m.contains("fable") { return .indigo }
+        return .gray
     }
 }
 
-/// Dim per-turn token summary shown under an assistant message.
+/// Dim per-turn token summary shown under an assistant message, with a `ModelBadge`
+/// standing out inline so the model is legible without breaking out of the usage line.
 private struct TurnUsageLine: View {
     let usage: TurnUsage
     var body: some View {
         HStack(spacing: 8) {
+            ModelBadge(model: usage.model)
             Text("↑ \(usage.inputTokens.formatted())")
             Text("↓ \(usage.outputTokens.formatted())")
             if usage.cacheReadTokens > 0 { Text("· \(usage.cacheReadTokens.formatted()) cached") }
-            Text("· \(shortModel)")
             Spacer()
         }
         .font(.caption2.monospacedDigit())
         .foregroundStyle(.secondary)
         .padding(.leading, 2)
-    }
-    private var shortModel: String {
-        usage.model.hasPrefix("claude-") ? String(usage.model.dropFirst("claude-".count)) : usage.model
     }
 }
 
@@ -1449,22 +1504,19 @@ private struct HerdrBadge: View {
     }
 }
 
-// Isolated claude -p call for /context — needs --bare to prevent global hooks from
-// injecting additionalContext into the report output.
-private func runContextCommand(sessionID: String, cwd: String) -> String {
-    let extra = ["\(NSHomeDirectory())/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-    let path = (extra + [ProcessInfo.processInfo.environment["PATH"] ?? ""]).joined(separator: ":")
-
-    // ponytail: no CLAUDE_CONFIG_DIR override — `-r` resolves the session from the
-    // real ~/.claude/projects dir; an empty temp dir breaks resume ("No conversation
-    // found"). `--bare` already skips hooks/LSP/plugins, so isolation is covered.
+/// Isolated `claude -r … -p /context` call. `--safe-mode` keeps hooks (ours included)
+/// from injecting additionalContext into the report; it replaced `--bare`, which
+/// suppressed the same things but also disabled OAuth/keychain auth, so every call
+/// came back "Not logged in". Never set CLAUDE_CONFIG_DIR here either — see `ClaudeCLI`.
+private func runContextCommand(sessionID: String, cwd: URL?) -> String {
+    guard let claudePath = Executable.find("claude") else { return "claude CLI not found" }
     let p = Process()
     p.executableURL = URL(filePath: "/usr/bin/env")
-    p.arguments = ["claude", "-r", sessionID, "-p", "--bare", "--no-session-persistence", "/context"]
-    p.currentDirectoryURL = URL(filePath: cwd)
-    var env = ProcessInfo.processInfo.environment
-    env["PATH"] = path
-    p.environment = env
+    p.arguments = ClaudeCLI.resumeArgs(
+        claudePath: claudePath, sessionID: sessionID, command: "/context",
+        extra: ["--no-session-persistence"])
+    if let cwd { p.currentDirectoryURL = cwd }
+    p.environment = ClaudeCLI.environment()
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = pipe
@@ -1472,6 +1524,12 @@ private func runContextCommand(sessionID: String, cwd: String) -> String {
     do { try p.run() } catch { return "Failed to launch: \(error.localizedDescription)" }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     p.waitUntilExit()
-    return String(data: data, encoding: .utf8) ?? ""
+    let out = String(data: data, encoding: .utf8) ?? ""
+    // stdout and stderr share one pipe here, so the merged text is already what
+    // `isNotLoggedIn` wants — a signed-out run prints its reason instead of a report.
+    if p.terminationStatus != 0, ClaudeAuth.isNotLoggedIn(out) {
+        NotificationCenter.default.post(name: .claudeAuthSuspect, object: nil)
+    }
+    return out
 }
 

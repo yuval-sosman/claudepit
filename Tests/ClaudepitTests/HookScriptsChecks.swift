@@ -69,7 +69,7 @@ func hookScriptsChecks() -> [Bool] {
             try expect(cmd.body.hasPrefix("---\ndescription:"), "\(cmd.filename) has front matter")
             try expect(cmd.filename.hasPrefix("claudepit-task-"), "\(cmd.filename) naming")
         }
-        try expectEqual(HookScripts.taskCommands.count, 6, "six phase commands")
+        try expectEqual(HookScripts.taskCommands.count, 5, "five phase commands")
     })
 
     return results

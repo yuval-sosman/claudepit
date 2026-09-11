@@ -152,6 +152,7 @@ A log of memory activity is maintained at:
 ### How dreaming is triggered
 The Stop hook reads log.json and counts write entries since the last dream entry.
 When the count reaches 10, it injects the full 11-step dreaming consolidation prompt instead of the normal memory reminder.
+That prompt runs the 11 steps in a subagent (Task tool, latest Sonnet model) rather than inline, so consolidation doesn't burn the session's own context.
 The count resets after each dream — the next dream triggers after 10 more writes.
 """
 
@@ -163,7 +164,12 @@ The count resets after each dream — the next dream triggers after 10 more writ
 \(memoryHookReminder)
 
 DREAMING CYCLE — your memory log has reached {{COUNT}} writes since last consolidation.
-Before this session ends, run the full 11-step memory consolidation:
+Before this session ends, run the full 11-step memory consolidation. Do NOT run it inline in this
+session — dispatch it to a subagent so consolidation doesn't burn this session's own context.
+
+Use the Task tool to launch one general-purpose subagent on the latest Sonnet model
+(claude-sonnet-5). Give it this checklist verbatim as its prompt, including the session ID
+{{SESSION_ID}} for step 11, and wait for it to finish before the session ends:
 
 1. Inventory — read MEMORY.md, list memory/ recursively, find orphans
 2. Full read — read every topic file (check updated date, claims, links, sources)
@@ -250,8 +256,9 @@ print(json.dumps({'continue': True, 'hookSpecificOutput': {'hookEventName': sys.
 """#
 
     // Slash-commands run inside each task's worktree. $ARGUMENTS carries space-separated key=value
-    // pairs (taskDir=… plansDir=… specPath=… planPath=… brainstormPath=… worktreePath=… today=…).
-    // Each command writes its artifact to the absolute path in $ARGUMENTS, THEN prints the marker LAST.
+    // pairs (taskDir= plansDir= specPath= planPath= reviewPath= brainstormPath= worktreePath=
+    // attachmentsDir= today= name=). Each command writes its artifact to the absolute path in
+    // $ARGUMENTS, THEN prints the marker LAST (last-marker-wins in TaskTransition).
 
     public static let taskCommandBrainstorm = """
 ---
@@ -259,15 +266,50 @@ description: Brainstorm approaches for a Claudepit task (app-owned; regenerated 
 ---
 Arguments: $ARGUMENTS
 
-You are brainstorming with the user to REFINE a task tracked by Claudepit. The task name, description,
-and requirements are in the arguments. This is an interactive conversation: explore options,
-trade-offs, and open questions, and iterate with the user until the task definition is sharp.
+You are brainstorming with the user to REFINE a task tracked by Claudepit. This runs BEFORE the
+spec phase, and its only output is a sharper task definition. The task name, description, and
+requirements are in the arguments. This is an interactive conversation: explore the codebase,
+surface options and trade-offs, and iterate with the user until the definition is sharp enough
+that a spec could be written from it without further product decisions.
 
-WHEN YOU NEED THE USER TO DECIDE SOMETHING, use the AskUserQuestion tool — do NOT print a question as
-plain text and wait. AskUserQuestion gives the user selectable options (and an "Other" free-text
-escape), which is faster and unambiguous. Ask one focused question at a time; use its options to
-present the trade-offs you'd otherwise write out. All of your thinking, options, and pros/cons live
-in THIS CONVERSATION — never in the file.
+## Step 1 — Explore before you ask
+
+Ground yourself in reality BEFORE the first question: read the files and subsystems the task
+touches, skim docs and recent commits. If the surface is wide, dispatch 1-2 read-only subagents
+in parallel (Task tool — Explore type if available, else general-purpose), each with one precise
+question ("which views render X and where does its state live? Return file:line references"),
+and read the key files yourself while they run. Never brainstorm from assumptions: a question
+grounded in the actual code ("SystemPromptCard already has an actionSlot — mount the button
+there?") beats a generic one ("where should the button go?"). You are already inside the task's
+dedicated git worktree — never create another worktree or branch, and never run a subagent in
+worktree isolation.
+
+## Step 2 — Scope check
+
+If the task bundles multiple independent pieces ("add analyzer + rework caching + new settings
+page"), flag it immediately via AskUserQuestion: offer to narrow this task to one piece
+(recommended) and record the rest as out-of-scope requirement suggestions. Don't spend questions
+refining details of a task that first needs decomposition.
+
+## Step 3 — Refine through questions
+
+EVERY decision you need from the user goes through the AskUserQuestion tool — never print a
+question as plain text and wait:
+- ONE focused question per call. If a topic needs more, break it into successive questions.
+- 2-4 concrete options; put your recommended option FIRST with "(Recommended)" appended.
+- Put the trade-offs in each option's description — that replaces the pros/cons essay.
+- The user always gets an "Other" free-text escape automatically; don't add one.
+- Ask about purpose, constraints, success criteria, and anything two readings could disagree on.
+  Never ask what the codebase already answers — you explored it in Step 1.
+
+## Step 4 — Propose approaches
+
+Once you understand the goal, propose 2-3 implementation approaches as ONE AskUserQuestion call:
+each option is an approach, its description is the trade-off summary, your recommendation first.
+YAGNI ruthlessly — strip unnecessary features from every approach. All of your thinking, options,
+and pros/cons live in THIS CONVERSATION — never in the file.
+
+## Step 5 — The deliverable (STRICT contract)
 
 CRITICAL — the file at `brainstormPath=` is NOT a brainstorm document and it is NOT a scratchpad.
 It is a machine-parsed list of atomic suggestions the app shows the user one-by-one to Accept or
@@ -286,8 +328,13 @@ Reject. Rules — follow EXACTLY:
    - `tag`          — a single tag to add.
 4. `value` is the literal text that gets applied (the requirement line / the new description / the tag).
    `rationale` is one short sentence on why. Keep values self-contained — the user sees them out of context.
-5. Turn the outcome of your brainstorm into 3–8 such suggestions. Prefer several small `requirement`
+5. Turn the outcome of your brainstorm into 3-8 such suggestions. Prefer several small `requirement`
    items over one big description.
+
+Requirement quality bar — every `requirement` value must be concrete, testable, and anchored in
+the real code you explored in Step 1:
+- GOOD: "Add an Analyze Prompt button to SystemPromptCard's actionSlot, visible only when isDraft is true"
+- BAD:  "Add the button in a sensible place" (not testable, no anchor in the code)
 
 Write the file with EXACTLY this schema and nothing else (this is a filled example — replace the
 content, keep the shape):
@@ -316,10 +363,71 @@ description: Write a design spec for a Claudepit task (app-owned; regenerated on
 ---
 Arguments: $ARGUMENTS
 
-You are writing a design spec for a task tracked by Claudepit. The task name, description, and
-requirements are in the arguments (and any brainstorm notes at `brainstormPath=`). If anything is
-ambiguous, ASK directly in this terminal and wait — do not guess.
-Write the spec to the absolute path given by `specPath=` in the arguments.
+You are writing the design spec for a task tracked by Claudepit. The task name, description, and
+requirements are in the arguments. If a brainstorm file exists at `brainstormPath=`, read it —
+accepted refinements are already folded into the requirements, but its rationales are context.
+If `attachmentsDir=` is present, read the files in it — they are user-provided context.
+
+The bar: a planner must be able to turn this spec into an implementation plan WITHOUT making a
+single further product decision. The spec is the binding authority for every later phase (plan,
+implement, review) — ambiguity here becomes rework there.
+
+## Step 1 — Explore the codebase first
+
+Read every file the task plausibly touches; follow the existing patterns you find. When the
+surface is wide, dispatch 2-3 read-only subagents IN PARALLEL (one message, multiple Task tool
+calls — Explore type if available, else general-purpose), each with one precise question and
+told to return a compact summary with file:line references. Never design against imagined code.
+You are already inside the task's dedicated git worktree — never create another worktree or
+branch, and never run a subagent in worktree isolation.
+
+## Step 2 — Close open decisions with AskUserQuestion
+
+Every decision the user must make goes through the AskUserQuestion tool — never a plain-text
+question, never a silent guess. One question per call; 2-4 options with the trade-offs in their
+descriptions; your recommended option first with "(Recommended)" appended. Only ask what the
+codebase cannot answer and what materially changes the design.
+
+## Step 3 — Write the spec
+
+Write to the absolute path given by `specPath=` in the arguments, with these sections (write
+"None" under a heading rather than dropping it):
+
+1. **Overview** — what is being built and why, 2-4 sentences.
+2. **Non-Goals** — what this deliberately does NOT do (YAGNI, in writing).
+3. **Requirements** — the task's requirements, each refined into concrete, testable form.
+4. **Design** — the architecture, then each component: one clear purpose, its interface, what it
+   depends on. A reader should know what a unit does without reading its internals; if a
+   component can't be described that way, redraw the boundaries.
+5. **Data flow** — how data moves end to end for the main scenarios.
+6. **Error handling** — each failure mode and what the user sees.
+7. **Testing strategy** — what gets unit/integration tested, and how.
+8. **Acceptance criteria** — a numbered checklist, every item mechanically checkable; the
+   implement phase closes by running THIS list, and code review checks it again.
+9. **Out of scope / future work.**
+
+Targeted improvements to code the work touches belong in the design; unrelated refactoring does
+not.
+
+## Step 4 — Self-review, then subagent review
+
+Re-read the spec with fresh eyes and fix inline:
+1. Placeholder scan — no TBD/TODO/vague sections.
+2. Internal consistency — no section contradicts another.
+3. Scope — one implementation plan's worth; if it needs decomposition, say so to the user.
+4. Ambiguity — any requirement readable two ways gets pinned to one reading.
+
+Then dispatch ONE reviewer subagent (Task tool, general-purpose) with this brief:
+
+> Review the spec at <absolute specPath>. Check: Completeness (TODOs, placeholders, missing
+> sections), Consistency (internal contradictions), Clarity (requirements ambiguous enough that
+> someone could build the wrong thing), Scope (focused enough for a single plan), YAGNI
+> (unrequested features). Only flag issues that would cause a flawed implementation plan — not
+> wording polish. Return: "Status: Approved" or "Status: Issues Found", then each issue as
+> [Section]: issue — why it matters for planning.
+
+Fix real issues; ignore polish; do not loop more than twice.
+
 After the file is written and saved, print on its own line, LAST:
 CLAUDEPIT_ARTIFACT: <the absolute specPath you wrote>
 """
@@ -330,13 +438,96 @@ description: Turn a Claudepit task spec into an implementation plan (app-owned; 
 ---
 Arguments: $ARGUMENTS
 
-You are turning an approved spec into an implementation plan. The spec is at the absolute `specPath=`
-in the arguments. Produce a plan markdown file named `<today>-<slug>.md` (use `today=` from the
-arguments) and write it into the absolute directory given by `plansDir=` in the arguments.
-IMPORTANT: write to that absolute plansDir path exactly — never a relative `plans/…` and never a
-literal `~/…`, or the app cannot find the plan.
-IMPORTANT: You are ONLY writing a plan document — do NOT edit, create, or delete any source files.
-Read the spec and any existing code for context, then produce the plan markdown. No code changes.
+You are turning an approved spec (absolute `specPath=` in the arguments) into an implementation
+plan. Write for an engineer who is skilled but has ZERO context for this codebase and
+questionable taste: exact files, real code, exact commands, how to verify — everything.
+
+## Research in plan mode
+
+Enter your native plan mode NOW (EnterPlanMode tool) if it is available — this phase is exactly
+what plan mode is for. Read the spec, then read EVERY file the plan will touch; note existing
+patterns, exact signatures, and test conventions. If plan mode is unavailable, do the same
+research strictly read-only. When the plan is complete, exit plan mode (ExitPlanMode), then
+produce the plan file as described below.
+
+HARD RULE either way: you are ONLY producing a plan document — do NOT edit, create, or delete
+any source files. You are already inside the task's dedicated git worktree — never create
+another worktree or branch, and never run a subagent in worktree isolation. And never plan
+worktree/branch setup steps: every Claudepit task already lives in its own worktree.
+
+If research exposes a real gap or contradiction in the spec, resolve it with the AskUserQuestion
+tool (2-4 options, trade-offs in the descriptions, recommended option first) — never a
+plain-text question, never a silent guess.
+
+## Plan document format
+
+Start with this header:
+
+# <Feature Name> Implementation Plan
+**Goal:** one sentence
+**Architecture:** 2-3 sentences
+**Spec:** <the absolute specPath> (the plan argues from the spec; executors read both)
+## Global Constraints
+<project-wide requirements copied VERBATIM from the spec — exact values, naming rules, version
+floors, one per line. Every task implicitly includes this section. Always include: never run
+git add / git commit / git stage / git push — commits happen only in the Claudepit app.>
+
+Then one section per task:
+
+### Task N: <Component>
+**Files:** Create / Modify / Test — exact paths (Modify with line anchors where you can)
+**Interfaces:** Consumes (exact signatures from earlier tasks) / Produces (exact names, parameter
+and return types later tasks rely on — an implementer sees only their own task; this block is how
+neighbors learn each other's names)
+
+Then checkbox steps (- [ ]), each ONE action of 2-5 minutes, TDD-ordered:
+- [ ] Step 1: Write the failing test — with the ACTUAL test code block
+- [ ] Step 2: Run it, verify it fails — exact command + expected failure message
+- [ ] Step 3: Minimal implementation — the actual code block
+- [ ] Step 4: Run it, verify it passes — exact command
+- [ ] Step 5: Checkpoint — run the focused suite for the touched area (NO commit steps, ever)
+
+## Right-sizing
+
+A task is the smallest unit that carries its own test cycle and is worth a fresh reviewer's
+gate. Fold setup/scaffolding/docs into the task whose deliverable needs them; split only where a
+reviewer could reject one task while approving its neighbor. Map which files each task owns
+before drawing boundaries: one clear responsibility per file, follow the codebase's existing
+patterns.
+
+## No placeholders — these are plan failures, never write them
+
+- "TBD", "TODO", "implement later", "fill in details"
+- "Add appropriate error handling" / "handle edge cases"
+- "Write tests for the above" without the actual test code
+- "Similar to Task N" — repeat the code; tasks are read out of order
+- Steps that describe WHAT without showing HOW (code steps require code blocks)
+- References to types, functions, or methods no task defines
+
+## Self-review, then subagent review
+
+1. Spec coverage: for each spec requirement, point at the task that implements it; add tasks for
+   gaps.
+2. Placeholder scan: search the plan for the patterns above; fix them.
+3. Type consistency: names and signatures used in later tasks match earlier definitions exactly.
+
+For plans of 3+ tasks, also dispatch ONE reviewer subagent (Task tool, general-purpose):
+
+> Review the plan at <plan path> against the spec at <absolute specPath>. Check: Completeness
+> (placeholders, missing steps), Spec alignment (every requirement covered, no scope creep),
+> Decomposition (clear task boundaries, actionable steps), Buildability (an engineer could follow
+> it without getting stuck). Only flag what would cause a wrong build or a stuck implementer.
+> Return "Status: Approved" or "Status: Issues Found" with each issue as [Task N, Step M]: issue — why.
+
+Fix real issues; ignore polish.
+
+## Save and hand off
+
+Write the plan into the absolute directory given by `plansDir=`, named `<today>-<slug>.md` (use
+`today=` from the arguments). Write to that absolute path exactly — never a relative `plans/…`
+and never a literal `~/…`, or the app cannot find the plan. Exception: if plan mode already saved
+your complete, final plan as a .md file directly under plansDir, print that file's path instead
+of writing a duplicate.
 After the file is written and saved, print on its own line, LAST:
 CLAUDEPIT_ARTIFACT: <the absolute plan .md path under plansDir>
 """
@@ -347,9 +538,11 @@ description: Implement a Claudepit task per its plan (app-owned; regenerated on 
 ---
 Arguments: $ARGUMENTS
 
-Implement the task by following the plan file at the absolute `planPath=` in the arguments. You are
-already inside the task's git worktree. This is a normal coding session; the Claudepit Sessions page
-will surface it. No artifact file is required.
+Implement the task by following the plan at the absolute `planPath=` in the arguments. You are
+already inside the task's git worktree. This is a normal coding session; the Claudepit Sessions
+page will surface it. Read the plan ONCE in full, read the spec it names (the spec is the
+binding authority; the plan is its argument), create one todo per plan task, then execute them
+ALL in order without pausing to check in between tasks.
 
 **NEVER commit or stage. This is a HARD rule, no exceptions:**
 - Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
@@ -358,21 +551,69 @@ will surface it. No artifact file is required.
   Review Changes (Source Control) sheet — that is the ONLY place commits happen.
 - `git status`, `git diff`, and reads are fine; anything that stages or commits is not.
 
-When finished (or at a natural stopping point), print on its own line, LAST:
+## How to execute — subagent-driven, always
+
+You are the coordinator, never the typist. Dispatch a fresh implementer subagent (Task tool,
+general-purpose) per plan task — for every plan, at every size — and keep your own context for
+coordination and review. Do not implement plan tasks yourself, and never fix findings yourself:
+fixes go back to the implementer, so your context stays clean and every change gets reviewed.
+NEVER dispatch two implementers in parallel — they share this worktree and will conflict.
+Parallel subagents are for READ-ONLY work only (investigations, reviews). Batch same-shape
+mechanical tasks (the same small edit across N files) into ONE dispatch — one subagent, the
+whole batch, reviewed as one unit.
+
+You are already inside the task's dedicated git worktree: never create another worktree or
+branch, never run git worktree commands, and never dispatch a subagent in worktree isolation —
+every subagent works in THIS checkout.
+
+The implementer dispatch brief — give each subagent exactly this, never your session history:
+1. The task's FULL text pasted from the plan (files, interfaces, steps, code).
+2. One line on where this task fits in the feature.
+3. The exact names and signatures earlier tasks produced.
+4. The plan's Global Constraints verbatim, plus these hard rules: work only inside this
+   worktree — never create worktrees or branches; NEVER run git add/commit/stage/push; follow
+   the TDD steps as written; do not dispatch subagents of your own; if reality contradicts the
+   task text, STOP and report instead of improvising.
+5. The report contract: status DONE or BLOCKED or NEEDS_CONTEXT; files changed; what was tested
+   with the actual command and its result line.
+
+Handling reports: DONE → review before moving on (below). BLOCKED / NEEDS_CONTEXT → supply the
+missing context and re-dispatch; if it is genuinely the user's decision, use AskUserQuestion.
+Never ignore an escalation and never re-dispatch unchanged.
+
+## Review between tasks
+
+After each task, diff-check it against the task's text yourself: anything missing? anything
+extra (unrequested features are a defect — YAGNI)? anything misunderstood? Do the new tests
+verify real behavior rather than mocks? Treat an implementer's report as unverified claims —
+check the diff, not the prose. Fix loop: at most 3 rounds per task, then make a judgment call,
+record it, and move on.
+
+## Rulings, not stalls
+
+Small ambiguities and plan defects are yours to decide: rule with the spec as authority, keep a
+running list of rulings, and keep going. Reserve AskUserQuestion for decisions that genuinely
+belong to the user — product behavior, scope changes, anything irreversible. A wrong ruling
+costs a visible fix; a session parked on a question costs the user their day.
+
+## Close-out — evidence before claims
+
+The iron law: NO COMPLETION CLAIM WITHOUT FRESH EVIDENCE. If you did not run the command in this
+session and read its output, you cannot claim it passes — "should pass", "looks correct", and an
+implementer's report are not evidence. While tasks are in flight the implementers run the
+focused tests; after the LAST task, close out yourself:
+1. **Reality check** — `git status --porcelain` and `git diff --stat`: the diff actually
+   contains the work the plan describes, not just reports claiming it does.
+2. **Build** — run the project's full build; evidence is exit 0.
+3. **Tests** — run the FULL suite and read the pass/fail counts line; 0 failures.
+4. **Acceptance criteria** — walk the spec's acceptance-criteria list one by one: a command, a
+   focused test, or the exact file:line that satisfies each item.
+Anything red from this work goes back to an implementer before you finish.
+
+When finished, summarize: what was implemented per task, deviations from the plan (with why),
+the rulings you made, the close-out evidence (each check with its result line), and any
+acceptance criterion you could not verify. Then print on its own line, LAST:
 CLAUDEPIT_ARTIFACT: <the absolute planPath you implemented>
-"""
-
-    public static let taskCommandVerify = """
----
-description: Verify a Claudepit task's implementation (app-owned; regenerated on launch).
----
-Arguments: $ARGUMENTS
-
-Verify the implementation in this worktree: run the project's build and tests, exercise the plan's
-acceptance criteria (plan at `planPath=`). You are already inside the task's git worktree.
-Print on its own line, LAST, exactly one of:
-CLAUDEPIT_VERIFY: pass
-CLAUDEPIT_VERIFY: fail
 """
 
     public static let taskCommandReview = """
@@ -381,14 +622,59 @@ description: Code-review a Claudepit task's diff (app-owned; regenerated on laun
 ---
 Arguments: $ARGUMENTS
 
-Review the changes made for this task (git diff in this worktree). Write your findings to the
-absolute path given by `reviewPath=` in the arguments.
-Then print a machine-readable findings block: one line per finding as `severity | title | detail`
-where severity is high, med, or low. Example:
+You are the final code reviewer for this task. The work is UNCOMMITTED in this worktree — plain
+`git diff` misses new files — so build the review surface first. The review is read-only: never
+mutate the working tree, the index, HEAD, or branch state, and never stage or commit. You are
+already inside the task's dedicated git worktree — never create another worktree or branch, and
+never run a subagent in worktree isolation.
+
+## Step 1 — Build the review package
+
+Concatenate into `<taskDir>/review-package.txt` (`taskDir=` is in the arguments):
+- `git status --porcelain` (the file list)
+- `git diff` (tracked changes)
+- the FULL content of every untracked file from the status list
+
+## Step 2 — Dispatch two reviewers IN PARALLEL
+
+One message, two Task tool calls (general-purpose), so they run concurrently. Both get: the
+package path, the absolute `specPath=` and `planPath=`, and these ground rules — read-only
+checkout; you may read worktree files for context but never modify anything; judge the code on
+its merits (rationales in comments or reports are claims, not verdicts); every finding needs
+file:line, what is wrong, why it matters, and how to fix; calibrate severity honestly — not
+everything is Critical.
+
+**Reviewer A — spec compliance.** Compare the diff against the spec (and plan): Missing —
+requirements skipped or claimed but absent from the diff; Extra — unrequested features,
+over-engineering (YAGNI); Misunderstood — the right feature built the wrong way. Return a
+verdict (compliant | issues found) plus the list.
+
+**Reviewer B — code quality.** Correctness (bugs, edge cases, error handling), tests (verify
+real behavior, not mocks; cover this change's edge cases), structure (one responsibility per
+file, clean boundaries, DRY without premature abstraction, follows the codebase's patterns),
+security where relevant. Return findings as Critical / Important / Minor.
+
+## Step 3 — Merge and verify
+
+Dedupe the two reports, then spot-check every finding against the package yourself — drop
+anything the diff disproves. Calibration: **Critical** = broken behavior, data loss, security, a
+spec requirement absent. **Important** = the work cannot be trusted until fixed — fragile
+behavior, swallowed errors, tests that assert nothing, a missed requirement detail. **Minor** =
+polish; "coverage could be broader" is Minor, not Important.
+
+## Step 4 — Report
+
+Write to the absolute `reviewPath=` in the arguments: Strengths (specific, with file:line);
+findings grouped Critical / Important / Minor (each with file:line, what, why, fix); Assessment —
+ready to merge? yes | with fixes | no, plus 1-2 sentences of reasoning.
+
+Then print the machine-readable block — one line per finding, `severity | title | detail`, where
+severity is high (=Critical), med (=Important), or low (=Minor); titles short and specific; the
+detail names file:line. Example:
 
 CLAUDEPIT_FINDINGS_BEGIN
-high | Null deref in parseUser | parseUser() force-unwraps an optional that can be nil on empty input
-low | Rename foo | `foo` is a vague name for a URL builder
+high | Null deref in parseUser | parseUser() force-unwraps an optional that is nil on empty input (Parser.swift:41)
+low | Rename foo | foo is a vague name for a URL builder (Client.swift:12)
 CLAUDEPIT_FINDINGS_END
 
 After the file is written and the block printed, print on its own line, LAST:
@@ -400,9 +686,11 @@ CLAUDEPIT_ARTIFACT: <the absolute reviewPath you wrote>
         ("claudepit-task-spec.md", taskCommandSpec),
         ("claudepit-task-plan.md", taskCommandPlan),
         ("claudepit-task-implement.md", taskCommandImplement),
-        ("claudepit-task-verify.md", taskCommandVerify),
         ("claudepit-task-review.md", taskCommandReview),
     ]
+
+    /// Commands removed from the pipeline; installers sweep these from projects and worktrees.
+    public static let retiredTaskCommandFilenames = ["claudepit-task-verify.md"]
 
     /// Stale v1 agent files to delete once (superseded by taskCommands).
     public static let oldTaskAgentFilenames = [

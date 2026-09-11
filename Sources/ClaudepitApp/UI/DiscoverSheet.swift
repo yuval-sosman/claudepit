@@ -38,6 +38,9 @@ struct DiscoverSheet: View {
             header
             Divider().opacity(0.2)
             VStack(spacing: 12) {
+                // A sheet covers ContentView, so the window-wide banner is invisible
+                // behind it — and this sheet is the one modal that spawns `claude -p`.
+                if app.claudeAuth?.needsSignIn == true { ClaudeSignInBanner(app: app) }
                 queryField
                 if let err = errorMessage {
                     Text(err).font(.caption).foregroundStyle(.red)
@@ -271,7 +274,8 @@ struct DiscoverSheet: View {
         Task {
             do {
                 let found = try await DiscoverRunner.shared.search(
-                    query: q, projectSlug: projectSlug, since: timeframe.since)
+                    query: q, projectSlug: projectSlug, since: timeframe.since,
+                    cwd: app.activePath)
                 await MainActor.run {
                     results = found
                     isLoading = false
@@ -290,8 +294,12 @@ struct DiscoverSheet: View {
                     hasSearched = true
                 }
             } catch DiscoverError.processFailed(let code, let msg) {
+                let signedOut = ClaudeAuth.isNotLoggedIn(msg)
+                if signedOut { NotificationCenter.default.post(name: .claudeAuthSuspect, object: nil) }
                 await MainActor.run {
-                    errorMessage = "claude exited with code \(code): \(msg.prefix(120))"
+                    errorMessage = signedOut
+                        ? "Claude is signed out — run `\(ClaudeAuth.signInCommand)`."
+                        : "claude exited with code \(code): \(msg.prefix(200))"
                     isLoading = false
                     hasSearched = true
                 }

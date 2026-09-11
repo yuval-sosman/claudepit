@@ -39,6 +39,13 @@ public struct ManagedInstaller: Sendable {
                 }
             }
         }
+        // Retired commands: their catalog entries are gone, so install/remove above never touches
+        // them — sweep copies an older build installed. Filesystem-derived (no UserDefaults flag),
+        // so it heals every managed project this app opens, on any machine.
+        for f in HookScripts.retiredTaskCommandFilenames {
+            try? FileManager.default.removeItem(
+                at: projectClaude.appending(path: "commands").appending(path: f))
+        }
     }
 
     /// Enabled task commands with the project's editable-copy bodies — the single source worktree

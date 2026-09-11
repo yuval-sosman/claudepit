@@ -4,6 +4,10 @@ import ClaudepitCore
 /// Shared inline Q&A panel used by both PlanDetailView and SessionDetailView.
 struct PlanQAPanel: View {
     let planContent: String
+    /// Working directory for the `claude -p` subprocess — the app's active project.
+    /// No default: every host already holds `AppState`, and silently falling back to
+    /// the app's launch directory is what this parameter exists to stop.
+    let cwd: URL?
     var title: String = "Ask about this plan"
     var showImprovement: Bool = true
     /// When provided, improvement detection and apply flow are enabled.
@@ -200,7 +204,7 @@ struct PlanQAPanel: View {
 
         Task {
             do {
-                let answer = try await PlanQARunner.ask(prompt)
+                let answer = try await PlanQARunner.ask(prompt, cwd: cwd)
                 await MainActor.run {
                     let (clean, tagPresent) = processResponse(answer)
                     messages.append(QAMessage(role: "assistant", text: clean))
@@ -210,8 +214,11 @@ struct PlanQAPanel: View {
                 }
             } catch PlanQAError.claudeNotFound {
                 await MainActor.run { errorMessage = "claude CLI not found"; isLoading = false }
-            } catch PlanQAError.processFailed(let code, _) {
-                await MainActor.run { errorMessage = "Request failed (exit \(code)) — try again"; isLoading = false }
+            } catch PlanQAError.processFailed(let code, let message) {
+                await MainActor.run {
+                    errorMessage = Self.describe(code: code, message: message, verb: "Request")
+                    isLoading = false
+                }
             } catch {
                 await MainActor.run { errorMessage = "Request failed — try again"; isLoading = false }
             }
@@ -227,18 +234,35 @@ struct PlanQAPanel: View {
 
         Task {
             do {
-                let improved = try await PlanQARunner.improve(prompt)
+                let improved = try await PlanQARunner.improve(prompt, cwd: cwd)
                 await MainActor.run {
                     onPlanImproved?(improved, path)
                     applyingIndex = nil
                 }
             } catch PlanQAError.claudeNotFound {
                 await MainActor.run { errorMessage = "claude CLI not found"; applyingIndex = nil }
-            } catch PlanQAError.processFailed(let code, _) {
-                await MainActor.run { errorMessage = "Improvement failed (exit \(code)) — try again"; applyingIndex = nil }
+            } catch PlanQAError.processFailed(let code, let message) {
+                await MainActor.run {
+                    errorMessage = Self.describe(code: code, message: message, verb: "Improvement")
+                    applyingIndex = nil
+                }
             } catch {
                 await MainActor.run { errorMessage = "Improvement failed — try again"; applyingIndex = nil }
             }
         }
+    }
+
+    /// Turn a non-zero `claude` exit into something actionable. The old text showed
+    /// only the exit code, which hid the one message that actually explains the
+    /// common failure: "Not logged in · Please run /login".
+    private static func describe(code: Int32, message: String, verb: String) -> String {
+        if ClaudeAuth.isNotLoggedIn(message) {
+            NotificationCenter.default.post(name: .claudeAuthSuspect, object: nil)
+            return "Claude is signed out — run `\(ClaudeAuth.signInCommand)`."
+        }
+        let first = message.split(separator: "\n").first.map(String.init) ?? ""
+        return first.isEmpty
+            ? "\(verb) failed (exit \(code)) — try again"
+            : "\(verb) failed (exit \(code)): \(first.prefix(200))"
     }
 }

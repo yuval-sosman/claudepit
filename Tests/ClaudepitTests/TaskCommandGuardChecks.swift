@@ -14,7 +14,6 @@ func taskCommandGuardChecks() -> [Bool] {
             .writeSpec:  "claudepit-task-spec.md",
             .createPlan: "claudepit-task-plan.md",
             .implement:  "claudepit-task-implement.md",
-            .verify:     "claudepit-task-verify.md",
             .codeReview: "claudepit-task-review.md",
         ]
         for (phase, filename) in expected {

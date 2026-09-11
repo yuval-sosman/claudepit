@@ -13,11 +13,12 @@ struct TaskBoardView: View {
         ("Backlog", nil, false),
         ("Brainstorm", .brainstorm, false), ("Spec", .writeSpec, false),
         ("Plan", .createPlan, false), ("Implement", .implement, false),
-        ("Verify", .verify, false), ("Review", .codeReview, false),
+        ("Review", .codeReview, false),
         ("Done", nil, true),
     ]
 
     @State private var pendingOverwrite: (task: ProjectTask, phase: TaskPhase)? = nil
+    @State private var targetedColumnTitle: String? = nil
 
     var body: some View {
         ScrollView([.horizontal]) {
@@ -49,6 +50,7 @@ struct TaskBoardView: View {
 
     private func column(_ col: (title: String, phase: TaskPhase?, done: Bool)) -> some View {
         let items = cards(for: col)
+        let isTargeted = targetedColumnTitle == col.title
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text(col.title).font(.caption).fontWeight(.bold)
@@ -64,7 +66,8 @@ struct TaskBoardView: View {
             if items.isEmpty {
                 RoundedRectangle(cornerRadius: 10)
                     .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                    .foregroundStyle(.white.opacity(0.10))
+                    .foregroundStyle(isTargeted ? Color.accentColor.opacity(0.7) : .white.opacity(0.10))
+                    .background(isTargeted ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 10))
                     .overlay(Text("Drop here").font(.caption2).foregroundStyle(.tertiary))
                     .frame(maxWidth: .infinity, minHeight: 56)
             } else {
@@ -77,15 +80,26 @@ struct TaskBoardView: View {
                     .buttonStyle(.plain)
                     .draggable(task.id)
                 }
+                if isTargeted {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .foregroundStyle(Color.accentColor.opacity(0.7))
+                        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .transition(.opacity)
+                }
             }
             Spacer(minLength: 0)
         }
         .padding(10)
         .frame(width: 220)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.06), lineWidth: 1))
-        .dropDestination(for: String.self) { ids, _ in drop(ids, to: col) }
+        .background(isTargeted ? Color.accentColor.opacity(0.07) : .white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(isTargeted ? Color.accentColor.opacity(0.5) : .white.opacity(0.06), lineWidth: isTargeted ? 1.5 : 1))
+        .animation(.easeOut(duration: 0.15), value: isTargeted)
+        .dropDestination(for: String.self) { ids, _ in drop(ids, to: col) } isTargeted: { targeted in
+            targetedColumnTitle = targeted ? col.title : (targetedColumnTitle == col.title ? nil : targetedColumnTitle)
+        }
     }
 
     private func drop(_ ids: [String], to col: (title: String, phase: TaskPhase?, done: Bool)) -> Bool {
@@ -107,7 +121,7 @@ struct TaskBoardView: View {
         case .writeSpec:  return task.links.specPath != nil
         case .createPlan: return task.links.planPath != nil
         case .codeReview: return task.links.reviewPath != nil
-        case .implement, .verify: return false
+        case .implement: return false
         }
     }
 }

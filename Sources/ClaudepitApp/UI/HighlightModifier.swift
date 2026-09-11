@@ -1,34 +1,8 @@
 import SwiftUI
 import ClaudepitCore
 
-/// Wraps section content in a ScrollViewReader and scrolls to + flashes a pending highlight.
-struct HighlightScroll<Content: View>: View {
-    @ObservedObject var app: AppState
-    let sectionRaw: String
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                content
-            }
-            .onChange(of: app.pendingHighlight) { _, target in
-                guard let t = target, t.sectionRaw == sectionRaw else { return }
-                withAnimation { proxy.scrollTo(rowID(t.itemID), anchor: .center) }
-            }
-            .onAppear {
-                if let t = app.pendingHighlight, t.sectionRaw == sectionRaw {
-                    proxy.scrollTo(rowID(t.itemID), anchor: .center)
-                }
-            }
-        }
-    }
-
-    private func rowID(_ id: String) -> String { "\(sectionRaw)::\(id)" }
-}
-
 extension View {
-    /// Tag a row so HighlightScroll can scroll to it, and flash when it's the pending target.
+    /// Tag a row with a stable scroll ID, and flash it when it's the pending highlight target.
     func sessionHighlight(sectionRaw: String, id: String, app: AppState) -> some View {
         modifier(HighlightRow(sectionRaw: sectionRaw, id: id, app: app))
     }

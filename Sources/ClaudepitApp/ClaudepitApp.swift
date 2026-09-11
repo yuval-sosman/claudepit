@@ -33,7 +33,17 @@ struct ClaudepitApp: App {
                 VibrancyView().ignoresSafeArea()
                 ContentView(app: app)
             }
-            .onAppear { app.startWatching() }
+            .onAppear {
+                app.startWatching()
+                app.refreshClaudeAuth()
+            }
+            // The sign-in flow finishes in a browser, outside this app — so nothing
+            // else would ever clear the banner. Guarded on needsSignIn so a healthy
+            // login costs no subprocess on ordinary window focus.
+            .onReceive(NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification)) { _ in
+                if app.claudeAuth?.needsSignIn == true { app.refreshClaudeAuth(force: true) }
+            }
         }
         .windowStyle(.hiddenTitleBar)
     }

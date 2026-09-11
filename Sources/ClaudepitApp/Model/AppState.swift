@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 import ClaudepitCore
 
 enum Section: String, CaseIterable, Identifiable {
@@ -90,6 +91,16 @@ final class AppState: ObservableObject {
     @Published var focusTaskID: String?      // set to jump the Tasks page to a specific task
     @Published var returnToTaskID: String?   // set before a plan deep-link so PlanDetailView can offer "Back to task"
     @Published var herdrSessions: [String: Herdr.AgentEntry] = [:]
+    /// Cached `claude auth status`. nil until the first check finishes — views render
+    /// nothing while it's nil rather than flashing a banner on every launch.
+    /// Deliberately a *stored* value: resolving it needs a subprocess, and a `Process`
+    /// reached from a SwiftUI view body aborts the app (see `Herdr.available()`'s note).
+    @Published private(set) var claudeAuth: ClaudeAuthStatus?
+    @Published private(set) var isCheckingClaudeAuth = false
+    /// Set when a sign-in launch found no herdr to run it in, so the UI can fall back
+    /// to handing the user the command instead.
+    @Published var signInNeedsTerminal = false
+    private var lastClaudeAuthCheck: Date?
     @Published var worktrees: [WorktreeInfo] = []
     @Published var focusWorktreeName: String?   // set to jump the Worktrees page to a specific worktree
     @Published var autoOpenReviewWorktree: String?   // one-shot: auto-present a worktree's Source Control sheet after focusing
@@ -135,6 +146,14 @@ final class AppState: ObservableObject {
         // so app-owned command/hook files (and, for a restored project, its memory hooks) would stay
         // stale until the user re-selects the project. Run them here too so source edits land on launch.
         installGlobalArtifacts()
+        // A `claude -p` call that comes back "Not logged in" is the authoritative
+        // signal, wherever it happened. Observing a notification keeps the eight
+        // scattered Q&A surfaces from each having to hold an AppState reference.
+        NotificationCenter.default.addObserver(
+            forName: .claudeAuthSuspect, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshClaudeAuth(force: true) }
+        }
         isInitializing = false
     }
 
@@ -195,6 +214,48 @@ final class AppState: ObservableObject {
         memoryEnabled = true
         reload()
         restartWatching()
+    }
+
+    // MARK: - claude CLI auth
+
+    /// Refresh the cached auth state. Fire-and-forget, coalesced, and throttled so the
+    /// ~260 ms subprocess runs about once per launch in the healthy case.
+    ///
+    /// Not called from `setActivePath`: auth is machine-global (it lives in the
+    /// keychain), so re-checking on every project switch buys nothing.
+    func refreshClaudeAuth(force: Bool = false) {
+        guard !isCheckingClaudeAuth else { return }
+        if !force, claudeAuth?.isLoggedIn == true, let last = lastClaudeAuthCheck,
+           Date().timeIntervalSince(last) < 60 { return }
+        isCheckingClaudeAuth = true
+        Task { [weak self] in
+            let status = await ClaudeAuth.status()
+            await MainActor.run {
+                self?.claudeAuth = status
+                self?.lastClaudeAuthCheck = Date()
+                self?.isCheckingClaudeAuth = false
+                if status.isLoggedIn { self?.signInNeedsTerminal = false }
+            }
+        }
+    }
+
+    /// Open `claude auth login` in a herdr tab. Falls back to `signInNeedsTerminal`
+    /// when herdr isn't installed — there is no in-app terminal to run it in.
+    func signInToClaude() {
+        let cwd = activePath?.path ?? NSHomeDirectory()
+        Task { [weak self] in
+            let launched = await ClaudeAuth.signIn(cwd: cwd)
+            await MainActor.run { self?.signInNeedsTerminal = !launched }
+        }
+    }
+
+    /// Fallback affordance: put the command on the clipboard and open Terminal, which
+    /// needs no entitlement. Deliberately not AppleScript — typing into Terminal needs
+    /// Automation access and a TCC prompt, and this app ships as a bare executable.
+    func copySignInCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(ClaudeAuth.signInCommand, forType: .string)
+        NSWorkspace.shared.open(URL(filePath: "/System/Applications/Utilities/Terminal.app"))
     }
 
     func reload() {
@@ -660,4 +721,10 @@ final class AppState: ObservableObject {
         }
         UserDefaults.standard.removeObject(forKey: "memoryEnabled")
     }
+}
+
+extension Notification.Name {
+    /// Posted when a spawned `claude` reported a missing login, so `AppState` can
+    /// re-check and surface the sign-in banner.
+    static let claudeAuthSuspect = Notification.Name("claudepit.claudeAuthSuspect")
 }

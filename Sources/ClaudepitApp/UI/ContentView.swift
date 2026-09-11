@@ -4,6 +4,22 @@ struct ContentView: View {
     @ObservedObject var app: AppState
 
     var body: some View {
+        VStack(spacing: 12) {
+            // One banner for the whole window: the Q&A surfaces that need a login are
+            // scattered across six detail views, and auth is a machine-global
+            // condition, not a per-section one.
+            if app.claudeAuth?.needsSignIn == true { ClaudeSignInBanner(app: app) }
+            content
+        }
+        .padding(24)
+        .frame(minWidth: 900, minHeight: 600)
+        // App-wide mouse selection: descendants inherit unless they opt out with
+        // .textSelection(.disabled). Exceptions (Settings tree, card expand headers)
+        // opt out locally to keep their click-to-edit / expand tap gestures clean.
+        .textSelection(.enabled)
+    }
+
+    private var content: some View {
         HStack(spacing: 28) {
             GlassSidebar(selected: $app.selected)
             if app.selected == .home {
@@ -85,12 +101,6 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(24)
-        .frame(minWidth: 900, minHeight: 600)
-        // App-wide mouse selection: descendants inherit unless they opt out with
-        // .textSelection(.disabled). Exceptions (Settings tree, card expand headers)
-        // opt out locally to keep their click-to-edit / expand tap gestures clean.
-        .textSelection(.enabled)
     }
 
     @ViewBuilder private var sectionView: some View {

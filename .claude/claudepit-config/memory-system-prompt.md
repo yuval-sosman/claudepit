@@ -65,4 +65,5 @@ A log of memory activity is maintained at:
 ### How dreaming is triggered
 The Stop hook reads log.json and counts write entries since the last dream entry.
 When the count reaches 10, it injects the full 11-step dreaming consolidation prompt instead of the normal memory reminder.
+That prompt runs the 11 steps in a subagent (Task tool, latest Sonnet model) rather than inline, so consolidation doesn't burn the session's own context.
 The count resets after each dream — the next dream triggers after 10 more writes.

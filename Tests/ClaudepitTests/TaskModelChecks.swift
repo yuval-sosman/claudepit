@@ -45,7 +45,7 @@ func taskModelChecks() -> [Bool] {
         try expect(TaskTransition.nextPlannedPhase(after: nil, in: planned) == .writeSpec, "nil→first")
         try expect(TaskTransition.nextPlannedPhase(after: .writeSpec, in: planned) == .implement, "spec→impl")
         try expect(TaskTransition.nextPlannedPhase(after: .codeReview, in: planned) == nil, "last→nil")
-        try expect(TaskTransition.nextPlannedPhase(after: .verify, in: planned) == nil, "not-in-planned→nil")
+        try expect(TaskTransition.nextPlannedPhase(after: .brainstorm, in: planned) == nil, "not-in-planned→nil")
     })
 
     results.append(check("canRun: done/running/missing/cycle") {
@@ -63,8 +63,8 @@ func taskModelChecks() -> [Bool] {
     })
 
     results.append(check("insertPhase at canonical position") {
-        try expectEqual(TaskTransition.insertPhase(.verify, into: [.writeSpec, .implement]),
-                        [.writeSpec, .implement, .verify], "verify after implement")
+        try expectEqual(TaskTransition.insertPhase(.codeReview, into: [.writeSpec, .implement]),
+                        [.writeSpec, .implement, .codeReview], "review after implement")
         try expectEqual(TaskTransition.insertPhase(.createPlan, into: [.writeSpec, .implement]),
                         [.writeSpec, .createPlan, .implement], "plan between spec and implement")
         try expectEqual(TaskTransition.insertPhase(.writeSpec, into: [.writeSpec, .implement]),
@@ -98,12 +98,6 @@ func taskModelChecks() -> [Bool] {
         let f2 = TaskTransition.parseFindings(from: out)
         try expectEqual(f1[0].id, f2[0].id, "ids stable across parses")
         try expect(TaskTransition.parseFindings(from: "nothing").isEmpty, "no block → []")
-    })
-
-    results.append(check("parseVerify last-wins pass/fail/none") {
-        try expect(TaskTransition.parseVerify(from: "CLAUDEPIT_VERIFY: fail\nCLAUDEPIT_VERIFY: pass") == true, "last pass")
-        try expect(TaskTransition.parseVerify(from: "CLAUDEPIT_VERIFY: fail") == false, "fail")
-        try expect(TaskTransition.parseVerify(from: "no marker") == nil, "none")
     })
 
     results.append(check("parseArtifact last-wins + trim") {

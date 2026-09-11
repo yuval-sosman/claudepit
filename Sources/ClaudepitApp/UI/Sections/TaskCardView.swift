@@ -115,13 +115,6 @@ struct TaskCardView: View {
         let state = app.cardState(of: task)
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                // One merged indicator: colored dot (spinning arc when running) + short label.
-                StatusDot(state: state)
-                Text(state.label)
-                    .font(.caption2)
-                    .fontWeight(state.needsAttention ? .bold : .semibold)
-                    .foregroundStyle(state.needsAttention ? AnyShapeStyle(state.color) : AnyShapeStyle(.secondary))
-                    .help(state.help)
                 Text(task.name).font(.callout).fontWeight(.medium).lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button { showLegend.toggle() } label: {
@@ -132,6 +125,15 @@ struct TaskCardView: View {
                 .popover(isPresented: $showLegend, arrowEdge: .trailing) { CardStatusLegend() }
             }
             badgeRow
+            HStack(spacing: 6) {
+                // One merged indicator: colored dot (spinning arc when running) + short label.
+                StatusDot(state: state)
+                Text(state.label)
+                    .font(.caption2)
+                    .fontWeight(state.needsAttention ? .bold : .semibold)
+                    .foregroundStyle(state.needsAttention ? AnyShapeStyle(state.color) : AnyShapeStyle(.secondary))
+                    .help(state.help)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

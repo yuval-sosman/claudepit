@@ -57,11 +57,6 @@ public struct ManagedConfig: Identifiable, Sendable {
             kind: .commandMarkdown, filename: "claudepit-task-implement.md",
             builtinDefault: HookScripts.taskCommandImplement, defaultEnabled: true, defaultNumber: nil),
         ManagedConfig(
-            id: "task-verify", title: "Task Command: Verify",
-            detail: "The /claudepit-task-verify slash-command, written to this project's .claude/commands/.",
-            kind: .commandMarkdown, filename: "claudepit-task-verify.md",
-            builtinDefault: HookScripts.taskCommandVerify, defaultEnabled: true, defaultNumber: nil),
-        ManagedConfig(
             id: "task-review", title: "Task Command: Review",
             detail: "The /claudepit-task-review slash-command, written to this project's .claude/commands/.",
             kind: .commandMarkdown, filename: "claudepit-task-review.md",

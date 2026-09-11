@@ -19,7 +19,7 @@ struct SpecDetailView: View {
                     Divider().opacity(0.15)
 
                     if showQA {
-                        PlanQAPanel(planContent: content, planPath: spec.path,
+                        PlanQAPanel(planContent: content, cwd: app.activePath, planPath: spec.path,
                                     contentLabel: "spec") { newContent, _ in
                             pendingImproved = newContent
                             showQA = false
