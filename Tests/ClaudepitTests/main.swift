@@ -24,6 +24,7 @@ let groups: [(String, () -> [Bool])] = [
     ("WorktreeStager", worktreeStagerChecks),
     ("WorktreeResumer", worktreeResumerChecks),
     ("HomeAttention", homeAttentionChecks),
+    ("HomeLayout", homeLayoutChecks),
     ("MemoryLog", memoryLogChecks),
     ("AppConfigStore", appConfigStoreChecks),
     ("HookRegistration", hookRegistrationChecks),
