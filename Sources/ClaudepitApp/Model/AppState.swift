@@ -326,6 +326,22 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The menu bar panel's entry point — deliberately *not* a reload.
+    ///
+    /// Opening the panel must be free: it renders whatever `usageSnapshot` already holds, and the
+    /// only work here is the work Home would have done anyway. The caches are read once when they
+    /// have never been read at all (the panel can be opened before Home is ever visited, and on a
+    /// cold launch the snapshot would otherwise be nil); after that this falls through to the same
+    /// staleness guards, so opening the panel ten times in a row costs no disk read and no
+    /// subprocess until the numbers are actually 15 minutes old.
+    func ensureUsageLoaded() {
+        if usageSnapshot == nil {
+            reloadUsageCaches(thenRefreshIfStale: true)
+        } else {
+            refreshUsageIfStale()
+        }
+    }
+
     /// Silent auto-refresh for Home's `.onAppear`. Every guard exists to stop a `claude`
     /// subprocess firing on each visit: nothing in flight, the cache actually old, no attempt
     /// within the window, and a login to attempt it with.

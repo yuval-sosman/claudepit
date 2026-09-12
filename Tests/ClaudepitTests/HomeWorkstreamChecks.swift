@@ -17,13 +17,15 @@ func homeWorkstreamChecks() -> [Bool] {
         ProjectTask(id: id, name: name, phase: phase, status: .running)
     }
 
-    results.append(check("an agent row carries its pane id; attention rows carry none") {
+    results.append(check("an agent row carries its pane id; an unbacked attention row carries none") {
         let out = buildWorkstream(
             attention: [attention("task:t1", "test", "blocked", .blocked, target: .task("t1"))],
             agents: [agent("w4:pA", "w4:pA", "working", target: .none)],
             tasks: [])
         try expectEqual(out.first { $0.kind == .agent }?.paneID, "w4:pA", "pane id for herdr focus")
-        try expect(out.first { $0.kind == .attentionTask }?.paneID == nil, "task rows navigate in-app")
+        let task = out.first { $0.kind == .attentionTask }
+        try expect(task?.paneID == nil, "no agent runs this task")
+        try expect(task?.focusPane == nil, "so it navigates in-app")
     })
 
     results.append(check("a terminal title beats the pane name on an unmatched agent row") {
@@ -47,21 +49,45 @@ func homeWorkstreamChecks() -> [Bool] {
                               title: "some-terminal-title", target: .task(id: "t1"))
         let out = buildWorkstream(attention: [], agents: [a], tasks: [t])
         try expectEqual(out.first?.title, "Redesign Home", "task name wins")
-        try expectEqual(out.first?.detail, "working in Implement", "phase phrasing unchanged")
+        try expectEqual(out.first?.detail, "working in Implement · p1", "phase phrasing plus the pane")
     })
 
-    results.append(check("an agent running an attention task folds into that row, not a second one") {
-        // The whole point: "test" was listed once as a chip and again as a row.
+    results.append(check("a blocked task is listed beside its agent, and both reach the pane") {
+        // Both rows on purpose: the task row names the work, the agent row names the pane. Folding
+        // them left no row that could open herdr, which is the only place a blocked task moves.
         let out = buildWorkstream(
             attention: [attention("task:t1", "test", "blocked in Brainstorm", .blocked, target: .task("t1"))],
             agents: [agent("p1", "task-t1-brainstorm", "blocked", target: .task(id: "t1"))],
             tasks: [task("t1", "test", phase: .brainstorm)])
-        try expectEqual(out.count, 1, "one row, not two")
-        guard let row = out.first else { throw CheckFailure(message: "no row") }
-        try expectEqual(row.id, "task:t1", "keeps the attention id")
-        try expectEqual(row.detail, "blocked in Brainstorm", "attention reason wins over the agent's")
-        try expectEqual(row.agentStatus, "blocked", "the agent survives as the row's live signal")
-        try expect(row.needsAttention, "still needs attention")
+        try expectEqual(out.map(\.id), ["task:t1", "agent:p1"], "task row, then its agent")
+        try expectEqual(out[0].detail, "blocked in Brainstorm", "attention reason on the task row")
+        try expectEqual(out[0].agentStatus, "blocked", "the agent is also the row's live signal")
+        try expect(out[0].needsAttention, "still needs attention")
+        try expectEqual(out[0].focusPane, "p1", "a blocked task clicks through to the pane")
+        try expectEqual(out[1].detail, "blocked in Brainstorm · p1", "the pane tells the rows apart")
+        try expectEqual(out[1].focusPane, "p1", "so does its agent")
+        try expect(!out[1].needsAttention, "the pair is one need — the task row owns it")
+    })
+
+    results.append(check("answering in herdr drops the task out of needs-attention at once") {
+        // The persisted status still says .blocked until TaskRunner's next poll; the live agent is
+        // the truth, so the row must not keep claiming "needs you" after you replied.
+        let out = buildWorkstream(
+            attention: [attention("task:t1", "test", "blocked in Brainstorm", .blocked, target: .task("t1"))],
+            agents: [agent("p1", "task-t1-brainstorm", "working", target: .task(id: "t1"))],
+            tasks: [task("t1", "test", phase: .brainstorm)])
+        try expectEqual(out.map(\.id), ["agent:p1"], "only the working agent is left")
+        try expect(!out[0].needsAttention, "and it is not waiting on you")
+    })
+
+    results.append(check("a failed task keeps its in-app target even with a live pane") {
+        // Retry lives in the app; only a *blocked* agent means the pane is where you are needed.
+        let out = buildWorkstream(
+            attention: [attention("task:t1", "test", "failed in Implement", .failed, target: .task("t1"))],
+            agents: [agent("p1", "task-t1-implement", "idle", target: .task(id: "t1"))],
+            tasks: [task("t1", "test", phase: .implement)])
+        try expectEqual(out[0].paneID, "p1", "the pane is known")
+        try expect(out[0].focusPane == nil, "but the row still opens the task")
     })
 
     results.append(check("an agent with no attention item of its own becomes its own row") {
@@ -73,7 +99,7 @@ func homeWorkstreamChecks() -> [Bool] {
         guard let row = out.first else { throw CheckFailure(message: "no row") }
         try expectEqual(row.id, "agent:p1", "namespaced by pane id")
         try expectEqual(row.title, "Redesign Home", "task name, not task-t1-implement")
-        try expectEqual(row.detail, "working in Implement", "mirrors the attention phrasing")
+        try expectEqual(row.detail, "working in Implement · p1", "mirrors the attention phrasing")
         try expect(!row.needsAttention, "a working agent is not waiting on you")
         try expect(row.target == .task("t1"), "task target")
     })
@@ -116,9 +142,10 @@ func homeWorkstreamChecks() -> [Bool] {
                         attention("task:t2", "two", "blocked in Implement", .blocked, target: .task("t2"))],
             agents: [agent("p1", "task-t1-implement", "blocked", target: .task(id: "t1"))],
             tasks: [])
-        try expectEqual(out.count, 2, "both rows")
+        try expectEqual(out.map(\.id), ["task:t1", "agent:p1", "task:t2"],
+                        "t1 and its agent, then t2 with none left to claim")
         try expectEqual(out[0].agentStatus, "blocked", "t1 got the agent")
-        try expect(out[1].agentStatus == nil, "t2 did not")
+        try expect(out[2].agentStatus == nil, "t2 did not")
     })
 
     results.append(check("neither source → an empty list") {

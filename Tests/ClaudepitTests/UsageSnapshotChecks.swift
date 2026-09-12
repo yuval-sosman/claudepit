@@ -194,6 +194,52 @@ func usageSnapshotChecks() -> [Bool] {
         try expect(StatsCache.today(days, now: noonUTC(2026, 9, 9), calendar: utc) == nil, "no row")
     })
 
+    results.append(check("gauges list session, week, then each model-scoped week") {
+        let snap = UsageSnapshot(
+            fetchedAt: Date(timeIntervalSince1970: 0),
+            fiveHour: UsageWindow(percent: 93, resetsAt: nil),
+            sevenDay: UsageWindow(percent: 30, resetsAt: nil),
+            limits: [
+                UsageLimit(kind: "session", percent: 93, severity: "critical",
+                           resetsAt: nil, isActive: true, modelDisplayName: nil),
+                UsageLimit(kind: "weekly_scoped", percent: 31, severity: "normal",
+                           resetsAt: nil, isActive: true, modelDisplayName: "Fable"),
+            ])
+        let labels = snap.gauges.map(\.label)
+        try expectEqual(labels, ["Session (5h)", "Week (all models)", "Week · Fable"], "order + labels")
+        // The two surfaces color by the same thresholds, not by the CLI's `severity` string.
+        try expect(snap.gauges[0].level == .critical, "93% is critical")
+        try expect(snap.gauges[1].level == .normal, "30% is normal")
+        try expect(snap.gauges[2].level == .normal, "scoped row uses the window thresholds")
+    })
+
+    results.append(check("gauges omit a window the cache does not carry") {
+        let snap = UsageSnapshot(fetchedAt: Date(timeIntervalSince1970: 0),
+                                 fiveHour: nil, sevenDay: nil, limits: [])
+        try expectEqual(snap.gauges.count, 0, "nothing to draw")
+    })
+
+    results.append(check("busiestGauge picks the fullest window, earliest on a tie") {
+        let snap = UsageSnapshot(
+            fetchedAt: Date(timeIntervalSince1970: 0),
+            fiveHour: UsageWindow(percent: 30, resetsAt: nil),
+            sevenDay: UsageWindow(percent: 71, resetsAt: nil),
+            limits: [UsageLimit(kind: "weekly_scoped", percent: 71, severity: "warning",
+                                resetsAt: nil, isActive: true, modelDisplayName: "Fable")])
+        try expectEqual(snap.busiestGauge?.label, "Week (all models)", "first of the tied maxima")
+        let empty = UsageSnapshot(fetchedAt: Date(timeIntervalSince1970: 0),
+                                  fiveHour: nil, sevenDay: nil, limits: [])
+        try expect(empty.busiestGauge == nil, "nothing cached, nothing to report")
+    })
+
+    results.append(check("a gauge fraction clamps an over-100 window") {
+        let snap = UsageSnapshot(fetchedAt: Date(timeIntervalSince1970: 0),
+                                 fiveHour: UsageWindow(percent: 120, resetsAt: nil),
+                                 sevenDay: nil, limits: [])
+        try expectEqual(snap.gauges[0].fraction, 1, "bar never overflows its track")
+        try expectEqual(snap.gauges[0].percent, 120, "but the number stays verbatim")
+    })
+
     results.append(check("StatsCache.load on a missing file returns empty") {
         let dir = try tempDir()
         try expectEqual(StatsCache.load(url: dir.appending(path: "nope.json")).count, 0, "empty")

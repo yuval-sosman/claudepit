@@ -83,6 +83,33 @@ func menuBarSummaryChecks() -> [Bool] {
         try expectEqual(s.rows.count, 1, "still listed in the panel")
     })
 
+    results.append(check("an idle menu bar reports the fullest limit window") {
+        let gauge = UsageGauge(id: "session", label: "Session (5h)", percent: 93,
+                               resetsAt: nil, level: .critical)
+        let s = buildMenuBarSummary(workstream: [], usage: gauge)
+        try expectEqual(s.segments.count, 1, "one segment")
+        try expectEqual(s.segments[0].symbol, "gauge.medium", "a meter, not the idle glyph")
+        try expectEqual(s.segments[0].count, "93%", "the percentage is the point")
+        try expectEqual(s.headline, "Session (5h) · 93% used", "tooltip names the window")
+    })
+
+    results.append(check("usage never displaces work") {
+        let gauge = UsageGauge(id: "session", label: "Session (5h)", percent: 93,
+                               resetsAt: nil, level: .critical)
+        let busy = buildMenuBarSummary(
+            workstream: [row("a", needsAttention: false, agentStatus: Herdr.AgentState.working)],
+            usage: gauge)
+        try expectEqual(busy.segments.map(\.symbol), ["bolt.horizontal.fill"], "work wins")
+        try expectEqual(busy.headline, "1 agent working", "and owns the headline")
+    })
+
+    results.append(check("no cached usage leaves the bare idle glyph") {
+        let s = buildMenuBarSummary(workstream: [], usage: nil)
+        try expectEqual(s.segments[0].symbol, "square.stack.3d.up", "still an item to click")
+        try expect(s.segments[0].count == nil, "nothing to report")
+        try expectEqual(s.headline, "Nothing running", "unchanged copy")
+    })
+
     results.append(check("the cap trims rows but never the counts") {
         let rows = (0..<11).map { row("r\($0)", needsAttention: true) }
         let s = buildMenuBarSummary(workstream: rows, limit: 8)

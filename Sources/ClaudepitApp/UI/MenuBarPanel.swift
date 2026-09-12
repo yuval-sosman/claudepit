@@ -36,9 +36,12 @@ struct MenuBarPanel: View {
                 }
             }
             Divider().padding(.horizontal, 12)
+            usage
+            Divider().padding(.horizontal, 12)
             footer
         }
         .frame(width: 320)
+        .onAppear { app.ensureUsageLoaded() }
     }
 
     // MARK: - Header
@@ -61,17 +64,13 @@ struct MenuBarPanel: View {
     // MARK: - Rows
 
     /// Mirrors `HomeSection.workRow` — same icon vocabulary (raised hand = waiting on you), same
-    /// trailing dot for the agent backing a row, and the same click contract: an agent row with a
-    /// live pane focuses that pane in herdr, everything else navigates inside the app and brings
-    /// the main window forward. The panel closes on its own either way, because whichever app ends
-    /// up frontmost is not this one.
-    ///
-    /// The `kind == .agent` guard is not redundant with `paneID != nil`: `buildWorkstream` sets a
-    /// pane id only on standalone agent rows, and an attention row that *folded* an agent in keeps
-    /// its in-app target on purpose — clicking a blocked task should land on the task.
+    /// trailing dot for the agent backing a row, and the same click contract: a row with a pane to
+    /// focus (`WorkItem.focusPane` — every agent row, and a task whose agent is blocked on a
+    /// question) opens that pane in herdr; everything else navigates inside the app and brings the
+    /// main window forward. The panel closes on its own either way, because whichever app ends up
+    /// frontmost is not this one.
     private func row(_ item: WorkItem) -> some View {
-        let herdrPane: String? =
-            (item.kind == .agent && WorktreeResumer.available()) ? item.paneID : nil
+        let herdrPane: String? = WorktreeResumer.available() ? item.focusPane : nil
         return Button {
             if let pane = herdrPane {
                 let cwd = app.activePath?.path ?? NSHomeDirectory()
@@ -121,6 +120,39 @@ struct MenuBarPanel: View {
         case .dirtyWorktree?:   return .orange
         case nil:               return item.needsAttention ? .orange : .green
         }
+    }
+
+    // MARK: - Usage
+
+    /// The same limit bars as Home's Claude Code card, from the same cached snapshot.
+    ///
+    /// Reads `app.usageSnapshot` and nothing else — opening the panel never fetches. The numbers
+    /// come from the CLI's own cache in `~/.claude.json`, which `AppState.ensureUsageLoaded()`
+    /// reads once and then only re-reads when it has actually gone stale, so the age is shown
+    /// beside the header rather than implied to be live.
+    @ViewBuilder private var usage: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Usage").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                if let snap = app.usageSnapshot {
+                    Text(snap.fetchedAt.formatted(.relative(presentation: .named)))
+                        .font(.caption2)
+                        .foregroundStyle(snap.isStale() ? Color.orange : .secondary)
+                }
+            }
+            if let snap = app.usageSnapshot {
+                UsageGaugeStack(gauges: snap.gauges, compact: true)
+            } else {
+                Text(app.claudeAuth?.needsSignIn == true
+                     ? "Sign in to Claude Code to see your limits."
+                     : "No usage data cached yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Footer
@@ -174,7 +206,10 @@ struct MenuBarPanel: View {
     let attention = buildAttention(tasks: app.tasks, worktrees: app.worktrees)
     let agents = buildLiveAgents(agents: app.herdrAgents, tasks: app.tasks)
     return buildMenuBarSummary(
-        workstream: buildWorkstream(attention: attention, agents: agents, tasks: app.tasks))
+        workstream: buildWorkstream(attention: attention, agents: agents, tasks: app.tasks),
+        // Shown only when nothing is running, so a quiet menu bar still reports something and
+        // stays obviously clickable. Read from the cached snapshot — never a fetch.
+        usage: app.usageSnapshot?.busiestGauge)
 }
 
 /// The status-bar label: one SF Symbol plus a count per `MenuBarSummary.segments`, so a glance
@@ -204,6 +239,10 @@ struct MenuBarLabel: View {
         Image(nsImage: MenuBarLabel.render(summary.segments))
             .accessibilityLabel(summary.headline)
             .help(summary.headline)
+            // The status item is on screen from launch, whatever section the window shows, so this
+            // is where the cached usage has to be loaded for the idle label to report it. Same
+            // guarded call the panel makes: at most one cache read, and a fetch only when stale.
+            .onAppear { app.ensureUsageLoaded() }
     }
 
     /// Draw the segments left to right into one template image sized to the menu bar's own font.

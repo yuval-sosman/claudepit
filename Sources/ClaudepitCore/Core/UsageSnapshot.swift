@@ -64,6 +64,23 @@ public struct ExtraUsage: Equatable, Sendable {
     }
 }
 
+/// One labeled limit bar: a window's name, how full it is, and when it rolls over.
+public struct UsageGauge: Equatable, Sendable, Identifiable {
+    public let id: String
+    public let label: String
+    public let percent: Int
+    public let resetsAt: Date?
+    public let level: UsageWindow.Level
+
+    public init(id: String, label: String, percent: Int, resetsAt: Date?, level: UsageWindow.Level) {
+        self.id = id; self.label = label; self.percent = percent
+        self.resetsAt = resetsAt; self.level = level
+    }
+
+    /// Clamped 0…1 for the bar — the CLI has been seen to report >100 on an exhausted window.
+    public var fraction: Double { min(1, max(0, Double(percent) / 100)) }
+}
+
 /// The `cachedUsageUtilization` subtree of `~/.claude.json`, which the CLI refreshes whenever it
 /// talks to the API (and always on `/usage`). Read-only: Claudepit never writes this file.
 public struct UsageSnapshot: Equatable, Sendable {
@@ -90,6 +107,42 @@ public struct UsageSnapshot: Equatable, Sendable {
     /// The scoped weekly rows, which the headline windows don't cover.
     public var scopedWeekly: [UsageLimit] {
         limits.filter { $0.kind == "weekly_scoped" }
+    }
+
+    /// The limit bars in display order — session, week, then one per model-scoped week.
+    ///
+    /// Lives here rather than in a view because two surfaces draw it (Home's Claude Code card and
+    /// the menu bar panel) and the labels are the part that would quietly drift apart.
+    public var gauges: [UsageGauge] {
+        var out: [UsageGauge] = []
+        if let five = fiveHour {
+            out.append(UsageGauge(id: "session", label: "Session (5h)", percent: five.percent,
+                                  resetsAt: five.resetsAt, level: five.level))
+        }
+        if let week = sevenDay {
+            out.append(UsageGauge(id: "weekly_all", label: "Week (all models)", percent: week.percent,
+                                  resetsAt: week.resetsAt, level: week.level))
+        }
+        for limit in scopedWeekly {
+            // The scoped rows carry the CLI's own `severity` string, but the thresholds behind the
+            // two headline windows are what the bars are colored by everywhere else — reuse them
+            // rather than mapping a second vocabulary onto the same three tints.
+            out.append(UsageGauge(id: limit.id,
+                                  label: "Week · \(limit.modelDisplayName ?? limit.kind)",
+                                  percent: limit.percent,
+                                  resetsAt: limit.resetsAt,
+                                  level: UsageWindow(percent: limit.percent, resetsAt: nil).level))
+        }
+        return out
+    }
+
+    /// The window closest to its limit — what a glance should report when nothing else is
+    /// happening. Ties keep the earlier (session before week) row.
+    public var busiestGauge: UsageGauge? {
+        gauges.reduce(nil) { best, gauge in
+            guard let best else { return gauge }
+            return gauge.percent > best.percent ? gauge : best
+        }
     }
 
     /// Parses the WHOLE `~/.claude.json` object. nil when the cache subtree is absent —

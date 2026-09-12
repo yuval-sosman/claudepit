@@ -128,63 +128,10 @@ struct HomeUsageCard: View {
     // MARK: - Limits
 
     /// One visual language for every window — the two headline gauges and the model-scoped
-    /// weekly rows all render the same labeled bar, so the card reads as one list.
-    @ViewBuilder private func gaugeStack(_ snap: UsageSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let five = snap.fiveHour {
-                gaugeRow("Session (5h)", percent: five.percent, resetsAt: five.resetsAt, level: five.level)
-            }
-            if let week = snap.sevenDay {
-                gaugeRow("Week (all models)", percent: week.percent, resetsAt: week.resetsAt, level: week.level)
-            }
-            ForEach(snap.scopedWeekly) { limit in
-                gaugeRow("Week · \(limit.modelDisplayName ?? limit.kind)",
-                         percent: limit.percent,
-                         resetsAt: limit.resetsAt,
-                         level: UsageWindow(percent: limit.percent, resetsAt: nil).level)
-            }
-            if snap.fiveHour == nil && snap.sevenDay == nil && snap.scopedWeekly.isEmpty {
-                Text("No window data in the cache.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func gaugeRow(_ label: String, percent: Int, resetsAt: Date?,
-                          level: UsageWindow.Level) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(label).font(.subheadline)
-                Spacer(minLength: 8)
-                Text("\(percent)%")
-                    .font(.subheadline.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(tint(level))
-            }
-            bar(fraction: min(1, max(0, Double(percent) / 100)), tint: tint(level))
-            if let resetsAt {
-                // The CLI prints "Resets Sep 14 at 12am (Asia/Jerusalem)"; the absolute stamp is
-                // already in local time here, so the timezone name would be noise.
-                Text("resets \(resetsAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
-                     + " · \(resetsAt.formatted(.relative(presentation: .named)))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    /// A 6pt capsule reads at a glance where the stock linear `ProgressView` all but vanishes
-    /// on the dark glass background.
-    private func bar(fraction: Double, tint: Color) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.08))
-                if fraction > 0 {
-                    Capsule().fill(tint)
-                        .frame(width: max(6, geo.size.width * fraction))
-                }
-            }
-        }
-        .frame(height: 6)
+    /// weekly rows all render the same labeled bar, so the card reads as one list. The rows and
+    /// the drawing both live in `UsageGaugeStack`, shared with the menu bar panel.
+    private func gaugeStack(_ snap: UsageSnapshot) -> some View {
+        UsageGaugeStack(gauges: snap.gauges)
     }
 
     @ViewBuilder private func creditsLine(_ snap: UsageSnapshot) -> some View {
@@ -194,14 +141,6 @@ struct HomeUsageCard: View {
                  : "Usage credits are off")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        }
-    }
-
-    private func tint(_ level: UsageWindow.Level) -> Color {
-        switch level {
-        case .normal:   return .accentColor
-        case .warning:  return .orange
-        case .critical: return .red
         }
     }
 
@@ -537,7 +476,7 @@ struct HomeUsageCard: View {
                 Text(CompactCount.tokens(totals.total))
                     .font(.subheadline.monospacedDigit().weight(.semibold))
             }
-            bar(fraction: share, tint: color)
+            UsageBar(fraction: share, tint: color)
             Text("In \(CompactCount.tokens(totals.inputTokens))"
                  + " · Out \(CompactCount.tokens(totals.outputTokens))"
                  + " · Cache \(CompactCount.tokens(totals.cacheReadTokens)) read"

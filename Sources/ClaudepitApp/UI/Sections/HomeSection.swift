@@ -170,9 +170,10 @@ struct HomeSection: View {
 
     // MARK: - Attention card
 
-    /// One list, not two. Attention items and live agents are largely the same objects — a blocked
-    /// task is both — so a chip strip above the rows printed the same name twice. `buildWorkstream`
-    /// folds the agent into the row it belongs to and leaves its status as a trailing dot.
+    /// One list, not two — a chip strip above the rows printed the same name twice. `buildWorkstream`
+    /// orders it: each task that wants something from you, trailed by the agent running it (its
+    /// status is also the task row's trailing dot), then the agents nothing else accounts for.
+    /// Only the task row of such a pair counts as needing attention.
     ///
     /// `workstream` is an unmemoized recompute (as are the two lists feeding it), so bind it once:
     /// the old body read `attention` three times a frame, re-running `buildAttention` each time.
@@ -202,12 +203,11 @@ struct HomeSection: View {
         }
     }
 
-    /// An agent row with a live pane opens that pane in herdr on click (the same
-    /// `WorktreeResumer.focusPane` behind every "Focus in Herdr" button); everything else
-    /// navigates inside the app.
+    /// A row with a pane to focus opens it in herdr on click (the same `WorktreeResumer.focusPane`
+    /// behind every "Focus in Herdr" button); everything else navigates inside the app. Which is
+    /// which is `WorkItem.focusPane`'s call, shared with the menu bar panel.
     private func workRow(_ item: WorkItem) -> some View {
-        let herdrPane: String? =
-            (item.kind == .agent && WorktreeResumer.available()) ? item.paneID : nil
+        let herdrPane: String? = WorktreeResumer.available() ? item.focusPane : nil
         return Button {
             if let pane = herdrPane {
                 let cwd = app.activePath?.path ?? NSHomeDirectory()

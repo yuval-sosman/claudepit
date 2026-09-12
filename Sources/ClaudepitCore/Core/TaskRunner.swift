@@ -111,9 +111,24 @@ public actor TaskRunner {
         }
         // No on-disk deliverable yet (createPlan/implement never have one). Fall back to the agent.
         let name = Self.agentName(id: t.id, phase: t.phase)
-        guard let obj = await herdr(["agent", "get", name], cwd: nil),
-              let status = agentStatus(obj),
-              status == Herdr.AgentState.idle || status == Herdr.AgentState.done else { return }
+        guard let obj = await herdr(["agent", "get", name], cwd: nil) else { return }  // herdr unreachable
+        guard let status = agentStatus(obj) else {
+            // herdr answered but knows no such agent (pane closed, herdr restarted). There is no
+            // prompt left to reply to, so "blocked" would be a state the user can never clear —
+            // fail it instead and let the card offer Retry. Mirrors `resolveRunning`.
+            fail(&t, projectSlug)
+            return
+        }
+        // The user answered in the pane and the agent picked the work back up. Nothing else moved
+        // the task out of `.blocked` before this, so it kept reporting "needs you" for the whole
+        // run — on the board, on Home, and in the menu bar — until the agent next went idle.
+        // `.running` is what the answer path (`answer`) sets for exactly this reason.
+        if status == Herdr.AgentState.working {
+            t.status = .running
+            saveIfChanged(t, original: task, projectSlug: projectSlug)
+            return
+        }
+        guard status == Herdr.AgentState.idle || status == Herdr.AgentState.done else { return }
         // An agent idling at its prompt with nothing to show stays idle indefinitely, and this runs
         // every few seconds — so only pay for the scrollback read when herdr says something actually
         // changed since we last looked. `state_change_seq` moves on every status transition.

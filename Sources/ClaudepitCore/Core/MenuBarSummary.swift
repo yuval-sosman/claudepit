@@ -15,12 +15,16 @@ public struct MenuBarSummary: Equatable {
     public let rows: [WorkItem]
     /// Rows dropped by the cap, so the panel can say "+N more" instead of lying by omission.
     public let overflow: Int
+    /// The limit worth reporting when nothing is running — nil when no usage is cached yet.
+    public let usage: UsageGauge?
 
-    public init(attentionCount: Int, workingCount: Int, rows: [WorkItem], overflow: Int) {
+    public init(attentionCount: Int, workingCount: Int, rows: [WorkItem], overflow: Int,
+                usage: UsageGauge? = nil) {
         self.attentionCount = attentionCount
         self.workingCount = workingCount
         self.rows = rows
         self.overflow = overflow
+        self.usage = usage
     }
 
     /// One icon-plus-count pair in the status item's label.
@@ -48,7 +52,17 @@ public struct MenuBarSummary: Equatable {
         if workingCount > 0 {
             out.append(Segment(symbol: busySymbol, count: "\(workingCount)"))
         }
-        if out.isEmpty { out.append(Segment(symbol: idleSymbol, count: nil)) }
+        // Nothing running: report the fullest limit window instead of a bare glyph. The status
+        // item is always on screen while the app is, and an icon with no number gave a reader no
+        // reason to look at it — this way a quiet menu bar still says something true, and the
+        // usage bars behind it are one click away.
+        if out.isEmpty {
+            if let usage {
+                out.append(Segment(symbol: usageSymbol, count: "\(usage.percent)%"))
+            } else {
+                out.append(Segment(symbol: idleSymbol, count: nil))
+            }
+        }
         return out
     }
 
@@ -65,6 +79,8 @@ public struct MenuBarSummary: Equatable {
     public var attentionSymbol: String { "hand.raised.fill" }
     public var busySymbol: String { "bolt.horizontal.fill" }
     public var idleSymbol: String { "square.stack.3d.up" }
+    /// Idle-with-usage: a meter, distinct in shape from both the hand and the bolt.
+    public var usageSymbol: String { "gauge.medium" }
 
     /// Leading SF Symbol for the status item — the first segment's.
     public var symbol: String { segments[0].symbol }
@@ -72,7 +88,9 @@ public struct MenuBarSummary: Equatable {
     /// One line for the panel header and the item's tooltip.
     public var headline: String {
         switch (attentionCount, workingCount) {
-        case (0, 0):            return "Nothing running"
+        case (0, 0):
+            guard let usage else { return "Nothing running" }
+            return "\(usage.label) · \(usage.percent)% used"
         case (0, let w):        return "\(w) agent\(w == 1 ? "" : "s") working"
         case (let a, 0):        return "\(a) item\(a == 1 ? "" : "s") need you"
         case (let a, let w):    return "\(a) need\(a == 1 ? "s" : "") you · \(w) working"
@@ -81,7 +99,10 @@ public struct MenuBarSummary: Equatable {
 }
 
 /// Pure builder. `limit` caps the listed rows; the counts always describe the full list.
-public func buildMenuBarSummary(workstream: [WorkItem], limit: Int = 8) -> MenuBarSummary {
+/// `usage` is only ever shown when nothing is running — see `MenuBarSummary.segments`.
+public func buildMenuBarSummary(workstream: [WorkItem],
+                                usage: UsageGauge? = nil,
+                                limit: Int = 8) -> MenuBarSummary {
     let attention = workstream.filter { $0.needsAttention }.count
     // A row that needs attention is not also counted as busy, even when an agent backs it —
     // otherwise a blocked task with a live pane would be tallied twice in one line.
@@ -90,5 +111,6 @@ public func buildMenuBarSummary(workstream: [WorkItem], limit: Int = 8) -> MenuB
     return MenuBarSummary(attentionCount: attention,
                           workingCount: working,
                           rows: capped,
-                          overflow: max(0, workstream.count - capped.count))
+                          overflow: max(0, workstream.count - capped.count),
+                          usage: usage)
 }
