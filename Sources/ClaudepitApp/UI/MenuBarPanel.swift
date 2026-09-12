@@ -178,24 +178,75 @@ struct MenuBarPanel: View {
 }
 
 /// The status-bar label: one SF Symbol plus a count per `MenuBarSummary.segments`, so a glance
-/// says both *what kind* of activity and *how much* — and, when something is blocked while other
-/// agents keep working, says both at once (`✋1 ⚡2`) instead of hiding the working count behind
-/// the raised hand. `MenuBarExtra` renders `Text`/`Image` and stacks of them; anything richer
-/// (a shape, a `Circle` badge) is silently dropped by AppKit's status-item hosting, and the image
-/// is drawn as a template, so the states differ by symbol rather than by tint.
+/// says both *what kind* of activity and *how much* — and, when something is waiting on you while
+/// other agents keep working, says both at once (`✋1  ⚡2`) instead of hiding the working count
+/// behind the raised hand.
+///
+/// **The label is one pre-rendered image, on purpose.** AppKit's status-item hosting keeps only
+/// the first `Image` and `Text` of a `MenuBarExtra` label and drops the rest; worse, anything
+/// *dynamic* loses its symbols entirely. All of this was measured on macOS 26:
+///
+/// - `HStack { icon; count; icon; count }` → renders the first pair only.
+/// - `Text("\(Image(systemName: "hand.raised.fill"))1  \(Image(systemName: "bolt…"))2")` →
+///   renders fully, but only while every interpolation is a **literal**; swap in a variable symbol
+///   name or count and the glyphs vanish, leaving a bare "1  2".
+/// - `Text(Image(…)) + Text(verbatim: count)` → same bare numbers, concatenation drops the images.
+///
+/// Compositing the symbols and counts into a single template `NSImage` sidesteps the whole budget:
+/// it is one `Image`, it stays dynamic, and `isTemplate` keeps it tinted by the menu bar exactly
+/// like the system items next to it (which is also why the states must differ by *shape* — a
+/// SwiftUI tint would be discarded here).
 struct MenuBarLabel: View {
     @ObservedObject var app: AppState
 
     var body: some View {
         let summary = menuBarSummary(app)
-        HStack(spacing: 5) {
-            ForEach(summary.segments, id: \.symbol) { segment in
-                HStack(spacing: 3) {
-                    Image(systemName: segment.symbol)
-                    if let count = segment.count { Text(count) }
+        Image(nsImage: MenuBarLabel.render(summary.segments))
+            .accessibilityLabel(summary.headline)
+            .help(summary.headline)
+    }
+
+    /// Draw the segments left to right into one template image sized to the menu bar's own font.
+    static func render(_ segments: [MenuBarSummary.Segment]) -> NSImage {
+        let font = NSFont.menuBarFont(ofSize: 0)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: font.pointSize - 1, weight: .medium)
+        let drawn: [(symbol: NSImage?, count: NSAttributedString?)] = segments.map {
+            (NSImage(systemSymbolName: $0.symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(symbolConfig),
+             $0.count.map { NSAttributedString(string: $0, attributes: attrs) })
+        }
+        let gap: CGFloat = 2       // symbol → its own count
+        let between: CGFloat = 7   // one segment → the next
+
+        var width: CGFloat = 0
+        for (index, part) in drawn.enumerated() {
+            if index > 0 { width += between }
+            width += (part.symbol?.size.width ?? 0)
+            if let count = part.count { width += gap + count.size().width }
+        }
+        let height = max(drawn.compactMap { $0.symbol?.size.height }.max() ?? 16, font.pointSize + 4)
+
+        let image = NSImage(size: NSSize(width: max(1, ceil(width)), height: ceil(height)),
+                            flipped: false) { _ in
+            var x: CGFloat = 0
+            for (index, part) in drawn.enumerated() {
+                if index > 0 { x += between }
+                if let symbol = part.symbol {
+                    symbol.draw(in: NSRect(x: x, y: (height - symbol.size.height) / 2,
+                                           width: symbol.size.width, height: symbol.size.height),
+                                from: .zero, operation: .sourceOver, fraction: 1)
+                    x += symbol.size.width
+                }
+                if let count = part.count {
+                    x += gap
+                    count.draw(at: NSPoint(x: x, y: (height - count.size().height) / 2))
+                    x += count.size().width
                 }
             }
+            return true
         }
-        .help(summary.headline)
+        image.isTemplate = true   // let the menu bar tint it (light/dark, inactive, highlighted)
+        return image
     }
 }
