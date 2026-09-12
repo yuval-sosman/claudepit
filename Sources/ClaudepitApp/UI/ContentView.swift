@@ -26,8 +26,10 @@ struct ContentView: View {
                 VStack(spacing: 12) {
                     PathBar(app: app)
                     ScrollView {
+                        // No horizontal inset: the cards align with the PathBar's edges,
+                        // matching every other section's layout.
                         HomeSection(app: app)
-                            .padding(20)
+                            .padding(.bottom, 8)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }

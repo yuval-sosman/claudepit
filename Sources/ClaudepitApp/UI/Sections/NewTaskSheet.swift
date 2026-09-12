@@ -30,6 +30,11 @@ struct NewTaskSheet: View {
     @State private var depTopicFilter: String? = nil
     @State private var topicOptions: [String] = []
 
+    @State private var aiExpanded = false
+    @State private var aiIdea = ""
+    @State private var aiGenerating = false
+    @State private var aiError: String? = nil
+
     @FocusState private var focusedRequirement: Int?
 
     private var isEditing: Bool { editing != nil }
@@ -48,6 +53,7 @@ struct NewTaskSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    if editing == nil { aiSection }
                     summarySection
                     topicSection
                     descriptionSection
@@ -75,6 +81,64 @@ struct NewTaskSheet: View {
     }
 
     // MARK: - Sections
+
+    /// Collapsed by default — a one-line header so the AI option doesn't dominate the form
+    /// for users filling it by hand. Mirrors `section()`'s container styling with a
+    /// chevron-toggle header (the DiscoverSheet/PluginsSection expansion idiom).
+    private var aiSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { aiExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: aiExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(aiExpanded ? Color.accentColor : .secondary)
+                    Image(systemName: "sparkles")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                    Text("CREATE WITH AI").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    // Generation keeps running while collapsed — surface it in the header.
+                    if aiGenerating && !aiExpanded { ProgressView().controlSize(.small) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if aiExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Describe the task in your own words — Claude fills in the form below.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: $aiIdea)
+                        .font(.body)
+                        .frame(minHeight: 70)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.10), lineWidth: 1))
+                    HStack(spacing: 8) {
+                        Button {
+                            generateWithAI()
+                        } label: {
+                            Label("Generate", systemImage: "sparkles")
+                        }
+                        .disabled(aiGenerating || aiIdea.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if aiGenerating {
+                            ProgressView().controlSize(.small)
+                            Text("Generating…").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let err = aiError {
+                        Text(err).font(.caption).foregroundStyle(.red)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+    }
 
     private var summarySection: some View {
         section("Summary", required: true) {
@@ -257,6 +321,63 @@ struct NewTaskSheet: View {
         if requirements.isEmpty { requirements = [""] }
     }
     private func depName(_ id: String) -> String { app.tasks.first { $0.id == id }?.name ?? id }
+
+    private func generateWithAI() {
+        let idea = aiIdea.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !idea.isEmpty, !aiGenerating else { return }
+        aiError = nil
+        aiGenerating = true
+        // Snapshot everything the background task needs before leaving the main actor.
+        let topics = topicOptions
+        let candidates = app.tasks.filter { $0.status != .done }
+            .map { TaskDraftRunner.Candidate(id: $0.id, name: $0.name, topic: $0.topic) }
+        // All ids, not just the offered candidates — the manual dependency menu allows
+        // any task, so sanitization must never drop a real id.
+        let validIDs = Set(app.tasks.map(\.id))
+        let cwd = app.activePath
+        Task {
+            do {
+                let draft = try await TaskDraftRunner.generate(
+                    idea: idea, topics: topics, candidates: candidates,
+                    validTaskIDs: validIDs, cwd: cwd)
+                await MainActor.run { apply(draft); aiGenerating = false }
+            } catch TaskDraftError.claudeNotFound {
+                await MainActor.run {
+                    aiError = "claude CLI not found — make sure it's installed and on PATH"
+                    aiGenerating = false
+                }
+            } catch TaskDraftError.processFailed(let code, let message) {
+                let signedOut = ClaudeAuth.isNotLoggedIn(message)
+                if signedOut { NotificationCenter.default.post(name: .claudeAuthSuspect, object: nil) }
+                await MainActor.run {
+                    aiError = signedOut
+                        ? "Claude is signed out — run `\(ClaudeAuth.signInCommand)`."
+                        : "Generation failed (exit \(code)): \(message.prefix(200))"
+                    aiGenerating = false
+                }
+            } catch TaskDraftError.invalidJSON {
+                await MainActor.run {
+                    aiError = "Claude returned an unexpected format — try Generate again."
+                    aiGenerating = false
+                }
+            } catch {
+                await MainActor.run {
+                    aiError = error.localizedDescription
+                    aiGenerating = false
+                }
+            }
+        }
+    }
+
+    private func apply(_ draft: TaskVersion) {
+        name = draft.name
+        topic = draft.topic
+        description = draft.description
+        requirements = draft.requirements.isEmpty ? [""] : draft.requirements   // keep one editable row
+        priority = draft.priority
+        tags = draft.tags
+        dependsOn = Set(draft.dependsOn)
+    }
 
     private func load() {
         topicOptions = app.activePath.map { TopicStore.shared.load(projectSlug: Paths.slug(for: $0)) } ?? []

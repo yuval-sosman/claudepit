@@ -45,6 +45,8 @@ secrets.json
 .claude/settings.json.backup.*
 .claude/scheduled_tasks.json
 .claude/scheduled_tasks.lock
+# Task worktrees: live git checkouts created by WorktreeStager, not source.
+.claude/worktrees/
 
 # ── Logs / temp ───────────────────────────────────────────────────────────
 *.log

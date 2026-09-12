@@ -11,7 +11,11 @@ SUMMARY_FILE_PATH=""
 NOW=$(date +%s)
 
 if [[ -n "$SESSION_ID" && -n "$PROJECT_DIR" ]]; then
+  # Match Claude Code's own project-dir slug: '/', '.', and '+' all become '-'
+  # (a plain '/'-only replace mismatches worktree paths, which contain ".claude/worktrees").
   SLUG="${PROJECT_DIR//\//-}"
+  SLUG="${SLUG//./-}"
+  SLUG="${SLUG//+/-}"
   SUMMARY_DIR="$HOME/.claude/projects/${SLUG}/summary"
   SUMMARIES_FILE="${SUMMARY_DIR}/${SESSION_ID}.json"
   SUMMARY_FILE_PATH="$SUMMARIES_FILE"

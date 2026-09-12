@@ -10,10 +10,11 @@ public enum TaskTransition {
     /// hands the agent. nil for phases that choose their own filename (`createPlan` writes under
     /// `plansDir`) or write no file at all (`implement`) — those are only discoverable from the
     /// agent's `CLAUDEPIT_ARTIFACT:` marker.
-    public static func expectedArtifact(phase: TaskPhase?, projectSlug: String, taskID: String) -> URL? {
-        let dir = Paths.taskDir(projectSlug: projectSlug, id: taskID)
+    public static func expectedArtifact(phase: TaskPhase?, projectSlug: String, taskID: String,
+                                         projectsRoot: URL = Paths.projectsRoot) -> URL? {
+        let dir = projectsRoot.appending(path: projectSlug).appending(path: "tasks").appending(path: taskID)
         switch phase {
-        case .brainstorm: return Paths.taskBrainstormFile(projectSlug: projectSlug, id: taskID)
+        case .brainstorm: return dir.appending(path: "brainstorm.yaml")
         case .writeSpec:  return dir.appending(path: "spec.md")
         case .codeReview: return dir.appending(path: "review.md")
         case .createPlan, .implement, .none: return nil
@@ -29,9 +30,10 @@ public enum TaskTransition {
     /// right there — and the detail view's "Review spec" button disabled for an artifact that
     /// plainly exists. Checked for EVERY phase, not just the current one, so a task that has since
     /// moved on still heals its earlier links.
-    public static func healArtifactLinks(_ task: ProjectTask, projectSlug: String) -> ProjectTask? {
+    public static func healArtifactLinks(_ task: ProjectTask, projectSlug: String,
+                                          projectsRoot: URL = Paths.projectsRoot) -> ProjectTask? {
         func existing(_ phase: TaskPhase) -> String? {
-            guard let u = expectedArtifact(phase: phase, projectSlug: projectSlug, taskID: task.id),
+            guard let u = expectedArtifact(phase: phase, projectSlug: projectSlug, taskID: task.id, projectsRoot: projectsRoot),
                   FileManager.default.fileExists(atPath: u.path) else { return nil }
             return u.path
         }

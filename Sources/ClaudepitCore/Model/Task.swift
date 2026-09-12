@@ -274,6 +274,28 @@ public struct ProjectTask: Codable, Identifiable, Sendable, Equatable {
         }
     }
 
+    /// Whether the main version's request fields (summary / topic / description / requirements /
+    /// priority / labels / dependencies) may still be edited by hand — drives the detail view's
+    /// Edit button.
+    ///
+    /// Two board columns qualify: **Backlog** (nothing has run yet) and **Brainstorm** (the one
+    /// phase whose job *is* refining the request, so a hand-correction is in scope). Every later
+    /// column is locked — spec/plan/implement/review all argue from a request already handed to an
+    /// agent, and editing it there would put the artifacts and the request out of sync.
+    ///
+    /// Inside Brainstorm a live agent vetoes: `.running`/`.blocked` mean herdr already holds the
+    /// old description in its prompt, so the edit would silently never reach it. It unlocks again
+    /// once the phase lands in `.awaitingReview`/`.failed`.
+    ///
+    /// Narrower than the suggestion-version rule (`New Draft` / `TaskVersionsSheet`), which stays
+    /// Backlog-only.
+    public var allowsMainEdit: Bool {
+        switch status {
+        case .done, .running, .blocked:          return false
+        case .backlog, .awaitingReview, .failed: return phase == nil || phase == .brainstorm
+        }
+    }
+
     /// Fields touched by pending brainstorm suggestions — drives the "ready for review" affordance.
     public var pendingBrainstormFields: Set<VersionField> {
         var out: Set<VersionField> = []

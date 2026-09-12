@@ -84,6 +84,17 @@ public enum Herdr {
         public let name: String?
         public let paneID: String
         public let status: String
+        /// `terminal_title_stripped` — Claude Code's own terminal title (its running session's
+        /// topic, e.g. "fix-worktree-project-slug"), minus the spinner glyph. The only
+        /// human-readable name herdr has for an unnamed agent.
+        public let title: String?
+        public let cwd: String?
+
+        public init(sessionID: String?, name: String?, paneID: String, status: String,
+                    title: String? = nil, cwd: String? = nil) {
+            self.sessionID = sessionID; self.name = name; self.paneID = paneID
+            self.status = status; self.title = title; self.cwd = cwd
+        }
     }
 
     /// Agent status vocabulary herdr reports (`AgentStatus` in its API schema).
@@ -139,8 +150,11 @@ public enum Herdr {
             guard let pane = a["pane_id"] as? String,
                   let status = a["agent_status"] as? String else { return nil }
             let sid = (a["agent_session"] as? [String: Any])?["value"] as? String
+            let title = a["terminal_title_stripped"] as? String
             return AgentEntry(sessionID: (sid?.isEmpty == false) ? sid : nil,
-                              name: a["name"] as? String, paneID: pane, status: status)
+                              name: a["name"] as? String, paneID: pane, status: status,
+                              title: (title?.isEmpty == false) ? title : nil,
+                              cwd: a["cwd"] as? String)
         }
     }
 

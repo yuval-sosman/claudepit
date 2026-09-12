@@ -4,11 +4,11 @@ import Foundation
 func homeLayoutChecks() -> [Bool] {
     var results: [Bool] = []
 
-    results.append(check("constants: 640 breakpoint, 16 gap, 280 floor, 0.40 fraction") {
+    results.append(check("constants: 640 breakpoint, 16 gap, 300 floor, 0.45 fraction") {
         try expectEqual(HomeLayout.twoColumnMinWidth, 640, "twoColumnMinWidth")
         try expectEqual(HomeLayout.columnSpacing, 16, "columnSpacing")
-        try expectEqual(HomeLayout.minRightColumnWidth, 280, "minRightColumnWidth")
-        try expectEqual(HomeLayout.rightColumnFraction, 0.40, "rightColumnFraction")
+        try expectEqual(HomeLayout.minRightColumnWidth, 300, "minRightColumnWidth")
+        try expectEqual(HomeLayout.rightColumnFraction, 0.45, "rightColumnFraction")
     })
 
     results.append(check("isTwoColumn: false below 640, true at and above") {
@@ -25,20 +25,22 @@ func homeLayoutChecks() -> [Bool] {
         try expect(HomeLayout.columnWidths(width: 639) == nil, "width 639 should stack")
     })
 
-    results.append(check("columnWidths at the breakpoint: the 280 floor is active") {
+    results.append(check("columnWidths at the breakpoint: the 300 floor is active") {
         guard let cols = HomeLayout.columnWidths(width: 640) else {
             throw CheckFailure(message: "expected two columns at 640")
         }
-        try expectEqual(cols.left, 344, "left at 640")
-        try expectEqual(cols.right, 280, "right at 640")
+        // usable 624 × 0.45 = 280.8, floored to 300.
+        try expectEqual(cols.left, 324, "left at 640")
+        try expectEqual(cols.right, 300, "right at 640")
     })
 
-    results.append(check("columnWidths at 1200: the 0.40 fraction is active") {
+    results.append(check("columnWidths at 1200: the 0.45 fraction is active") {
         guard let cols = HomeLayout.columnWidths(width: 1200) else {
             throw CheckFailure(message: "expected two columns at 1200")
         }
-        try expectEqual(cols.right, 473.6, "right at 1200")
-        try expectEqual(cols.left, 710.4, "left at 1200")
+        // 0.45 is not exactly representable in IEEE double (0.40 was), so tolerance-compare.
+        try expect(abs(cols.right - 532.8) < 0.001, "right at 1200: got \(cols.right)")
+        try expect(abs(cols.left - 651.2) < 0.001, "left at 1200: got \(cols.left)")
     })
 
     results.append(check("columnWidths invariants: no drift, floor honoured, left is wider") {
@@ -52,7 +54,7 @@ func homeLayoutChecks() -> [Bool] {
                        "right \(cols.right) below floor at \(width)")
             try expect(cols.left >= cols.right,
                        "left \(cols.left) narrower than right \(cols.right) at \(width)")
-            try expect(cols.left >= 344, "left \(cols.left) starved at \(width)")
+            try expect(cols.left >= 324, "left \(cols.left) starved at \(width)")
         }
     })
 

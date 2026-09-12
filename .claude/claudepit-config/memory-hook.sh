@@ -74,7 +74,11 @@ PYEOF
   fi
 fi
 
+# Match Claude Code's own project-dir slug: '/', '.', and '+' all become '-'
+# (a plain '/'-only replace mismatches worktree paths, which contain ".claude/worktrees").
 SLUG="${PROJECT_DIR//\//-}"
+SLUG="${SLUG//./-}"
+SLUG="${SLUG//+/-}"
 LOG_FILE="$HOME/.claude/projects/${SLUG}/memory/log.json"
 
 WRITES_SINCE_DREAM=0

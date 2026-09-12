@@ -33,6 +33,7 @@ struct SessionsSection: View {
         }
         .onAppear {
             app.reloadSessions()
+            applyDiscoverIntent()
             if let focusID = app.focusSessionID {
                 selectedID = focusID
                 app.focusSessionID = nil
@@ -43,6 +44,7 @@ struct SessionsSection: View {
         }
         .onChange(of: app.sessions.count) { reloadGroups() }
         .onChange(of: app.activePath) { reloadGroups() }
+        .onChange(of: app.openDiscoverSheet) { applyDiscoverIntent() }
         .onChange(of: app.focusSessionID) { _, id in
             guard let id else { return }
             selectedID = id
@@ -62,6 +64,16 @@ struct SessionsSection: View {
             if let id { scrollProxy?.scrollTo(id, anchor: .center) }
         }
         .textSelection(.disabled)
+    }
+
+    /// Home's one-shot "open Discover" intent (documented focus pattern — the consumer clears it).
+    private func applyDiscoverIntent() {
+        guard app.openDiscoverSheet else { return }
+        app.openDiscoverSheet = false
+        // Same capture as the toolbar Discover button: the sheet's frame is sized from these.
+        appWindowWidth = NSApp.keyWindow?.frame.width ?? 1100
+        appWindowHeight = NSApp.keyWindow?.frame.height ?? 800
+        showDiscover = true
     }
 
     private func reloadGroups() {

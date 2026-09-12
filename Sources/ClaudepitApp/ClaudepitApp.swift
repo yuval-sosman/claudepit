@@ -46,5 +46,11 @@ struct ClaudepitApp: App {
             }
         }
         .windowStyle(.hiddenTitleBar)
+
+        // Status-bar item. Shares the one `AppState` with the window above — it is a second
+        // *view* of the same data, never a second source of truth, so its count and Home's
+        // "Needs attention" card are the same list by construction.
+        MenuBarExtra { MenuBarPanel(app: app) } label: { MenuBarLabel(app: app) }
+            .menuBarExtraStyle(.window)
     }
 }

@@ -4,22 +4,32 @@ import AppKit
 
 struct HomeSection: View {
     @ObservedObject var app: AppState
-    @State private var plans: [PlanFile] = []
 
     /// Width `HomeSection.body` was proposed, measured by the background probe on the root
     /// stack. `0` until the first measurement lands — `HomeLayout.columnWidths` returns nil
     /// there, so the very first frame renders single-column.
     @State private var contentWidth: CGFloat = 0
 
+    @State private var showAllAttention = false
+
     private var attention: [AttentionItem] {
         buildAttention(tasks: app.tasks, worktrees: app.worktrees)
+    }
+
+    /// Deliberately unmemoized, like `attention`: both arrays are tiny, and a cache keyed on
+    /// herdr-agent equality is more fragile than the recompute.
+    private var liveAgents: [LiveAgentItem] {
+        buildLiveAgents(agents: app.herdrAgents, tasks: app.tasks)
+    }
+
+    /// The two lists above, folded into the one list the card actually renders.
+    private var workstream: [WorkItem] {
+        buildWorkstream(attention: attention, agents: liveAgents, tasks: app.tasks)
     }
 
     var body: some View {
         LazyVStack(spacing: 16) {
             if app.activePath != nil {
-                identityHeader
-                if !attention.isEmpty { attentionCard }
                 responsiveBody
             } else {
                 welcomePanel
@@ -43,30 +53,8 @@ struct HomeSection: View {
         .onAppear {
             app.reloadSessions()
             app.loadTasks()
-            reloadPlans()
+            app.reloadUsageCaches(thenRefreshIfStale: true)
         }
-        .onChange(of: app.plansChangeToken) { reloadPlans() }
-        .onChange(of: app.activePath) { reloadPlans() }
-    }
-
-    // MARK: - Plans data
-
-    private func reloadPlans() {
-        let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(
-            at: Paths.plansRoot,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: .skipsHiddenFiles
-        ) else { plans = []; return }
-        plans = items
-            .filter { $0.pathExtension == "md" }
-            .compactMap { url -> PlanFile? in
-                let attrs = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-                let modified = attrs?.contentModificationDate ?? Date.distantPast
-                let name = url.deletingPathExtension().lastPathComponent
-                return PlanFile(name: name, path: url, modifiedAt: modified)
-            }
-            .sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
     private func chooseFolder() {
@@ -140,33 +128,6 @@ struct HomeSection: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Identity header
-
-    @ViewBuilder private var identityHeader: some View {
-        if let base = app.activePath {
-            GlassCard {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(base.lastPathComponent)
-                        .font(.headline)
-                    Text(String(Paths.slug(for: base).prefix(40)))
-                        .font(.caption)
-                        .fontDesign(.monospaced)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    HStack(spacing: 6) {
-                        attentionBadge
-                        capsuleChip("\(app.sessions.count) sessions")
-                        capsuleChip("\(app.tasks.count) tasks")
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-            }
-        }
-    }
-
     // MARK: - Responsive region
 
     /// Two columns when the measured width allows it, one otherwise. Holds no content itself.
@@ -177,89 +138,129 @@ struct HomeSection: View {
         if let cols = HomeLayout.columnWidths(width: contentWidth) {
             HStack(alignment: .top, spacing: HomeLayout.columnSpacing) {
                 leftColumn.frame(width: cols.left)
-                recentCard.frame(width: cols.right)
+                rightColumn.frame(width: cols.right)
             }
         } else {
             VStack(spacing: 16) {
-                statsGridCard
                 tasksPipelineCard
-                recentCard
+                if !attention.isEmpty || !liveAgents.isEmpty { attentionCard }
+                HomeUsageCard(app: app)
+                HomeActivityCard(app: app)
             }
         }
     }
 
+    /// The wide column carries the text-heavy activity feed; the narrow one gets the gauges
+    /// and short lists. The reverse assignment left a tall void beside the feed — the right
+    /// column was several screens of wrapped text while the left ended after two cards.
+    /// Needs attention sits between Tasks and Recent at the same width (user's placement).
     private var leftColumn: some View {
         VStack(spacing: 16) {
-            statsGridCard
             tasksPipelineCard
+            if !attention.isEmpty || !liveAgents.isEmpty { attentionCard }
+            HomeActivityCard(app: app)
         }
     }
 
-    @ViewBuilder private var attentionBadge: some View {
-        if attention.isEmpty {
-            Label("All clear", systemImage: "checkmark.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else {
-            let urgent = attention.contains { $0.severity == .failed || $0.severity == .blocked }
-            Label("\(attention.count)", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption.bold())
-                .foregroundStyle(urgent ? .red : .orange)
+    private var rightColumn: some View {
+        VStack(spacing: 16) {
+            HomeUsageCard(app: app)
         }
-    }
-
-    private func capsuleChip(_ label: String) -> some View {
-        Text(label)
-            .font(.caption)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.white.opacity(0.08), in: Capsule())
     }
 
     // MARK: - Attention card
 
+    /// One list, not two. Attention items and live agents are largely the same objects — a blocked
+    /// task is both — so a chip strip above the rows printed the same name twice. `buildWorkstream`
+    /// folds the agent into the row it belongs to and leaves its status as a trailing dot.
+    ///
+    /// `workstream` is an unmemoized recompute (as are the two lists feeding it), so bind it once:
+    /// the old body read `attention` three times a frame, re-running `buildAttention` each time.
     private var attentionCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Needs attention").font(.headline)
-                VStack(spacing: 2) {
-                    ForEach(attention.prefix(6)) { item in
-                        attentionRow(item)
-                    }
+        let rows = workstream
+        let shown = showAllAttention ? rows : Array(rows.prefix(6))
+        return GlassCard {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Live Agents")
+                    .font(.headline)
+                    .padding(.bottom, 2)
+                VStack(spacing: 0) {
+                    ForEach(shown) { workRow($0) }
                 }
-                if attention.count > 6 {
-                    Text("+\(attention.count - 6) more")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if rows.count > 6 {
+                    Button(showAllAttention ? "Show less" : "+\(rows.count - 6) more") {
+                        showAllAttention.toggle()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.top, 4)
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, 16)
+            .padding(.vertical, 14)
         }
     }
 
-    private func attentionRow(_ item: AttentionItem) -> some View {
-        Button { jump(to: item.target) } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Circle()
-                    .fill(dotColor(item.severity))
-                    .frame(width: 10, height: 10)
-                    .padding(.top, 5)
-                VStack(alignment: .leading, spacing: 2) {
+    /// An agent row with a live pane opens that pane in herdr on click (the same
+    /// `WorktreeResumer.focusPane` behind every "Focus in Herdr" button); everything else
+    /// navigates inside the app.
+    private func workRow(_ item: WorkItem) -> some View {
+        let herdrPane: String? =
+            (item.kind == .agent && WorktreeResumer.available()) ? item.paneID : nil
+        return Button {
+            if let pane = herdrPane {
+                let cwd = app.activePath?.path ?? NSHomeDirectory()
+                Task { await WorktreeResumer.focusPane(paneID: pane, cwd: cwd) }
+            } else {
+                jump(work: item.target)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: workIcon(item))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(workTint(item))
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 1) {
                     Text(item.title)
-                        .font(.body)
+                        .font(.subheadline)
                         .lineLimit(1)
-                    Text(item.reason)
+                    Text(item.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 8)
+                // A live agent backs this row — shown as one dot rather than a second row.
+                if let status = item.agentStatus {
+                    Circle()
+                        .fill(status == Herdr.AgentState.blocked ? Color.orange : Color.green)
+                        .frame(width: 7, height: 7)
+                        .help("herdr agent · \(status)")
+                }
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 7)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(herdrPane == nil && item.target == .none)
+        .help(herdrPane.map { "Focus pane \($0) in herdr" } ?? "")
+    }
+
+    /// The raised hand is the app's "waiting for you" mark — the same one session rows use for a
+    /// herdr agent resting at `blocked` (`SessionsSection.swift`). A dirty worktree gets the branch
+    /// icon instead: it needs you, but not in the same way a stalled agent does.
+    private func workIcon(_ item: WorkItem) -> String {
+        switch item.kind {
+        case .dirtyWorktree:  return "arrow.triangle.branch"
+        case .attentionTask:  return "hand.raised.fill"
+        case .agent:          return item.needsAttention ? "hand.raised.fill" : "terminal"
+        }
+    }
+
+    private func workTint(_ item: WorkItem) -> Color {
+        if let severity = item.severity { return dotColor(severity) }
+        return item.needsAttention ? .orange : .green
     }
 
     private func dotColor(_ s: AttentionSeverity) -> Color {
@@ -271,78 +272,49 @@ struct HomeSection: View {
         }
     }
 
-    private func jump(to target: AttentionItem.Target) {
+    private func jump(work target: WorkItem.Target) {
         switch target {
         case .task(let id):        app.focusTaskID = id; app.selected = .tasks
         case .worktree(let name):  app.focusWorktreeName = name; app.selected = .worktrees
+        case .session(let id):     app.focusSessionID = id; app.selected = .sessions
+        case .none:                break
         }
-    }
-
-    // MARK: - Stats grid card
-
-    private var statsGridCard: some View {
-        let doneCount = app.tasks.filter { $0.status == .done }.count
-        let inFlight = app.tasks.filter {
-            $0.status == .running || $0.status == .blocked || $0.status == .awaitingReview
-        }.count
-        let activeSessions = app.sessions.filter(\.isActive).count
-        return GlassCard {
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 92), spacing: 8)],
-                alignment: .leading,
-                spacing: 12
-            ) {
-                statTile("Tasks", "\(app.tasks.count)") { app.selected = .tasks }
-                statTile("Done", "\(doneCount)/\(app.tasks.count)") { app.selected = .tasks }
-                statTile("In Flight", "\(inFlight)") { app.selected = .tasks }
-                statTile("Sessions", "\(app.sessions.count)") { app.selected = .sessions }
-                statTile("Active", "\(activeSessions)") { app.selected = .sessions }
-                statTile("Worktrees", "\(app.worktrees.count)") { app.selected = .worktrees }
-                statTile("Plans", "\(plans.count)") { app.selected = .plans }
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-        }
-    }
-
-    private func statTile(_ label: String, _ value: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Text(value).font(.title3.bold())
-                Text(label).font(.caption).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Tasks pipeline card
 
+    /// Always seven columns, Backlog through Done, zero counts included. The strip used to hide
+    /// itself unless some task carried a phase, which meant a backlog-only or done-only project saw
+    /// a one-line apology instead of the shape of its own work — and `phase` is nil for exactly
+    /// those two statuses, so they were the states most likely to hit it.
     private var tasksPipelineCard: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Tasks").font(.headline)
                     Spacer()
-                    Button("Open Tasks") { app.selected = .tasks }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Color.accentColor)
-                }
-
-                if app.tasks.isEmpty {
-                    HStack {
-                        Text("No tasks yet").foregroundStyle(.secondary)
-                        Spacer()
-                        Button("New Task") { app.selected = .tasks }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(Color.accentColor)
-                    }
-                } else {
-                    HStack(spacing: 0) {
-                        ForEach(TaskPhase.allCases, id: \.self) { phase in
-                            taskPhaseColumn(phase)
+                    // The quick-actions row that used to carry "New Task" is gone with the
+                    // identity header, so the action lives on the card it belongs to. The columns
+                    // below already open the Tasks board, each with its own filter preselected.
+                    Button {
+                        app.openNewTaskPanel = true
+                        app.selected = .tasks
+                    } label: {
+                        // The app's standard tinted action button (see PluginsSection's
+                        // "Reload Plugins"): caption text, 10pt glyph, blue-on-blue-15%.
+                        HStack(spacing: 4) {
+                            Image(systemName: Icon.add).font(.system(size: 10, weight: .medium))
+                            Text("New Task").font(.caption).fontWeight(.medium)
                         }
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 7))
+                        .foregroundStyle(.blue)
                     }
+                    .buttonStyle(.plain)
+                    .help("Create a task")
+                }
+                HStack(spacing: 0) {
+                    ForEach(buildTaskPipeline(tasks: app.tasks)) { pipelineColumn($0) }
                 }
             }
             .padding(.horizontal, 20)
@@ -350,16 +322,21 @@ struct HomeSection: View {
         }
     }
 
-    private func taskPhaseColumn(_ phase: TaskPhase) -> some View {
-        let count = app.tasks.filter { $0.phase == phase }.count
-        let inFlight = app.tasks.contains {
-            $0.phase == phase && ($0.status == .running || $0.status == .blocked || $0.status == .awaitingReview)
-        }
-        let badgeBackground: Color = inFlight ? Color.accentColor.opacity(0.25) : Color.white.opacity(0.06)
-
-        return Button { app.selected = .tasks } label: {
+    private func pipelineColumn(_ bucket: TaskPipelineBucket) -> some View {
+        let badgeBackground: Color = bucket.inFlight ? Color.accentColor.opacity(0.25)
+                                                     : Color.white.opacity(0.06)
+        return Button {
+            // Both intents land in `TasksSection.applyPendingIntents()`, which preselects the
+            // matching filter. The ends are statuses, the middle is a phase — see TaskPipelineBucket.
+            switch bucket.kind {
+            case .backlog:      app.focusTaskStatusFilter = .backlog
+            case .done:         app.focusTaskStatusFilter = .done
+            case .phase(let p): app.focusTaskPhase = p
+            }
+            app.selected = .tasks
+        } label: {
             VStack(spacing: 4) {
-                Text(phase.shortTitle)
+                Text(bucket.title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -368,88 +345,15 @@ struct HomeSection: View {
                     Circle()
                         .fill(badgeBackground)
                         .frame(width: 30, height: 30)
-                    Text("\(count)")
+                    Text("\(bucket.count)")
                         .font(.caption.bold())
+                        .foregroundStyle(bucket.count == 0 ? .secondary : .primary)
                 }
             }
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
+        .help("Show \(bucket.title) tasks")
     }
 
-    // MARK: - Recent card (sessions digest + plans)
-
-    private var recentCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Recent").font(.headline)
-
-                // Newest session
-                if app.sessions.isEmpty {
-                    Text("No sessions recorded for this project.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else if let session = app.sessions.first {
-                    let activeCount = app.sessions.filter(\.isActive).count
-                    Button {
-                        app.focusSessionID = session.id
-                        app.selected = .sessions
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(session.title)
-                                .font(.subheadline.bold())
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            if activeCount > 0 {
-                                Text("\(activeCount) active now")
-                                    .font(.caption)
-                                    .foregroundStyle(.green)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    if let summary = session.bulletSummary, !summary.bullets.isEmpty {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(summary.bullets.prefix(4), id: \.self) { bullet in
-                                HStack(alignment: .top, spacing: 4) {
-                                    Text("·")
-                                    Text(bullet)
-                                }
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                // Top plans
-                if !plans.isEmpty {
-                    Divider().opacity(0.15)
-                    VStack(spacing: 0) {
-                        ForEach(plans.prefix(5)) { plan in
-                            Button {
-                                app.focusPlanPath = plan.path.path
-                                app.selected = .plans
-                            } label: {
-                                HStack {
-                                    Text(plan.name)
-                                        .font(.body)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Text(plan.modifiedAt, style: .relative)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                .padding(.vertical, 6)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-        }
-    }
 }

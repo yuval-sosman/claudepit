@@ -136,10 +136,20 @@ public enum WorktreeStager {
     }
 
     /// Remove the worktree. Must run from OUTSIDE it (git refuses from within), so
-    /// we run in its parent directory.
+    /// we run in its parent directory. Also best-effort deletes the orphaned Claude Code
+    /// session folder(s) the worktree's own cwd would have created — a removed worktree
+    /// leaves ~/.claude/projects/<slug> behind otherwise. Two slug candidates because
+    /// Claude Code's own slugging (both '/' and '.' become '-') differs from Paths.slug
+    /// (only '/') for any path containing ".claude/worktrees" — see WorktreeScanner.merge.
     public static func remove(worktreePath: String, force: Bool = false) async -> (ok: Bool, message: String) {
         let parent = (worktreePath as NSString).deletingLastPathComponent
-        let r = await git(["worktree", "remove"] + (force ? ["--force"] : []) + [worktreePath], at: parent); return (r.ok, r.err)
+        let r = await git(["worktree", "remove"] + (force ? ["--force"] : []) + [worktreePath], at: parent)
+        if r.ok {
+            for slug in Set([Paths.slug(for: URL(filePath: worktreePath)), WorktreeScanner.claudeSlug(for: worktreePath)]) {
+                try? FileManager.default.removeItem(at: Paths.projectsRoot.appending(path: slug))
+            }
+        }
+        return (r.ok, r.err)
     }
 
     // ponytail: write counterpart to WorktreeInspector.git — mutates state on purpose.

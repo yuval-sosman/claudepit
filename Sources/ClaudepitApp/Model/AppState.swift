@@ -90,6 +90,12 @@ final class AppState: ObservableObject {
     @Published var focusManagedConfigID: String? // set to jump App Settings to a specific managed config
     @Published var focusTaskID: String?      // set to jump the Tasks page to a specific task
     @Published var returnToTaskID: String?   // set before a plan deep-link so PlanDetailView can offer "Back to task"
+    /// One-shot intents Home hands to a section along with `selected`. Same contract as the
+    /// focus fields above: the consuming section clears them.
+    @Published var openNewTaskPanel = false            // TasksSection → opens its New Task panel
+    @Published var openDiscoverSheet = false           // SessionsSection → presents Discover
+    @Published var focusTaskStatusFilter: TaskStatus?  // TasksSection → preselects Status
+    @Published var focusTaskPhase: TaskPhase?          // TasksSection → preselects Phase
     @Published var herdrSessions: [String: Herdr.AgentEntry] = [:]
     /// Every live herdr agent, session-bound or not. Task agents report no `agent_session`, so
     /// `herdrSessions` (keyed by session id) never contains them — the Tasks board reads this.
@@ -104,6 +110,19 @@ final class AppState: ObservableObject {
     /// to handing the user the command instead.
     @Published var signInNeedsTerminal = false
     private var lastClaudeAuthCheck: Date?
+    /// The Claude CLI's own cached usage numbers, read from its local caches. Stored here rather
+    /// than in `HomeSection` because a section's `@State` dies on every section switch, which
+    /// would re-trigger the load and orphan an in-flight refresh.
+    @Published private(set) var usageSnapshot: UsageSnapshot?
+    @Published private(set) var statsSnapshot: StatsSnapshot?
+    /// Parsed contributing-insights from the last successful print-mode `/usage` run — loaded
+    /// from the app-owned report cache on launch, since the text exists only as subprocess output.
+    @Published private(set) var usageReport: UsageReport?
+    /// `claude --version`, resolved once per launch. Stored for the same reason as `claudeAuth`:
+    /// a subprocess must never be reachable from a view body.
+    @Published private(set) var claudeVersion: String?
+    @Published private(set) var isRefreshingUsage = false
+    private var lastUsageRefreshAttempt: Date?
     @Published var worktrees: [WorktreeInfo] = []
     @Published var focusWorktreeName: String?   // set to jump the Worktrees page to a specific worktree
     @Published var autoOpenReviewWorktree: String?   // one-shot: auto-present a worktree's Source Control sheet after focusing
@@ -111,6 +130,14 @@ final class AppState: ObservableObject {
     @Published var sessions: [SessionSummary] = []
     @Published var loops: [CronEntry] = []
     @Published var tasks: [ProjectTask] = []
+    /// Task specs/plans that exist on disk, stamped with their mtime. Cached here rather than
+    /// stat-ed from a view body — Home's activity feed reads it on every render.
+    @Published var taskArtifacts: [TaskArtifact] = []
+    /// The Plans/Specs/Memory pages' own listings, mtime-stamped for Home's activity feed —
+    /// whatever those pages show appears in Recent. Cached for the same reason as above.
+    @Published var planFiles: [PageFile] = []
+    @Published var specFiles: [PageFile] = []
+    @Published var memoryFiles: [PageFile] = []
     @Published var memoryGraph: MemoryGraph = .empty
     @Published var memoryLog: [MemoryLogEntry] = []
     @Published var selectedSessionID: String?
@@ -151,6 +178,11 @@ final class AppState: ObservableObject {
         // so app-owned command/hook files (and, for a restored project, its memory hooks) would stay
         // stale until the user re-selects the project. Run them here too so source edits land on launch.
         installGlobalArtifacts()
+        // The CLI's version can't change while the app runs, so once per launch is enough.
+        Task { [weak self] in
+            let version = await ClaudeVersion.fetch()
+            self?.claudeVersion = version
+        }
         // A `claude -p` call that comes back "Not logged in" is the authoritative
         // signal, wherever it happened. Observing a notification keeps the eight
         // scattered Q&A surfaces from each having to hold an AppState reference.
@@ -263,11 +295,79 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.open(URL(filePath: "/System/Applications/Utilities/Terminal.app"))
     }
 
+    // MARK: - Usage & limits
+
+    /// How old a cached snapshot may get before Home auto-refreshes it, and the floor between two
+    /// auto attempts — so a CLI that fails every time still costs one subprocess per 15 minutes.
+    private static let usageMaxAge: TimeInterval = 900
+
+    /// Re-read both CLI caches (`~/.claude.json`, `stats-cache.json`) off the main actor.
+    ///
+    /// Deliberately not wired into the `FileWatcher`: its single debounced handler runs the full
+    /// `reload()`, and the CLI rewrites `~/.claude.json` constantly — that pairing is a reload storm.
+    ///
+    /// `thenRefreshIfStale` chains the staleness check onto the *loaded* snapshot. Calling the two
+    /// back to back instead would test the previous value — nil on a cold launch — and spawn a
+    /// `/usage` subprocess on every first visit to Home even when the CLI's cache is minutes old.
+    func reloadUsageCaches(thenRefreshIfStale: Bool = false) {
+        Task { [weak self] in
+            let loaded = await Task.detached(priority: .utility) {
+                (snapshot: UsageSnapshot.load(),
+                 stats: StatsCache.loadSnapshot(),
+                 report: UsageReportCache.load().map { UsageReport.parse($0.text) })
+            }.value
+            guard let self else { return }
+            self.usageSnapshot = loaded.snapshot
+            self.statsSnapshot = loaded.stats
+            // Keep the last good insights over a parse of nothing — the cache file only exists
+            // after a successful refresh, so nil here just means "not fetched yet this machine".
+            if let report = loaded.report, !report.isEmpty { self.usageReport = report }
+            if thenRefreshIfStale { self.refreshUsageIfStale() }
+        }
+    }
+
+    /// Silent auto-refresh for Home's `.onAppear`. Every guard exists to stop a `claude`
+    /// subprocess firing on each visit: nothing in flight, the cache actually old, no attempt
+    /// within the window, and a login to attempt it with.
+    func refreshUsageIfStale() {
+        guard !isRefreshingUsage, claudeAuth?.needsSignIn != true else { return }
+        if let last = lastUsageRefreshAttempt,
+           Date().timeIntervalSince(last) < Self.usageMaxAge { return }
+        guard usageSnapshot?.isStale(maxAge: Self.usageMaxAge) ?? true else { return }
+        Task { [weak self] in _ = await self?.refreshUsage() }
+    }
+
+    /// Manual refresh. Returns the raw `/usage` report so the caller can show it; a successful run
+    /// is also what rewrites the two caches, hence the unconditional re-read.
+    @discardableResult
+    func refreshUsage() async -> UsageRunner.Result {
+        isRefreshingUsage = true
+        lastUsageRefreshAttempt = Date()
+        let result = await UsageRunner.refresh(cwd: activePath)
+        isRefreshingUsage = false
+        // Core can't name an App-module notification, so the runner reports the fact and the
+        // conversion happens here (same split as DiscoverRunner's signedOut flag).
+        if result.signedOut { NotificationCenter.default.post(name: .claudeAuthSuspect, object: nil) }
+        if !result.failed {
+            let parsed = UsageReport.parse(result.text)
+            if !parsed.isEmpty {
+                usageReport = parsed
+                let text = result.text
+                Task.detached(priority: .utility) {
+                    UsageReportCache.save(text: text, fetchedAt: Date())
+                }
+            }
+        }
+        reloadUsageCaches()
+        return result
+    }
+
     func reload() {
         store.reload(activePath: activePath)
         reloadSessions()
         reloadMemory()
         loadTasks()
+        reloadPlanFiles()
         driveBlockedTasks()
         driveRunningTasks()
         plansChangeToken += 1
@@ -324,7 +424,7 @@ final class AppState: ObservableObject {
     }
 
     func addLoop(interval: String, prompt: String) throws {
-        try CronRunner.create(interval: interval, prompt: prompt, cwd: activePath)
+        _ = try CronRunner.create(interval: interval, prompt: prompt, cwd: activePath)
         reloadLoops()
     }
 
@@ -334,14 +434,45 @@ final class AppState: ObservableObject {
     }
 
     func reloadMemory() {
-        guard let base = activePath else { memoryGraph = .empty; memoryLog = []; return }
+        guard let base = activePath else {
+            memoryGraph = .empty; memoryLog = []; memoryFiles = []; return
+        }
         let slug = Paths.slug(for: base)
         memoryGraph = MemoryLoader.load(projectSlug: slug)
         memoryLog = MemoryLog.load(projectSlug: slug)
+        // The Memory page shows the graph, so the feed mirrors its nodes — not a directory
+        // scan. MEMORY.md (the root) is excluded: the index moves on nearly every write and
+        // would pin a permanent noise row to the top of Recent.
+        memoryFiles = memoryGraph.nodes.filter { !$0.isRoot }.compactMap { node in
+            fileModifiedAt(node.url.path).map {
+                PageFile(path: node.url.path, name: node.title, date: $0)
+            }
+        }
+    }
+
+    /// Every plan the Plans page lists (`~/.claude/plans/*.md` — plan mode's global output,
+    /// deliberately NOT project-scoped, exactly like the page), mtime-stamped for the feed.
+    func reloadPlanFiles() {
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: Paths.plansRoot,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: .skipsHiddenFiles)) ?? []
+        planFiles = items.filter { $0.pathExtension == "md" }.compactMap { url in
+            fileModifiedAt(url.path).map {
+                PageFile(path: url.path, name: url.deletingPathExtension().lastPathComponent, date: $0)
+            }
+        }
+    }
+
+    private func fileModifiedAt(_ path: String) -> Date? {
+        (try? URL(filePath: path).resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate
     }
 
     func loadTasks() {
-        guard let base = activePath else { tasks = []; return }
+        guard let base = activePath else {
+            tasks = []; taskArtifacts = []; specFiles = []; return
+        }
         let slug = Paths.slug(for: base)
         var loaded = TaskStore.shared.loadAll(projectSlug: slug)
         // Brainstorm hand-off: the phase runs in herdr and writes a YAML deliverable. Parse it on load
@@ -351,8 +482,29 @@ final class AppState: ObservableObject {
             mergeBrainstormSuggestions(into: &loaded[i], projectSlug: slug)
         }
         tasks = loaded
+        taskArtifacts = collectTaskArtifacts(tasks: loaded) { fileModifiedAt($0) }
+        reloadSpecFiles(projectSlug: slug, tasks: loaded)
         tasksChangeToken += 1
         syncTaskPolling()
+    }
+
+    /// Every spec the Specs page lists (`tasks/*/spec.md` on disk — including orphaned task
+    /// folders whose task.json is gone, which `links.specPath` can never reach), named like the
+    /// page names them: the task's name, falling back to the folder name.
+    private func reloadSpecFiles(projectSlug slug: String, tasks loaded: [ProjectTask]) {
+        let nameByID = Dictionary(loaded.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        let taskDirs = (try? FileManager.default.contentsOfDirectory(
+            at: Paths.tasksRoot(projectSlug: slug),
+            includingPropertiesForKeys: nil,
+            options: .skipsHiddenFiles)) ?? []
+        specFiles = taskDirs.compactMap { dir in
+            let spec = dir.appendingPathComponent("spec.md")
+            return fileModifiedAt(spec.path).map {
+                PageFile(path: spec.path,
+                         name: nameByID[dir.lastPathComponent] ?? dir.lastPathComponent,
+                         date: $0)
+            }
+        }
     }
 
     /// An agent working in a herdr pane produces no file-system event of its own, so the
@@ -564,7 +716,7 @@ final class AppState: ObservableObject {
             driving.insert(task.id)
             Task { [weak self] in
                 await TaskRunner.shared.resolveBlocked(task, projectSlug: slug, projectRoot: base)
-                await MainActor.run { self?.driving.remove(task.id) }
+                await MainActor.run { _ = self?.driving.remove(task.id) }
             }
         }
     }
@@ -580,7 +732,7 @@ final class AppState: ObservableObject {
             driving.insert(task.id)
             Task { [weak self] in
                 await TaskRunner.shared.resolveRunning(task, projectSlug: slug, projectRoot: base)
-                await MainActor.run { self?.driving.remove(task.id) }
+                await MainActor.run { _ = self?.driving.remove(task.id) }
             }
         }
     }
@@ -611,7 +763,7 @@ final class AppState: ObservableObject {
         try? TaskStore.shared.update(id: task.id, projectSlug: slug) { $0.plannedPhases = t.plannedPhases }
         Task {
             await TaskRunner.shared.run(t, phase: phase, projectSlug: slug, projectRoot: base)
-            await MainActor.run { self.driving.remove(task.id) }
+            await MainActor.run { _ = self.driving.remove(task.id) }
         }
     }
 
@@ -627,6 +779,12 @@ final class AppState: ObservableObject {
         guard let base = activePath else { return }
         TaskStore.shared.delete(id: task.id, projectSlug: Paths.slug(for: base))
         loadTasks()
+        if let wt = task.worktree {
+            Task {
+                _ = await WorktreeStager.remove(worktreePath: wt.path, force: true)
+                await MainActor.run { self.reloadWorktrees() }
+            }
+        }
     }
 
     func openTaskInHerdr(_ task: ProjectTask, phase: TaskPhase) {

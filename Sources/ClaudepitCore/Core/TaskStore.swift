@@ -1,11 +1,28 @@
 import Foundation
 
 public struct TaskStore: Sendable {
-    public static let shared = TaskStore()
-    public init() {}
+    private let root: URL
+
+    public static let shared = TaskStore(root: Paths.projectsRoot)
+
+    public init(root: URL) {
+        self.root = root
+    }
+
+    private func tasksRoot(projectSlug: String) -> URL {
+        root.appending(path: projectSlug).appending(path: "tasks")
+    }
+
+    private func taskDir(projectSlug: String, id: String) -> URL {
+        tasksRoot(projectSlug: projectSlug).appending(path: id)
+    }
+
+    private func taskFile(projectSlug: String, id: String) -> URL {
+        taskDir(projectSlug: projectSlug, id: id).appending(path: "task.json")
+    }
 
     public func loadAll(projectSlug: String) -> [ProjectTask] {
-        let root = Paths.tasksRoot(projectSlug: projectSlug)
+        let root = tasksRoot(projectSlug: projectSlug)
         let dirs = (try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
         var out: [ProjectTask] = []
@@ -70,23 +87,23 @@ public struct TaskStore: Sendable {
     }
 
     public func save(_ task: ProjectTask, projectSlug: String) throws {
-        let dir = Paths.taskDir(projectSlug: projectSlug, id: task.id)
+        let dir = taskDir(projectSlug: projectSlug, id: task.id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let dest = Paths.taskFile(projectSlug: projectSlug, id: task.id)
+        let dest = taskFile(projectSlug: projectSlug, id: task.id)
         let tmp = dir.appending(path: "task.json.tmp")
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try enc.encode(task)
         try data.write(to: tmp, options: .atomic)
-        try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
+        _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
     }
 
     public func delete(id: String, projectSlug: String) {
-        try? FileManager.default.removeItem(at: Paths.taskDir(projectSlug: projectSlug, id: id))
+        try? FileManager.default.removeItem(at: taskDir(projectSlug: projectSlug, id: id))
     }
 
     /// Re-read from disk, mutate, bump updatedAt, atomic save — so UI edits never clobber runner-written fields.
     public func update(id: String, projectSlug: String, _ mutate: (inout ProjectTask) -> Void) throws {
-        let file = Paths.taskFile(projectSlug: projectSlug, id: id)
+        let file = taskFile(projectSlug: projectSlug, id: id)
         let data = try Data(contentsOf: file)
         guard var t = Self.decode(data) else { return }
         mutate(&t)

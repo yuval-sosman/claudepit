@@ -40,6 +40,22 @@ func taskModelChecks() -> [Bool] {
         try expectEqual(back, t, "round-trip equal")
     })
 
+    results.append(check("allowsMainEdit: backlog + brainstorm only") {
+        func t(_ phase: TaskPhase?, _ status: TaskStatus) -> ProjectTask {
+            ProjectTask(id: "a", phase: phase, status: status)
+        }
+        try expect(t(nil, .backlog).allowsMainEdit, "backlog column → editable")
+        try expect(t(.brainstorm, .awaitingReview).allowsMainEdit, "brainstorm landed → editable")
+        try expect(t(.brainstorm, .failed).allowsMainEdit, "brainstorm failed → editable")
+        // A live agent already holds the old request in its prompt.
+        try expect(!t(.brainstorm, .running).allowsMainEdit, "brainstorm running → locked")
+        try expect(!t(.brainstorm, .blocked).allowsMainEdit, "brainstorm blocked → locked")
+        // Later columns argue from artifacts built on the request.
+        try expect(!t(.writeSpec, .awaitingReview).allowsMainEdit, "spec → locked")
+        try expect(!t(.implement, .awaitingReview).allowsMainEdit, "implement → locked")
+        try expect(!t(nil, .done).allowsMainEdit, "done → locked")
+    })
+
     results.append(check("nextPlannedPhase across a subset") {
         let planned: [TaskPhase] = [.writeSpec, .implement, .codeReview]
         try expect(TaskTransition.nextPlannedPhase(after: nil, in: planned) == .writeSpec, "nil→first")
@@ -290,29 +306,29 @@ func taskModelChecks() -> [Bool] {
     })
 
     results.append(check("healArtifactLinks adopts on-disk deliverables the record missed") {
-        let slug = "claudepit-check-\(UUID().uuidString.prefix(8))"
-        let dir = Paths.taskDir(projectSlug: slug, id: "t1")
+        let projectsRoot = try tempDir()
+        let slug = "claudepit-check"
+        let dir = projectsRoot.appending(path: slug).appending(path: "tasks").appending(path: "t1")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: Paths.projectsRoot.appending(path: slug)) }
 
         var t = ProjectTask(id: "t1", phase: .writeSpec, status: .awaitingReview)
-        try expect(TaskTransition.healArtifactLinks(t, projectSlug: slug) == nil,
+        try expect(TaskTransition.healArtifactLinks(t, projectSlug: slug, projectsRoot: projectsRoot) == nil,
                    "nothing on disk → no change")
 
         try Data("# spec".utf8).write(to: dir.appending(path: "spec.md"))
-        let healed = TaskTransition.healArtifactLinks(t, projectSlug: slug)
+        let healed = TaskTransition.healArtifactLinks(t, projectSlug: slug, projectsRoot: projectsRoot)
         try expectEqual(healed?.links.specPath, dir.appending(path: "spec.md").path, "specPath adopted")
         try expect(healed?.links.reviewPath == nil, "review.md absent → still nil")
 
         // Heals earlier phases too, not just the current one.
         try Data("# review".utf8).write(to: dir.appending(path: "review.md"))
         t.phase = .implement
-        try expectEqual(TaskTransition.healArtifactLinks(t, projectSlug: slug)?.links.reviewPath,
+        try expectEqual(TaskTransition.healArtifactLinks(t, projectSlug: slug, projectsRoot: projectsRoot)?.links.reviewPath,
                         dir.appending(path: "review.md").path, "past phase healed while on implement")
 
         // Never overwrites a path the runner already recorded.
         t.links.specPath = "/somewhere/else/spec.md"
-        let again = TaskTransition.healArtifactLinks(t, projectSlug: slug)
+        let again = TaskTransition.healArtifactLinks(t, projectSlug: slug, projectsRoot: projectsRoot)
         try expectEqual(again?.links.specPath, "/somewhere/else/spec.md", "existing link preserved")
     })
 

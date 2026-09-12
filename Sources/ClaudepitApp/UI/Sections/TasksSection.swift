@@ -27,6 +27,7 @@ struct TasksSection: View {
 
     // filters
     @State private var statusFilter: TaskStatus?
+    @State private var phaseFilter: TaskPhase?
     @State private var priorityFilter: Priority?
     @State private var tagFilter: String?
     @State private var timeFilter: TimeFilter = .all
@@ -37,6 +38,7 @@ struct TasksSection: View {
     private var filtered: [ProjectTask] {
         app.tasks.filter { t in
             (statusFilter == nil || t.status == statusFilter) &&
+            (phaseFilter == nil || t.phase == phaseFilter) &&
             (priorityFilter == nil || t.priority == priorityFilter) &&
             (tagFilter == nil || t.tags.contains(tagFilter!)) &&
             timeFilter.includes(Date(timeIntervalSince1970: t.updatedAt))
@@ -52,20 +54,47 @@ struct TasksSection: View {
             }
             content
         }
-        .onAppear { app.loadTasks(); applyFocus() }
+        .onAppear { app.loadTasks(); applyFocus(); applyPendingIntents() }
         .onChange(of: app.focusTaskID) { applyFocus() }
+        .onChange(of: app.openNewTaskPanel) { applyPendingIntents() }
+        .onChange(of: app.focusTaskStatusFilter) { applyPendingIntents() }
+        .onChange(of: app.focusTaskPhase) { applyPendingIntents() }
     }
 
     private func applyFocus() {
         guard let id = app.focusTaskID else { return }
         // Clear filters so a deep-linked task (e.g. createPlan Back-to-task) is always visible.
-        statusFilter = nil; priorityFilter = nil; tagFilter = nil; timeFilter = .all
+        clearFilters()
         panel = .task(id)
         app.focusTaskID = nil
     }
 
+    /// One-shot intents Home sets alongside `app.selected` (the documented focus pattern — the
+    /// consumer clears them). Kept apart from `applyFocus`: that one deliberately clears every
+    /// filter, which is the opposite of what a filter intent wants.
+    private func applyPendingIntents() {
+        if app.openNewTaskPanel {
+            app.openNewTaskPanel = false
+            panel = .new
+        }
+        if let status = app.focusTaskStatusFilter {
+            app.focusTaskStatusFilter = nil
+            statusFilter = status
+        }
+        if let phase = app.focusTaskPhase {
+            app.focusTaskPhase = nil
+            phaseFilter = phase
+        }
+    }
+
+    private func clearFilters() {
+        statusFilter = nil; phaseFilter = nil; priorityFilter = nil
+        tagFilter = nil; timeFilter = .all
+    }
+
     private var anyFilterActive: Bool {
-        statusFilter != nil || priorityFilter != nil || tagFilter != nil || timeFilter.isActive
+        statusFilter != nil || phaseFilter != nil || priorityFilter != nil
+            || tagFilter != nil || timeFilter.isActive
     }
 
     private var header: some View {
@@ -103,6 +132,11 @@ struct TasksSection: View {
                         Button(s.label) { statusFilter = s }
                     }
                 }
+                filterMenu("Phase", active: phaseFilter?.shortTitle) {
+                    Button("All Phases") { phaseFilter = nil }
+                    Divider()
+                    ForEach(TaskPhase.allCases, id: \.self) { p in Button(p.title) { phaseFilter = p } }
+                }
                 filterMenu("Priority", active: priorityFilter?.label) {
                     Button("All Priorities") { priorityFilter = nil }
                     Divider()
@@ -128,7 +162,7 @@ struct TasksSection: View {
 
                 if anyFilterActive {
                     Button(role: .destructive) {
-                        statusFilter = nil; priorityFilter = nil; tagFilter = nil; timeFilter = .all
+                        clearFilters()
                     } label: {
                         Label("Clear", systemImage: "xmark.circle").font(.caption)
                     }

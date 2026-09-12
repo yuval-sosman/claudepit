@@ -7,6 +7,11 @@ public enum Paths {
     /// Claude CLI's global MCP server definitions — ~/.claude.json (home dir, not inside ~/.claude/)
     public static var globalClaudeJson: URL { home.appending(path: ".claude.json") }
     public static var globalLocalSettings: URL { globalClaude.appending(path: "settings.local.json") }
+    /// Claude CLI's local activity cache (daily message/session/tool counts), rewritten by `/usage`.
+    public static var statsCache: URL { globalClaude.appending(path: "stats-cache.json") }
+    /// App-owned copy of the last print-mode `/usage` report — the contributing-insights text
+    /// exists only as subprocess output, so it is persisted here to survive relaunches.
+    public static var usageReportCache: URL { globalClaude.appending(path: "claudepit-usage-report.json") }
     public static var globalSkills: URL { globalClaude.appending(path: "skills") }
     public static var globalCommands: URL { globalClaude.appending(path: "commands") }
     public static var globalAgents: URL { globalClaude.appending(path: "agents") }

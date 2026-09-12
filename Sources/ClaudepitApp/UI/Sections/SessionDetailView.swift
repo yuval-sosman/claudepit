@@ -1107,7 +1107,11 @@ struct ModelBadge: View {
         model.hasPrefix("claude-") ? String(model.dropFirst("claude-".count)) : model
     }
 
-    private var color: Color {
+    private var color: Color { ModelBadge.color(for: model) }
+
+    /// One family→color mapping for every surface that tints by model (this badge, Home's
+    /// model-token bars), so the same model never wears two colors in one window.
+    static func color(for model: String) -> Color {
         let m = model.lowercased()
         if m.contains("opus") { return .pink }
         if m.contains("sonnet") { return .cyan }

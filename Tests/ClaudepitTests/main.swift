@@ -25,6 +25,14 @@ let groups: [(String, () -> [Bool])] = [
     ("WorktreeResumer", worktreeResumerChecks),
     ("HomeAttention", homeAttentionChecks),
     ("HomeLayout", homeLayoutChecks),
+    ("HomeAgents", homeAgentsChecks),
+    ("HomeWorkstream", homeWorkstreamChecks),
+    ("MenuBarSummary", menuBarSummaryChecks),
+    ("HomeActivity", homeActivityChecks),
+    ("HomeTaskPipeline", homeTaskPipelineChecks),
+    ("UsageSnapshot", usageSnapshotChecks),
+    ("UsageReport", usageReportChecks),
+    ("StatsSnapshot", statsSnapshotChecks),
     ("MemoryLog", memoryLogChecks),
     ("AppConfigStore", appConfigStoreChecks),
     ("HookRegistration", hookRegistrationChecks),
@@ -37,6 +45,7 @@ let groups: [(String, () -> [Bool])] = [
     ("TaskModel", taskModelChecks),
     ("TopicStore", topicStoreChecks),
     ("BrainstormChangeSource", brainstormChangeSourceChecks),
+    ("TaskDraft", taskDraftChecks),
 ]
 
 var results: [Bool] = []

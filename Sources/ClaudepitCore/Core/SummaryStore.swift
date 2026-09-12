@@ -1,12 +1,24 @@
 import Foundation
 
 public struct SummaryStore: Sendable {
-    public static let shared = SummaryStore()
+    private let root: URL
 
-    public init() {}
+    public static let shared = SummaryStore(root: Paths.projectsRoot)
+
+    public init(root: URL) {
+        self.root = root
+    }
+
+    private func summaryDir(projectSlug: String) -> URL {
+        root.appending(path: projectSlug).appending(path: "summary")
+    }
+
+    private func summaryFile(projectSlug: String, sessionID: String) -> URL {
+        summaryDir(projectSlug: projectSlug).appending(path: "\(sessionID).json")
+    }
 
     public func load(projectSlug: String, sessionID: String) -> SessionBulletSummary? {
-        let file = Paths.summaryFile(projectSlug: projectSlug, sessionID: sessionID)
+        let file = summaryFile(projectSlug: projectSlug, sessionID: sessionID)
         guard let data = try? Data(contentsOf: file) else { return nil }
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .secondsSince1970
@@ -14,7 +26,7 @@ public struct SummaryStore: Sendable {
     }
 
     public func loadAll(projectSlug: String) -> ProjectSummaries {
-        let dir = Paths.summaryDir(projectSlug: projectSlug)
+        let dir = summaryDir(projectSlug: projectSlug)
         let files = (try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
         let dec = JSONDecoder()
@@ -30,9 +42,9 @@ public struct SummaryStore: Sendable {
     }
 
     public func save(_ entry: SessionBulletSummary, projectSlug: String, sessionID: String) throws {
-        let dir = Paths.summaryDir(projectSlug: projectSlug)
+        let dir = summaryDir(projectSlug: projectSlug)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let dest = Paths.summaryFile(projectSlug: projectSlug, sessionID: sessionID)
+        let dest = summaryFile(projectSlug: projectSlug, sessionID: sessionID)
         let tmp  = dir.appending(path: "\(sessionID).json.tmp")
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .secondsSince1970

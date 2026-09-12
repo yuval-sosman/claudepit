@@ -12,6 +12,9 @@ struct GlassCard<Content: View>: View {
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .strokeBorder(.white.opacity(0.12), lineWidth: 1)
             )
-            .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
+            // Tight and faint on purpose: Home stacks cards 16pt apart, and a wide
+            // (radius 24) shadow from both neighbors overlapped the whole gap, tinting
+            // it into a visible band that read as a wrapping container.
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
     }
 }

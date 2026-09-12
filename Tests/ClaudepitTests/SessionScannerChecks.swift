@@ -51,14 +51,12 @@ func sessionScannerChecks() -> [Bool] {
         let jsonl = "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n"
         try jsonl.write(to: sessDir.appending(path: "\(sessID).jsonl"), atomically: true, encoding: .utf8)
 
-        // Write a summaries file
-        let store = SummaryStore.shared
-        let dir = Paths.summaryDir(projectSlug: slug)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Write a summaries file, rooted at the same temp projectsRoot as the session fixture.
+        let store = SummaryStore(root: projectsRoot)
         let entry = SessionBulletSummary(bullets: ["Built login feature"], updatedAt: Date())
         try store.save(entry, projectSlug: slug, sessionID: sessID)
 
-        let scanner = SessionScanner(projectsRoot: projectsRoot)
+        let scanner = SessionScanner(projectsRoot: projectsRoot, summaryStore: store)
         let sessions = scanner.list(activePath: nil)
         let s = try { guard let s = sessions.first(where: { $0.id == sessID }) else { throw CheckFailure(message: "session not found") }; return s }()
         try expectEqual(s.bulletSummary?.bullets, ["Built login feature"], "bullets stamped")

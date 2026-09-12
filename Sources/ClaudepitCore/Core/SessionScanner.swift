@@ -5,10 +5,15 @@ public struct SessionScanner {
 
     private let projectsRoot: URL
     private let now: Date
+    private let groupStore: GroupStore
+    private let summaryStore: SummaryStore
 
-    public init(projectsRoot: URL = Paths.projectsRoot, now: Date = Date()) {
+    public init(projectsRoot: URL = Paths.projectsRoot, now: Date = Date(),
+                groupStore: GroupStore = .shared, summaryStore: SummaryStore = .shared) {
         self.projectsRoot = projectsRoot
         self.now = now
+        self.groupStore = groupStore
+        self.summaryStore = summaryStore
     }
 
     /// If activePath is set, list only that project's sessions; otherwise all projects.
@@ -42,7 +47,7 @@ public struct SessionScanner {
         let slugs = Set(out.map(\.projectSlug))
         var pgBySlug: [String: ProjectGroups] = [:]
         for slug in slugs {
-            pgBySlug[slug] = GroupStore.shared.load(projectSlug: slug)
+            pgBySlug[slug] = groupStore.load(projectSlug: slug)
         }
         for i in out.indices {
             out[i].groupID = pgBySlug[out[i].projectSlug]?.assignments[out[i].id]
@@ -50,7 +55,7 @@ public struct SessionScanner {
         // Stamp bulletSummary from SummaryStore — one load per project slug
         var psBySlug: [String: ProjectSummaries] = [:]
         for slug in slugs {
-            psBySlug[slug] = SummaryStore.shared.loadAll(projectSlug: slug)
+            psBySlug[slug] = summaryStore.loadAll(projectSlug: slug)
         }
         for i in out.indices {
             out[i].bulletSummary = psBySlug[out[i].projectSlug]?.summaries[out[i].id]

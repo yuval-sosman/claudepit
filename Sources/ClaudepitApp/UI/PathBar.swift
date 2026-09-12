@@ -10,6 +10,16 @@ struct PathBar: View {
             HStack(spacing: 10) {
                 breadcrumbs
                 Spacer()
+                // Reveal lives here rather than in Home's quick actions: it acts on the project
+                // the breadcrumb already names, and it is wanted from every section, not just Home.
+                Button { if let base = app.activePath { NSWorkspace.shared.open(base) } } label: {
+                    Image(systemName: Icon.revealInFinder)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Open the project folder in Finder")
+                .disabled(app.activePath == nil)
                 Button { app.selected = .appConfig } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 14, weight: .medium))

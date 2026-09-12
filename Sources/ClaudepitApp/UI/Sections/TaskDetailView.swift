@@ -33,7 +33,10 @@ struct TaskDetailView: View {
 
     /// Which edit form is open (drives the .sheet). Edit main vs. new draft.
     private enum EditSheet: Identifiable { case main, draft; var id: Int { self == .main ? 0 : 1 } }
+    /// New Draft + the compare-versions sheet: suggestion versions stay Backlog-only.
     private var canEditVersions: Bool { task.status == .backlog }
+    /// Edit main: also allowed in the Brainstorm column, minus `.running`/`.blocked`.
+    private var canEditMain: Bool { task.allowsMainEdit }
 
     /// Edit/draft form rendered INLINE in this same side panel (not a modal sheet),
     /// so it matches the create-task side screen exactly.
@@ -83,7 +86,11 @@ struct TaskDetailView: View {
         .confirmationDialog("Delete \"\(task.name)\"?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { app.deleteTask(task); onDismiss?() }
             Button("Cancel", role: .cancel) {}
-        } message: { Text("This cannot be undone.") }
+        } message: {
+            Text(task.worktree != nil
+                 ? "This also removes its git worktree and any uncommitted changes in it. This cannot be undone."
+                 : "This cannot be undone.")
+        }
     }
 
     private var detailContent: some View {
@@ -101,8 +108,9 @@ struct TaskDetailView: View {
     }
 
     // Read-only mirror of the New Task form: same sectioned-card look, values shown as text.
-    // All request-field editing happens via the Edit / New Draft version cards (backlog only) —
-    // these sections never mutate the task; only Attachments is interactive.
+    // All request-field editing happens via the Edit card (Backlog + Brainstorm, see
+    // `ProjectTask.allowsMainEdit`) or the New Draft card (Backlog only) — these sections never
+    // mutate the task; only Attachments is interactive.
     private var fieldSections: some View {
         VStack(alignment: .leading, spacing: 16) {
             fieldSection("Summary") { Text(task.name).font(.body) }
@@ -206,10 +214,12 @@ struct TaskDetailView: View {
                         .onTapGesture { nameDraft = task.name; editingName = true }
                 }
                 Spacer()
-                if canEditVersions {
+                if canEditMain {
                     Button { editSheet = .main } label: {
                         Label("Edit", systemImage: "pencil").font(.caption)
                     }.buttonStyle(.bordered).controlSize(.small).help("Edit the main version")
+                }
+                if canEditVersions {
                     Button { editSheet = .draft } label: {
                         Label("New Draft", systemImage: "doc.badge.plus").font(.caption)
                     }.buttonStyle(.bordered).controlSize(.small).help("Propose an alternate version to compare against main")
