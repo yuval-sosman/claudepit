@@ -178,6 +178,15 @@ struct TaskCardView: View {
                 Pill("v\((task.suggestions?.count ?? 0) + 1)", color: .purple, hPadding: 7, vPadding: 2)
                     .help("\((task.suggestions?.count ?? 0) + 1) versions")
             }
+            // A pill rather than a new CardState case: CardState's raw values ARE the sort ranks
+            // `orderedBefore` uses, so inserting a case would silently renumber board ordering.
+            if task.isAutoRunning {
+                Pill("AUTO", color: .indigo, hPadding: 7, vPadding: 2)
+                    .help("Auto-running to Code Review — the agent will not ask any questions")
+            } else if let why = task.autoRunHaltReason {
+                Pill("AUTO ⚠︎", color: .orange, hPadding: 7, vPadding: 2)
+                    .help("Auto-run stopped: \(why)")
+            }
             if showPhase {
                 Pill(task.phase?.shortTitle ?? (task.status == .done ? "Done" : "Backlog"),
                      color: .gray, hPadding: 7, vPadding: 2)
@@ -232,5 +241,22 @@ struct CardStatusLegend: View {
         }
         .padding(14)
         .frame(width: 340)
+    }
+}
+
+extension View {
+    /// Right-click menu for a task card. Defined once here rather than inline in `TaskBoardView`
+    /// so any future card host picks up the same actions.
+    @MainActor func taskContextMenu(_ task: ProjectTask, app: AppState) -> some View {
+        contextMenu {
+            if task.isAutoRunning {
+                Button("Stop auto-run") { app.stopAutoRun(task) }
+            } else {
+                Button("Run to review") { app.armAutoRun(task) }
+                    .disabled(task.status == .done
+                              || !TaskTransition.canRun(task, allTasks: app.tasks)
+                              || app.worktreeBusyName(task) != nil)
+            }
+        }
     }
 }

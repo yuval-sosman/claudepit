@@ -91,7 +91,46 @@ func hookScriptsChecks() -> [Bool] {
             try expect(cmd.body.hasPrefix("---\ndescription:"), "\(cmd.filename) has front matter")
             try expect(cmd.filename.hasPrefix("claudepit-task-"), "\(cmd.filename) naming")
         }
-        try expectEqual(HookScripts.taskCommands.count, 5, "five phase commands")
+        try expectEqual(HookScripts.taskCommands.count, 6, "five phase commands + the fix variant")
+    })
+
+    results.append(check("the fix command keeps the guardrails a findings fix depends on") {
+        let b = HookScripts.taskCommandFix
+        try expect(b.contains("NEVER commit or stage"), "no-commit rule")
+        try expect(b.contains("never create another worktree"), "worktree rule")
+        try expect(b.contains("Scope is the finding list, and nothing else"), "scope rule")
+        try expect(b.contains("Unrequested changes are a defect"), "no drive-by changes")
+        // landFinishedTurn has no expectedArtifact for .implement, so the marker is the ONLY
+        // signal that the phase finished — without it a fix task parks in .blocked forever.
+        try expect(b.contains("CLAUDEPIT_ARTIFACT: <the absolute fixPath you wrote>"), "artifact marker")
+        try expect(b.contains("parentReviewPath="), "reads the parent review")
+    })
+
+    results.append(check("the review command specifies the structured findings block") {
+        let b = HookScripts.taskCommandReview
+        // Written INTO review.md, not just printed: the app parses the file, because scrollback is
+        // a 400-line window that a long review overruns.
+        try expect(b.contains("out of the file"), "says the block is read from the file")
+        try expect(b.contains("must be written\ninto `reviewPath` — not only printed"), "says write, not just print")
+        for field in ["`ruleId`", "`severity`", "`category`", "`title`", "`locations`",
+                      "`what`", "`why`", "`fix`"] {
+            try expect(b.contains(field), "documents \(field)")
+        }
+        try expect(b.contains("SARIF"), "names the standard the field vocabulary follows")
+        try expect(b.contains("CLAUDEPIT_FINDINGS_BEGIN"), "marker")
+        try expect(b.contains("CLAUDEPIT_FINDINGS_END"), "end marker")
+        try expect(b.contains("do not wrap the array in a code fence"), "fence warning")
+    })
+
+    results.append(check("the review command's own example parses") {
+        // A worked example the parser rejects would teach every reviewer the wrong shape.
+        let out = TaskTransition.parseFindings(from: HookScripts.taskCommandReview)
+        try expectEqual(out.count, 2, "both example findings parse")
+        try expectEqual(out[0].severity, "high", "first is high")
+        try expectEqual(out[0].ruleID, "C1", "ruleId")
+        try expectEqual(out[0].locations?.first?.line, 41, "location line")
+        try expect(out[0].what?.contains("force-unwraps") == true, "what")
+        try expect(out.allSatisfy { $0.isStructured }, "both are structured")
     })
 
     return results

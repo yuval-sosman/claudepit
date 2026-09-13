@@ -27,27 +27,27 @@ public enum Herdr {
 
     /// Run a herdr command, returning parsed JSON (nil on failure / non-JSON).
     @discardableResult
-    public static func runJSON(_ args: [String], cwd: URL?) async -> [String: Any]? {
-        guard let raw = await run(args, cwd: cwd), let data = raw.data(using: .utf8),
+    public static func runJSON(_ args: [String], cwd: URL?,
+                               timeout: TimeInterval = Subprocess.defaultTimeout) async -> [String: Any]? {
+        guard let raw = await run(args, cwd: cwd, timeout: timeout), let data = raw.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return obj
     }
 
-    /// Run a herdr command, returning raw stdout (nil if the process failed to launch).
-    public static func run(_ args: [String], cwd: URL?) async -> String? {
-        let exec = path
-        return await withCheckedContinuation { cont in
-            DispatchQueue.global().async {
-                let p = Process()
-                p.executableURL = URL(filePath: exec)
-                p.arguments = args
-                if let cwd { p.currentDirectoryURL = cwd }
-                let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-                do { try p.run() } catch { cont.resume(returning: nil); return }
-                p.waitUntilExit()
-                cont.resume(returning: String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8))
-            }
-        }
+    /// Run a herdr command, returning raw **stdout** (nil if the process failed to launch).
+    ///
+    /// Stdout only, deliberately: herdr writes its `{"error":{"code":…}}` payloads to **stderr**
+    /// and leaves stdout empty, so a failed command yields "" here and therefore nil from
+    /// `runJSON`. `TaskRunner` reads that nil as "the command failed" — `agent start` answering
+    /// `agent_name_taken` is the load-bearing case. Folding stderr into the return value would
+    /// turn every error into a successfully-parsed object.
+    ///
+    /// Bounded by `Subprocess`: both pipes are drained while the child runs and `timeout` kills a
+    /// child that never exits. A hang here suspends its caller forever and, on the task-drive
+    /// path, wedges the task's `AppState.driving` entry for the life of the app.
+    public static func run(_ args: [String], cwd: URL?,
+                           timeout: TimeInterval = Subprocess.defaultTimeout) async -> String? {
+        await Subprocess.run(path, args, cwd: cwd, timeout: timeout)?.stdout
     }
 
     /// Pane id from a `herdr pane split` response: `result.pane.pane_id`.

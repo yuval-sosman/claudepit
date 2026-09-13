@@ -53,6 +53,12 @@ public struct TaskStore: Sendable {
             obj["plannedPhases"] = planned; touched = true
         }
         if obj["phase"] as? String == "verify" { obj["phase"] = "codeReview"; touched = true }
+        // `autoRunRetried` holds phase raw values too, so it needs the same strip — otherwise the
+        // next retired phase resurrects exactly the decode failure this function exists to fix.
+        if var retried = obj["autoRunRetried"] as? [String], retried.contains("verify") {
+            retried.removeAll { $0 == "verify" }
+            obj["autoRunRetried"] = retried; touched = true
+        }
         guard touched, let clean = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
         return try? JSONDecoder().decode(ProjectTask.self, from: clean)
     }
@@ -101,12 +107,29 @@ public struct TaskStore: Sendable {
         try? FileManager.default.removeItem(at: taskDir(projectSlug: projectSlug, id: id))
     }
 
+    /// Read one task, applying the same migration chain as `loadAll`. Returns nil when the file is
+    /// missing or undecodable.
+    public func load(id: String, projectSlug: String) -> ProjectTask? {
+        guard let data = try? Data(contentsOf: taskFile(projectSlug: projectSlug, id: id)) else { return nil }
+        return Self.decode(data)
+    }
+
     /// Re-read from disk, mutate, bump updatedAt, atomic save — so UI edits never clobber runner-written fields.
+    /// Read-modify-write one task. **A mutation that changes nothing writes nothing.**
+    ///
+    /// That guard is load-bearing, not an optimisation. `updatedAt` is bumped on every write, the
+    /// FileWatcher is watching this directory, and a watcher event runs `AppState.reload()` —
+    /// which calls `loadTasks()`, which runs the heal/merge passes that call back into here. Any
+    /// caller that mutates unconditionally therefore closes a loop and the app reloads forever
+    /// (sessions rescanned, watcher torn down and rebuilt, several times a second). One such
+    /// caller — `healArtifactLinks` failing to persist `reviewFindings`, so heal never converged —
+    /// is exactly how that shipped. Making the *store* refuse a no-op write retires the whole
+    /// class of bug rather than the one instance.
     public func update(id: String, projectSlug: String, _ mutate: (inout ProjectTask) -> Void) throws {
-        let file = taskFile(projectSlug: projectSlug, id: id)
-        let data = try Data(contentsOf: file)
-        guard var t = Self.decode(data) else { return }
+        guard let original = load(id: id, projectSlug: projectSlug) else { return }
+        var t = original
         mutate(&t)
+        guard t != original else { return }
         t.updatedAt = Date().timeIntervalSince1970
         try save(t, projectSlug: projectSlug)
     }

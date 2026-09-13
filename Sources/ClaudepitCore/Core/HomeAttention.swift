@@ -30,11 +30,15 @@ public func buildAttention(tasks: [ProjectTask], worktrees: [WorktreeInfo]) -> [
         case .failed:         severity = .failed
         case .blocked:        severity = .blocked
         case .awaitingReview:
+            // A halted auto-run stays visible even when the phase itself wants nothing: the user
+            // asked for an unattended run to Code Review and it stopped short of that.
+            if t.autoRunHaltReason != nil { severity = .blocked; break }
             guard t.phaseNeedsReview else { continue }
             severity = .awaitingReview
         case .backlog, .running, .done: continue
         }
-        let reason = "\(t.status.label) in \(t.phase?.title ?? "…")"
+        let reason = t.autoRunHaltReason.map { "Auto-run stopped: \($0)" }
+            ?? "\(t.status.label) in \(t.phase?.title ?? "…")"
         items.append(AttentionItem(id: "task:\(t.id)", target: .task(t.id),
                                    title: t.name, reason: reason,
                                    severity: severity, sortKey: t.updatedAt))

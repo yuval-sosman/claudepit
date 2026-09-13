@@ -89,15 +89,116 @@ public struct TaskWorktree: Codable, Sendable, Equatable {
     }
 }
 
+/// Where a finding lives. `line` is optional — some findings are about a file as a whole.
+public struct FindingLocation: Codable, Sendable, Equatable, Identifiable {
+    public var file: String
+    public var line: Int?
+    public var id: String { display }
+    /// `Sources/Foo.swift:41`, or just the path when there is no line.
+    public var display: String { line.map { "\(file):\($0)" } ?? file }
+
+    public init(file: String, line: Int? = nil) { self.file = file; self.line = line }
+
+    /// Parse `path/to/File.swift:41` (or a bare path). Trailing `:41,43` keeps only the first line —
+    /// the report writes multi-line references that way and a location needs one anchor.
+    public init?(_ raw: String) {
+        let t = raw.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+        guard !t.isEmpty else { return nil }
+        guard let colon = t.lastIndex(of: ":") else { self.init(file: t); return }
+        let tail = String(t[t.index(after: colon)...])
+        let first = tail.split(separator: ",").first.map(String.init) ?? tail
+        guard let n = Int(first.trimmingCharacters(in: .whitespaces)) else { self.init(file: t); return }
+        self.init(file: String(t[t.startIndex..<colon]), line: n)
+    }
+}
+
+/// One code-review finding.
+///
+/// The structured fields are Optional because a finding parsed from the legacy
+/// `severity | title | detail` line has only `detail` — and because they are Optional, an old
+/// `task.json` decodes unchanged. `what`/`why`/`fix` mirror the three questions the review command's
+/// prose already answers per finding; keeping them apart is what lets the UI lay them out instead of
+/// dumping one truncated sentence.
 public struct ReviewFinding: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var title: String
     public var detail: String
     public var severity: String    // "high" | "med" | "low"
     public var spawnedTaskID: String?
-    public init(id: String, title: String, detail: String, severity: String, spawnedTaskID: String? = nil) {
+    /// The report's own label for this finding ("I1", "M3") — lets a reader find it in review.md.
+    public var ruleID: String?
+    /// correctness | tests | security | performance | maintainability | docs
+    public var category: String?
+    public var what: String?
+    public var why: String?
+    public var fix: String?
+    public var locations: [FindingLocation]?
+
+    public init(id: String, title: String, detail: String, severity: String,
+                spawnedTaskID: String? = nil, ruleID: String? = nil, category: String? = nil,
+                what: String? = nil, why: String? = nil, fix: String? = nil,
+                locations: [FindingLocation]? = nil) {
         self.id = id; self.title = title; self.detail = detail
         self.severity = severity; self.spawnedTaskID = spawnedTaskID
+        self.ruleID = ruleID; self.category = category
+        self.what = what; self.why = why; self.fix = fix; self.locations = locations
+    }
+
+    /// The one-line gist: the structured `what` when present, else the legacy blob.
+    public var summaryText: String {
+        let w = (what ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return w.isEmpty ? detail : w
+    }
+
+    /// True once the review supplies more than a single sentence — drives the richer card layout.
+    public var isStructured: Bool {
+        what != nil || why != nil || fix != nil || !(locations ?? []).isEmpty
+    }
+}
+
+public extension ReviewFinding {
+    /// Display/sort rank — high first. An unrecognised severity sorts with `low` and never above
+    /// it: the severity string comes straight from the agent's scrollback, so a typo must not be
+    /// able to promote a finding to the top of the list.
+    var severityRank: Int {
+        switch severity.lowercased() {
+        case "high", "critical": return 0
+        case "med", "medium", "important": return 1
+        default: return 2
+        }
+    }
+
+    /// Short uppercase pill text. Normalised so "medium"/"important" render as the same MED pill.
+    var severityLabel: String {
+        switch severityRank {
+        case 0: return "HIGH"
+        case 1: return "MED"
+        default: return "LOW"
+        }
+    }
+}
+
+/// A task spawned from another task's review findings. It *continues* the parent's work rather
+/// than succeeding it: same worktree, same Claude session, and deliberately NO `dependsOn` edge —
+/// a dependency gates on the parent reaching `.done`, which never happens while it sits in Review.
+public struct TaskFollowUp: Codable, Sendable, Equatable {
+    public var parentTaskID: String
+    public var findingIDs: [String]
+    /// The parent's implement session, resumed by the fix agent. nil = start a fresh session.
+    public var resumeSessionID: String?
+    /// The parent's review.md — the fix agent's full argument for the findings it is handed.
+    public var parentReviewPath: String?
+    /// The parent's spec — the binding authority a fix must not contradict. Snapshotted rather
+    /// than re-derived: `planPath` lives under `plansDir` with an agent-chosen filename, so it is
+    /// not reconstructible from the slug and id the way spec/review are.
+    public var parentSpecPath: String?
+    public var parentPlanPath: String?
+    public init(parentTaskID: String, findingIDs: [String],
+                resumeSessionID: String? = nil, parentReviewPath: String? = nil,
+                parentSpecPath: String? = nil, parentPlanPath: String? = nil) {
+        self.parentTaskID = parentTaskID; self.findingIDs = findingIDs
+        self.resumeSessionID = resumeSessionID; self.parentReviewPath = parentReviewPath
+        self.parentSpecPath = parentSpecPath; self.parentPlanPath = parentPlanPath
     }
 }
 
@@ -192,9 +293,19 @@ public struct ProjectTask: Codable, Identifiable, Sendable, Equatable {
     public var requirements: [String]
     public var suggestions: [TaskVersion]?    // alternate proposals vs main. Optional for Codable back-compat.
     public var worktree: TaskWorktree?
+    public var followUp: TaskFollowUp?        // set when this task fixes another's findings. Optional for Codable back-compat.
     public var createdAt: TimeInterval
     public var updatedAt: TimeInterval
     public var links: TaskLinks
+    /// Armed: run phase-to-phase unattended up to `AutoRun.terminal`, then disarm and stop.
+    /// Optional for Codable back-compat — a missing key must decode as "off", not fail the whole
+    /// decode and drop the task through to the lossy `TaskStore.remapV1`.
+    public var autoRun: Bool?
+    /// Phases this auto-run has already retried once. The budget is per-phase and lives on disk
+    /// (not in memory) so a restart mid-run cannot hand a phase a second free retry.
+    public var autoRunRetried: [TaskPhase]?
+    /// Why auto-run disarmed itself, if it did. nil after a clean finish; cleared on every re-arm.
+    public var autoRunHaltReason: String?
 
     public static let defaultPhases: [TaskPhase] = [.writeSpec, .createPlan, .implement, .codeReview]
 
@@ -205,18 +316,35 @@ public struct ProjectTask: Codable, Identifiable, Sendable, Equatable {
                 priority: Priority = .normal, tags: [String] = [], dependsOn: [String] = [],
                 plannedPhases: [TaskPhase] = ProjectTask.defaultPhases,
                 requirements: [String] = [], suggestions: [TaskVersion]? = nil,
-                worktree: TaskWorktree? = nil,
+                worktree: TaskWorktree? = nil, followUp: TaskFollowUp? = nil,
                 createdAt: TimeInterval = 0, updatedAt: TimeInterval = 0,
-                links: TaskLinks = TaskLinks()) {
+                links: TaskLinks = TaskLinks(),
+                autoRun: Bool? = nil, autoRunRetried: [TaskPhase]? = nil,
+                autoRunHaltReason: String? = nil) {
         self.version = version; self.id = id; self.name = name; self.topic = topic
         self.description = description
         self.phase = phase; self.status = status; self.priority = priority
         self.tags = tags; self.dependsOn = dependsOn; self.plannedPhases = plannedPhases
         self.requirements = requirements; self.suggestions = suggestions; self.worktree = worktree
+        self.followUp = followUp
         self.createdAt = createdAt; self.updatedAt = updatedAt; self.links = links
+        self.autoRun = autoRun; self.autoRunRetried = autoRunRetried
+        self.autoRunHaltReason = autoRunHaltReason
     }
 
     public static var empty: ProjectTask { ProjectTask() }
+
+    /// Armed for unattended execution. Read this rather than `autoRun == true` — the flag is
+    /// Optional only for Codable back-compat, and nil/false mean the same thing everywhere.
+    public var isAutoRunning: Bool { autoRun == true }
+
+    /// True when this task exists to fix another task's review findings *and* plans no `createPlan`
+    /// phase — so its implement step runs the findings-driven `fix` command instead of the
+    /// plan-centric `implement` one, which has no plan to follow.
+    ///
+    /// The `createPlan` half matters: a user who adds Plan back to a fix task in the edit form has
+    /// asked for the normal pipeline, and must get the command that reads a plan.
+    public var isFixTask: Bool { followUp != nil && !plannedPhases.contains(.createPlan) }
 
     // MARK: - Versions
 
