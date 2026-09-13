@@ -122,7 +122,7 @@ To change summary behavior, edit `Sources/ClaudepitCore/Core/HookScripts.swift` 
 Project-scoped task tracker. Each task moves through a fixed pipeline: **created → writeSpec → createPlan → implement → codeReview → done**, executed by interactive `claude` agents in **herdr** panes.
 
 **Storage** — one folder per task under `~/.claude/projects/<slug>/tasks/<task-id>/`, sibling to `summary/` and `memory/` (so the existing `FileWatcher` picks up changes):
-- `task.json` — the record (`ProjectTask`: name, description, `phase`, `status`, `requirements`, per-phase `autoAdvance` gate, `links`).
+- `task.json` — the record (`ProjectTask`: name, description, `phase`, `status`, `requirements`, `links`, and the `autoRun`/`autoRunRetried`/`autoRunHaltReason` trio below).
 - `attachments/` — copied-in images (storage designed; drag-in UI is a follow-up).
 
 Key files: `Sources/ClaudepitCore/Model/Task.swift` (model), `Core/TaskStore.swift` (per-task-folder atomic load/save/delete), `Core/TaskTransition.swift` (pure phase-advance + `CLAUDEPIT_ARTIFACT:` parsing), `Core/TaskRunner.swift` (herdr orchestration actor), `UI/Sections/TasksSection.swift` + `TaskDetailView.swift`.
@@ -138,12 +138,70 @@ Key files: `Sources/ClaudepitCore/Model/Task.swift` (model), `Core/TaskStore.swi
 
 **Link healing** — `TaskTransition.healArtifactLinks` adopts any deterministic deliverable that exists on disk but was never recorded, for **every** phase rather than just the current one. `AppState.loadTasks()` runs it beside `mergeBrainstormSuggestions`. Without it a phase that finished unobserved leaves `specPath`/`reviewPath` nil and the detail view's "Review spec" button disabled for a file that plainly exists.
 
-**Status progression** — a phase goes `.running` → (`.blocked` | `.awaitingReview` | `.failed`). There is **no auto-advance**: `TaskTransition.onPhaseComplete`/`driveIdleTasks` no longer exist; the user advances with "Next phase" (`AppState.advanceTaskPhase`) or by dragging on the board. Hand-off phases (brainstorm) run **without** `--wait`, so nothing observes them in-line — two pollers on `AppState` close the loop, both guarded by the `driving` set:
+**Heal must converge.** `AppState.healArtifactLinks`'s write-back has to persist *everything*
+`TaskTransition.healArtifactLinks` derived — paths **and** `reviewFindings`. It once wrote only the
+three paths, so the findings upgrade was re-derived on every load, `TaskStore.update` bumped
+`updatedAt`, the FileWatcher fired, `reload()` ran `loadTasks()`, and the app re-entered the same
+write several times a second forever (sessions rescanned, watcher rebuilt, a `grep` child alive
+~50% of the time). `TaskStore.update` now **refuses a mutation that changes nothing**, which retires
+the whole class rather than the one instance — but anything heal learns to fill in next still
+belongs in that write-back.
+
+**Status progression** — a phase goes `.running` → (`.blocked` | `.awaitingReview` | `.failed`). A phase never chains on its own: `landFinishedTurn` lands the task and stops, and the user advances with "Next phase" (`AppState.advanceTaskPhase`) or by dragging on the board. The **one** exception is an armed auto-run (see below), which is opt-in per task and drives the chain from outside the runner's completion path rather than from inside it. Hand-off phases (brainstorm) run **without** `--wait`, so nothing observes them in-line — two pollers on `AppState` close the loop, both guarded by the `driving` set:
 
 - `driveRunningTasks()` → `TaskRunner.resolveRunning` — polls a `.running` task's live agent: `blocked` → `.blocked`, `idle`/`done` → `landFinishedTurn`, agent missing entirely → land on its deliverable or `.failed` (never spin forever).
 - `driveBlockedTasks()` → `TaskRunner.resolveBlocked` — deliverable file first (no subprocess, and still works when the agent is gone), then the live agent, then `landFinishedTurn` so `createPlan`/`implement` can report done via their marker.
+- `driveAutoRunTasks()` → `TaskRunner.stepAutoRun` — the third poller, added with auto-run. It is the **sole owner** of an armed task, so the two above skip `isAutoRunning` and exactly one code path writes an armed task's status.
 
-Both run on every watcher tick **and** on `AppState.syncTaskPolling()`'s 4s timer, which exists only while some task is `.running`/`.blocked` — a working agent writes nothing the FileWatcher can see, so without it a running card goes stale for minutes.
+**The `driving` guard has deadlines, not just entries.** It is `[String: Date]`, claimed through
+`beginDriving(_:ttl:)` — `resolveDriveTTL` (300s) for a poll, `launchDriveTTL` (4200s) for a launch,
+which must clear `runPhase`'s 60-minute `implement` wait or the guard would expire mid-phase and a
+second agent could be launched into the same checkout. As a plain `Set` whose entry was removed
+only *after* the `await` returned, a drive call that never returned parked its id for the life of
+the process: the task sat on "Running" with an idle agent and its deliverable already on disk, and
+"Open in Herdr" (same actor) looked dead too. `TaskRunner.launching` is the actor-side twin — every
+holder now releases it with `defer`, and `answer` holds it through `observe` like `runPhase` does.
+
+All three run on every watcher tick **and** on `AppState.syncTaskPolling()`'s 4s timer, whose predicate is `.running`/`.blocked` **or `isAutoRunning`** — an armed task spends most of its life at `.awaitingReview` between phases, and without that third clause the timer invalidates the moment a phase lands and the chain dies silently — a working agent writes nothing the FileWatcher can see, so without it a running card goes stale for minutes.
+
+**Auto-run ("Run to review").** A task can be armed to run unattended from its current phase
+through to `codeReview`, then stop. Three Optional fields carry it (Optional because a new
+non-Optional field fails the decode of every existing `task.json` and drops it through the lossy
+`remapV1`): `autoRun`, `autoRunRetried` (the per-phase retry budget, on disk so a restart cannot
+grant a second free retry) and `autoRunHaltReason`.
+
+`Core/AutoRun.swift` holds the whole policy as pure functions — `nextStep` returns
+`wait`/`start`/`retry`/`finish`/`halt`, so the state machine is testable with no herdr at all
+(`Tests/ClaudepitTests/AutoRunChecks.swift`). Three rules are structural rather than checked at
+runtime: **brainstorm is never run** (`AutoRun.skipped` — its command is built on
+`AskUserQuestion` and its suggestions need in-app triage), the chain **never marks a task `.done`**
+(`Step` has no case that means done, and the dispatcher calls `runPhase` rather than
+`TaskRunner.advance`, the only function that sets it), and a failed/stalled phase gets **exactly
+one** retry before halting.
+
+The agent is made non-interactive at the **invocation**, not in the command bodies:
+`AutoRun.claudeArgs` appends `--disallowedTools AskUserQuestion,EnterPlanMode,ExitPlanMode` plus an
+`--append-system-prompt`. Editing `HookScripts` would not reach a user who has edited their copy
+under `claudepit-config/`, since `ManagedInstaller.taskCommandBodies()` prefers that copy. The
+appended prompt must **override** rather than merely forbid — `claudepit-task-spec.md` makes
+`AskUserQuestion` mandatory, so "where your instructions tell you to ask, decide instead" is
+load-bearing. `--permission-mode` stays `auto` in both modes: what parks an unattended session is
+the tools, which no permission mode gates. Both plan-mode tools are denied together — denying only
+`ExitPlanMode` would trap the plan phase inside plan mode.
+
+Sharp edges the implementation handles: a `.failed` implement usually means the 60-minute wait
+expired, and a timed-out wait does **not** stop the agent — so `stepAutoRun` refuses to retry while
+`agentExists` still finds one, or two Claudes would share a checkout. `releaseAgentName` renames the
+stale agent aside before `openPhaseTab` closes its tab (herdr has no `agent stop`, and
+`agent start` answers `agent_name_taken` while the name is held, at which point `agentReady` matches
+the dead agent and the prompt goes nowhere) and clears `lastSeenSeq[name]`, since that map is keyed
+by a reused name and would otherwise suppress a fresh agent's first scrollback read. The scrollback
+window is **1000** lines, not 400: `createPlan`/`implement` have no deterministic artifact, so the
+`CLAUDEPIT_ARTIFACT:` marker is the only thing that can report them done, and an unattended agent
+prints more. `AutoRun.selectStartable` keeps two armed tasks that share one checkout (a fix task and
+its parent) from both launching in the same tick — `worktreeBusy` only sees `.running`/`.blocked`
+co-tenants. And `openPhaseTab(focus:)` skips `tab focus` for an armed run, which would otherwise
+steal the user's terminal focus once per phase.
 
 **Card state** — `CardState` (`UI/Sections/TaskCardView.swift`) is the one status a card shows: `waiting` / `running` / `failed` / `phaseDone` / `notStarted` / `done` (raw value = sort rank). Terminal statuses (backlog/failed/done) decide on their own; for an in-flight task the **live agent wins** (`working` → Running, `blocked` → Waiting) and `idle`/no-agent defer to the persisted status.
 
@@ -151,7 +209,52 @@ Both run on every watcher tick **and** on `AppState.syncTaskPolling()`'s 4s time
 
 `AppState.liveState(of:)` matches the agent by **name** (`TaskRunner.agentName`) and only then by pane id, and reads `herdrAgents` — *not* `herdrSessions`. Task agents carry no `agent_session`, so `Herdr.AgentEntry.sessionID` is Optional and the session-keyed map never contains them; requiring one used to drop every task agent from `agent list` and left the board's live state permanently dead.
 
-**Phase commands** — `ManagedInstaller.sync()` writes five `<project>/.claude/commands/claudepit-task-{brainstorm,spec,plan,implement,review}.md` slash-commands on launch (**project-scoped**, Claudepit-managed projects only), **overwrite-if-changed**, and sweeps retired ones (`HookScripts.retiredTaskCommandFilenames` — currently the removed `verify` phase's command; `TaskRunner.installCommands` runs the same sweep in worktrees). Tasks that still carry `verify` in `task.json` are healed on load by `TaskStore.remapRemovedPhases` (phase `verify` falls forward to `codeReview`). Task **worktrees** get the same bodies: `TaskRunner.installCommands(inWorktree:commands:)` requires the caller to pass them, and `ensureWorktree` builds them with `ManagedInstaller.taskCommandBodies()` from the `projectRoot` it is already given — so a worktree receives the user's edited copies and honors the enable toggles instead of the `HookScripts` built-ins. `ManagedInstaller.migrateTaskCommandLocationsIfNeeded()` removes any stale global copies under `~/.claude/commands/` and the 4 pre-slash-command subagents under `~/.claude/agents/` — once per machine, recorded in the `completedMigrations` `UserDefaults` key. **Do not edit these files by hand** — edit the source in `HookScripts.swift` (`taskCommands` / `taskCommand*` strings).
+**Phase commands** — `ManagedInstaller.sync()` writes six `<project>/.claude/commands/claudepit-task-{brainstorm,spec,plan,implement,review,fix}.md` slash-commands on launch (**project-scoped**, Claudepit-managed projects only), **overwrite-if-changed**, and sweeps retired ones (`HookScripts.retiredTaskCommandFilenames` — currently the removed `verify` phase's command; `TaskRunner.installCommands` runs the same sweep in worktrees). Tasks that still carry `verify` in `task.json` are healed on load by `TaskStore.remapRemovedPhases` (phase `verify` falls forward to `codeReview`). Task **worktrees** get the same bodies: `TaskRunner.installCommands(inWorktree:commands:)` requires the caller to pass them, and `ensureWorktree` builds them with `ManagedInstaller.taskCommandBodies()` from the `projectRoot` it is already given — so a worktree receives the user's edited copies and honors the enable toggles instead of the `HookScripts` built-ins. `ManagedInstaller.migrateTaskCommandLocationsIfNeeded()` removes any stale global copies under `~/.claude/commands/` and the 4 pre-slash-command subagents under `~/.claude/agents/` — once per machine, recorded in the `completedMigrations` `UserDefaults` key. **Do not edit these files by hand** — edit the source in `HookScripts.swift` (`taskCommands` / `taskCommand*` strings).
+
+**Review findings → tasks.** A `codeReview` phase writes a `CLAUDEPIT_FINDINGS_BEGIN … END` block
+**into `review.md`**, and `routeArtifact` parses **the file** first (scrollback is only a fallback —
+it is a 400-line window a long review overruns, and it is gone once the pane closes). The block is a
+**JSON array**, one object per finding: `ruleId`, `severity`, `category`, `title`, `locations`
+(`"path:line"` strings), and the narrative triad `what` / `why` / `fix`. Field names follow **SARIF**
+— the industry standard for static-analysis results — wherever SARIF has an equivalent, so it
+converts to a SARIF run mechanically; the triad is what SARIF has no first-class home for.
+`TaskTransition.parseFindings` still accepts the legacy `severity | title | detail` lines, so reviews
+already on disk keep working, and `healArtifactLinks` **upgrades** a task holding legacy findings the
+next time it loads — no re-review needed. Finding ids hash `title + first location`, not the
+narrative, so rewording a review does not orphan the `spawnedTaskID` links.
+`ReviewFinding.isStructured` drives the card layout: What / Why / Fix as separate blocks plus
+clickable `file:line` chips, falling back to the single blob for a legacy finding. Triage happens in `ReviewFindingsSheet` (reached from a banner in
+`TaskDetailView.codeReviewPanel`, sized by `reviewSheetSize` like the brainstorm sheet), **not** in
+the detail panel — ten findings as ten rows in a 250pt column truncated every title and let only one
+expand at a time. Several findings can be selected and become **one** task; `FindingTaskDraft`
+(Core, pure) is the single builder for its name/description/requirements/priority, so the one-click
+create and the pre-filled `NewTaskSheet` (`createSeed`) cannot produce differently-shaped tasks.
+`routeArtifact` folds a re-review through `TaskTransition.mergeFindings` — a bare assignment used to
+discard every `spawnedTaskID`.
+
+**Fix tasks.** A findings task created with "Fix now" plans `[.implement, .codeReview]`, carries
+**no `dependsOn`** — `TaskTransition.canRun` gates on the parent reaching `.done`, which never
+happens while it sits in Review, so a dependency would make it permanently un-runnable — and records
+the parent in `ProjectTask.followUp` instead. It keeps `phase == nil` at creation: `HomeTaskPipeline`
+counts the ends by status and the middle by phase, so a task carrying both is counted twice in the
+strip, and `runPhase`'s `phase ?? plannedPhases.first` starts it at `.implement` anyway.
+
+It **inherits the parent's `TaskWorktree`** (branch + path; pane/tab deliberately not copied) because
+the implementation under review is *uncommitted* there — a fresh worktree off trunk would not contain
+the code the findings point at. `ensureWorktree` reuses it with no code change. Two consequences:
+`AppState.deleteTask` refuses to remove a worktree another task still points at, and
+`TaskTransition.worktreeBusy` blocks Run/Retry/drag while a co-tenant's agent holds the checkout.
+
+Its implement phase runs **`claudepit-task-fix.md`**, selected by
+`TaskRunner.commandFilename(for:task:)` on `ProjectTask.isFixTask` (`followUp != nil` *and* no
+`createPlan` phase — adding Plan back in the edit form opts back into the plan-centric command).
+Swapping the body rather than adding a sixth `TaskPhase` keeps `TaskBoardView.columns`,
+`HomeTaskPipeline`, `expectedArtifact` and `CardState` untouched. `phasePrompt` gives it the
+findings as its brief (implement otherwise gets `## Description`/`## Requirements` for no phase but
+brainstorm/writeSpec) and points it at the parent's review/spec/plan instead of its own empty
+`specPath`/`planPath`. `startAgent` appends `--resume <followUp.resumeSessionID>` after `herdr agent
+start`'s `--`, so the agent picks up the parent's implement session — which only resolves in that
+session's cwd, i.e. the inherited worktree, so the two settings fall together in the form.
 
 **Phase prompt** — `TaskRunner.phasePrompt` builds what the agent actually receives: the phase's
 `/claudepit-task-<name>` slash-command **alone on line 1** (Claude Code hands everything after it to
@@ -210,6 +313,43 @@ session list.
 | `Sources/ClaudepitCore/Core/TaskDraftRunner.swift` | New Task "Create with AI" — fills the form from a free-text idea | via `PlanQARunner.ask` + `cwd` |
 | `Sources/ClaudepitApp/UI/Sections/SessionDetailView.swift` | `/context` report (shown in popover) | `ClaudeCLI.resumeArgs` + `cwd` |
 | `Sources/ClaudepitApp/UI/Sections/PluginsSection.swift` | `claude plugin …`, `/reload-plugins` | **none** — `--safe-mode` would disable the very plugins being managed |
+
+## Every other subprocess: `Subprocess`
+
+`Sources/ClaudepitCore/Core/Subprocess.swift` is the one bounded way to run a child process.
+`Herdr.run` and `TaskRunner.git` go through it; do not hand-roll `Process` + `waitUntilExit()`
+again. Two hangs it exists to prevent, both of which suspend the awaiting Swift task **forever**
+(a `withCheckedContinuation` that never resumes cannot be cancelled from outside):
+
+- **Pipe-buffer deadlock.** A pipe holds ~64KB. Reading *after* `waitUntilExit()` — the shape every
+  call site used — hangs on any child that writes more: it blocks in `write()`, so it never exits,
+  so the wait never returns. An undrained `standardError` is the same trap with no reader at all.
+  Both pipes are drained concurrently while the child runs.
+- **A child that never exits.** `waitUntilExit()` is not interruptible, so the only lever is
+  killing it: a `timeout` ceiling (SIGTERM, then SIGKILL after a grace).
+
+`Herdr.run` returns **stdout only**, deliberately: herdr writes `{"error":{"code":…}}` to *stderr*
+and leaves stdout empty, so a failed command still yields nil from `runJSON` — which is what
+`TaskRunner` reads as failure (`agent start` answering `agent_name_taken` is the load-bearing case).
+A herdr call carrying its own `--timeout <ms>` must pass `TaskRunner.ceiling(forHerdrTimeoutMS:)`,
+or the 120s default kills a legitimate 30-minute `agent wait` and lands the phase in `.failed`.
+
+## Focusing a herdr pane
+
+`HerdrFocus` (`Core/HerdrFocus.swift`) owns both halves of "show me that pane", because doing only
+the first half is indistinguishable from the button being broken:
+
+1. **Select it inside herdr** — `agent focus <agentName>` first, `tab focus <tabID>` only as
+   fallback. The agent name is stable for the life of the phase; the tab id is a snapshot written
+   into `task.json` when the pane was created and goes stale on a herdr restart, at which point
+   `tab focus` silently no-ops.
+2. **Raise the window** — herdr is a TUI inside a terminal application, so switching its tab changes
+   nothing visible while Claudepit is frontmost. `HerdrFocus.hostCandidatePIDs()` walks up from
+   every live `herdr` process via `sysctl(KERN_PROC_ALL)` (no subprocess — `Executable.find`'s rule)
+   and `AppState.activateHerdrHost()` activates the first `.regular` app among them. Chains passing
+   through our own pid are dropped: the short-lived `herdr` commands *this app* spawns are herdr
+   processes too, and their ancestry leads back to Claudepit, which would "win" and activate
+   ourselves. Every call site pairs the focus with `activateHerdrHost()`.
 
 ## Detecting a signed-out CLI
 

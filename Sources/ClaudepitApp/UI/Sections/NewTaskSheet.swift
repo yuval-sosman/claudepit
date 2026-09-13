@@ -18,6 +18,16 @@ struct NewTaskSheet: View {
     /// Clone: seed fields but stay in create mode (no taskID/editing → save() creates a fresh task).
     var prefill: TaskVersion? = nil
 
+    /// A fully-formed task to create, carrying the shape `TaskVersion` cannot express — planned
+    /// phases, an inherited worktree, the follow-up link. Used by the review-findings flow so
+    /// "Create and edit…" produces exactly the task the one-click button would have, plus edits.
+    struct CreateSeed {
+        var draft: ProjectTask
+        var parent: ProjectTask
+        var findingIDs: [String]
+    }
+    var createSeed: CreateSeed? = nil
+
     @State private var name = ""
     @State private var topic = ""
     @State private var description = ""
@@ -29,6 +39,16 @@ struct NewTaskSheet: View {
     @State private var depFilter = ""
     @State private var depTopicFilter: String? = nil
     @State private var topicOptions: [String] = []
+
+    /// Which pipeline the created task plans. Only shown for a seeded create — an ordinary new
+    /// task has no reason to start anywhere but the top.
+    @State private var fixNow = true
+    @State private var autoRunOnCreate = false
+    /// Work in the parent's checkout (where the code under review actually lives, uncommitted).
+    @State private var inheritWorktree = true
+    /// Resume the parent's implement session. Only resolvable in that worktree's cwd, so it is
+    /// forced off — and disabled — when `inheritWorktree` is off.
+    @State private var resumeSession = true
 
     @State private var aiExpanded = false
     @State private var aiIdea = ""
@@ -61,6 +81,7 @@ struct NewTaskSheet: View {
                     prioritySection
                     labelSection
                     if !depCandidates(all: true).isEmpty || !dependsOn.isEmpty { dependenciesSection }
+                    if !isEditing { workflowSection }
                 }
                 .padding(20)
             }
@@ -275,6 +296,53 @@ struct NewTaskSheet: View {
         }
     }
 
+    /// Pipeline + continuation controls. The auto-run toggle applies to every new task; the
+    /// pipeline picker and continuation controls only to a follow-up drafted from review findings.
+    @ViewBuilder
+    private var workflowSection: some View {
+        section("Workflow") {
+            VStack(alignment: .leading, spacing: 10) {
+                if let seed = createSeed {
+                    Picker("", selection: $fixNow) {
+                        Text("Fix now — Implement → Review").tag(true)
+                        Text("Full — Spec → Plan → Implement → Review").tag(false)
+                    }
+                    .pickerStyle(.radioGroup).labelsHidden()
+
+                    if seed.draft.followUp != nil {
+                        Divider().opacity(0.2)
+                        Text("Continues \"\(seed.parent.name)\"")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Toggle("Work in its worktree", isOn: $inheritWorktree)
+                            .toggleStyle(.checkbox).font(.callout)
+                            .disabled(seed.draft.worktree == nil)
+                            .help(seed.draft.worktree == nil
+                                  ? "That task has no worktree to inherit"
+                                  : "The code under review is uncommitted there — a fresh worktree would not contain it")
+                        Toggle("Resume its implementation session", isOn: $resumeSession)
+                            .toggleStyle(.checkbox).font(.callout)
+                            .disabled(!inheritWorktree || seed.draft.followUp?.resumeSessionID == nil)
+                            .help(seed.draft.followUp?.resumeSessionID == nil
+                                  ? "No implement session was captured for that task"
+                                  : "The agent picks up with the full implementation context")
+                        if !inheritWorktree && resumeSession {
+                            // Belt and braces for the disabled state: --resume only resolves in
+                            // the cwd the session was recorded under.
+                            Text("A session can only be resumed in its own worktree.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    Divider().opacity(0.2)
+                }
+                Toggle("Run to review automatically", isOn: $autoRunOnCreate)
+                    .toggleStyle(.checkbox).font(.callout)
+                Text("Runs each phase back-to-back without asking you anything, and stops at "
+                   + "Code Review.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     // MARK: - Section container
 
     private func section<Content: View>(_ title: String, required: Bool = false, @ViewBuilder content: () -> Content) -> some View {
@@ -381,6 +449,11 @@ struct NewTaskSheet: View {
 
     private func load() {
         topicOptions = app.activePath.map { TopicStore.shared.load(projectSlug: Paths.slug(for: $0)) } ?? []
+        if let seed = createSeed {
+            fixNow = !seed.draft.plannedPhases.contains(.createPlan)
+            inheritWorktree = seed.draft.worktree != nil
+            resumeSession = seed.draft.followUp?.resumeSessionID != nil
+        }
         if let p = prefill, editing == nil {
             name = p.name; topic = p.topic; description = p.description
             requirements = p.requirements.isEmpty ? [""] : p.requirements
@@ -423,6 +496,36 @@ struct NewTaskSheet: View {
         }
 
         let now = Date().timeIntervalSince1970
+
+        // Seeded create (review findings): start from the draft so plannedPhases, the inherited
+        // worktree and the follow-up link survive, then overwrite only the fields this form edits.
+        if let seed = createSeed {
+            var t = seed.draft
+            t.name = cleanName
+            t.topic = cleanTopic.isEmpty ? nil : cleanTopic
+            t.description = description
+            t.requirements = cleanReqs
+            t.priority = priority
+            t.tags = tags
+            t.dependsOn = Array(dependsOn)
+            t.plannedPhases = FindingTaskDraft.plannedPhases(fixNow: fixNow)
+            if !inheritWorktree {
+                // Forking fresh: the session cannot be resumed anywhere but its own worktree, so
+                // the two settings fall together.
+                t.worktree = nil
+                t.followUp?.resumeSessionID = nil
+            } else if !resumeSession {
+                t.followUp?.resumeSessionID = nil
+            }
+            t.createdAt = now
+            t.updatedAt = now
+            app.saveFollowUp(t, parent: seed.parent, findingIDs: seed.findingIDs)
+            // Arm through AppState rather than setting t.autoRun here, so there is one code path
+            // for arming: the same guards, retry-budget reset and poll-timer kick.
+            if autoRunOnCreate { app.armAutoRun(t) }
+            onClose(); return
+        }
+
         let task = ProjectTask(
             name: cleanName, topic: cleanTopic.isEmpty ? nil : cleanTopic, description: description,
             phase: nil, status: .backlog, priority: priority,
@@ -431,6 +534,7 @@ struct NewTaskSheet: View {
             createdAt: now, updatedAt: now)
         try? TaskStore.shared.save(task, projectSlug: slug)
         app.loadTasks()
+        if autoRunOnCreate { app.armAutoRun(task) }
         onClose()
     }
 }

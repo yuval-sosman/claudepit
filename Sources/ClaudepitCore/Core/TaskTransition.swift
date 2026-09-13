@@ -41,6 +41,17 @@ public enum TaskTransition {
         if t.links.brainstormPath == nil { t.links.brainstormPath = existing(.brainstorm) }
         if t.links.specPath == nil       { t.links.specPath = existing(.writeSpec) }
         if t.links.reviewPath == nil     { t.links.reviewPath = existing(.codeReview) }
+        // Adopt (or upgrade) findings from review.md. A phase that landed before the file was
+        // written recorded none at all, and a task whose findings came from the old scrollback
+        // format holds one truncated sentence each — re-reading the file gives both the structured
+        // version, without waiting for a re-review.
+        if let p = t.links.reviewPath, let text = try? String(contentsOfFile: p, encoding: .utf8) {
+            let parsed = parseFindings(from: text)
+            let haveStructure = t.links.reviewFindings.contains { $0.isStructured }
+            if !parsed.isEmpty, t.links.reviewFindings.isEmpty || (!haveStructure && parsed.contains { $0.isStructured }) {
+                t.links.reviewFindings = mergeFindings(existing: t.links.reviewFindings, parsed: parsed)
+            }
+        }
         return t == task ? nil : t
     }
 
@@ -62,6 +73,22 @@ public enum TaskTransition {
             guard let d = allTasks.first(where: { $0.id == dep }) else { return true }
             return d.status != .done
         }
+    }
+
+    /// The id of another task holding this task's worktree with a live phase, if any.
+    ///
+    /// A fix task shares its parent's checkout, so two agents can be pointed at the same files —
+    /// the parent re-running its review while the child edits them would corrupt both diffs.
+    /// Matched on the standardized path, since one side may carry a symlinked or trailing-slash
+    /// spelling of the same directory.
+    public static func worktreeBusy(_ task: ProjectTask, allTasks: [ProjectTask]) -> String? {
+        guard let path = task.worktree?.path else { return nil }
+        let mine = URL(filePath: path).standardizedFileURL.path
+        return allTasks.first { other in
+            guard other.id != task.id, let p = other.worktree?.path else { return false }
+            guard URL(filePath: p).standardizedFileURL.path == mine else { return false }
+            return other.status == .running || other.status == .blocked
+        }?.id
     }
 
     /// Insert `phase` into `planned` at its canonical `TaskPhase.allCases` position (idempotent).
@@ -91,24 +118,122 @@ public enum TaskTransition {
     }
 
     /// Parse a `CLAUDEPIT_FINDINGS_BEGIN … CLAUDEPIT_FINDINGS_END` block into findings.
-    /// Each line: `severity | title | detail`. Deterministic id = FNV-1a hex of title.
+    ///
+    /// Two formats, tried in order:
+    ///  1. **JSON array** (current) — one object per finding with `title`, `severity`/`level`,
+    ///     `what`, `why`, `fix`, `locations`, `category`, `ruleId`. Field names follow SARIF's
+    ///     vocabulary where SARIF has an equivalent, so this converts mechanically to a real SARIF
+    ///     run later; the three narrative fields are the ones SARIF has no first-class home for.
+    ///  2. **`severity | title | detail` lines** (legacy) — kept so a review written by an older
+    ///     command body, or by an agent that ignored the JSON instruction, still yields findings
+    ///     rather than nothing.
     public static func parseFindings(from output: String) -> [ReviewFinding] {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let begin = lines.firstIndex(where: { $0.contains("CLAUDEPIT_FINDINGS_BEGIN") }),
-              let end = lines.firstIndex(where: { $0.contains("CLAUDEPIT_FINDINGS_END") }),
+              let end = lines[begin...].firstIndex(where: { $0.contains("CLAUDEPIT_FINDINGS_END") }),
               begin < end else { return [] }
+        let body = lines[(begin + 1)..<end]
+        if let json = parseFindingsJSON(Array(body)) { return json }
+        return parseFindingsLines(Array(body))
+    }
+
+    /// JSON array between the markers. Tolerates a ```json fence around it (agents add one by
+    /// reflex) and returns nil — not an empty array — when the body simply isn't JSON, so the
+    /// caller can fall through to the legacy parser.
+    private static func parseFindingsJSON(_ body: [String]) -> [ReviewFinding]? {
+        let stripped = body.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("```") }
+        let text = stripped.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("["), let data = text.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+
         var out: [ReviewFinding] = []
-        for line in lines[(begin + 1)..<end] {
+        for obj in raw {
+            let title = str(obj["title"]) ?? ""
+            guard !title.isEmpty else { continue }
+            let what = str(obj["what"]), why = str(obj["why"]), fix = str(obj["fix"])
+            let locations = (obj["locations"] as? [Any] ?? []).compactMap { loc -> FindingLocation? in
+                if let s = loc as? String { return FindingLocation(s) }
+                // Also accept the nested {file, line} shape, which is what SARIF itself uses.
+                guard let d = loc as? [String: Any], let f = str(d["file"]) else { return nil }
+                return FindingLocation(file: f, line: d["line"] as? Int)
+            }
+            // `detail` stays populated so every consumer that predates the structured fields —
+            // and the fix task's brief — still reads something useful.
+            let detail = [what, why.map { "Why: \($0)" }, fix.map { "Fix: \($0)" }]
+                .compactMap { $0 }.joined(separator: "\n\n")
+            out.append(ReviewFinding(
+                id: findingID(title: title, locations: locations, detail: detail),
+                title: title,
+                detail: detail.isEmpty ? title : detail,
+                severity: normalizeSeverity(str(obj["severity"]) ?? str(obj["level"]) ?? "low"),
+                ruleID: str(obj["ruleId"]) ?? str(obj["ruleID"]),
+                category: str(obj["category"]),
+                what: what, why: why, fix: fix,
+                locations: locations.isEmpty ? nil : locations))
+        }
+        return out
+    }
+
+    /// Legacy `severity | title | detail`, one per line.
+    private static func parseFindingsLines(_ body: [String]) -> [ReviewFinding] {
+        var out: [ReviewFinding] = []
+        for line in body {
             let parts = line.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map {
                 $0.trimmingCharacters(in: .whitespaces)
             }
             guard parts.count == 3 else { continue }
-            let severity = parts[0].lowercased(), title = parts[1], detail = parts[2]
+            let title = parts[1], detail = parts[2]
             guard !title.isEmpty else { continue }
-            // id keyed on title+detail so two same-titled findings stay distinct (they're Identifiable).
-            out.append(ReviewFinding(id: fnv1aHex(title + "|" + detail), title: title, detail: detail, severity: severity))
+            out.append(ReviewFinding(id: findingID(title: title, locations: [], detail: detail),
+                                     title: title, detail: detail,
+                                     severity: normalizeSeverity(parts[0])))
         }
         return out
+    }
+
+    /// Stable identity across re-reviews.
+    ///
+    /// Keyed on title + first location rather than title + full text: `spawnedTaskID` is matched by
+    /// id in `mergeFindings`, so hashing the narrative would drop the "task created" link every time
+    /// a reviewer reworded a sentence. Two same-titled findings in different files stay distinct;
+    /// with no location at all it falls back to the detail, which is the old behaviour.
+    static func findingID(title: String, locations: [FindingLocation], detail: String) -> String {
+        let anchor = locations.first?.display ?? detail
+        return fnv1aHex(title + "|" + anchor)
+    }
+
+    /// Accepts the report's Critical/Important/Minor vocabulary and SARIF's error/warning/note,
+    /// and normalises both onto the high/med/low the rest of the app speaks.
+    static func normalizeSeverity(_ raw: String) -> String {
+        switch raw.lowercased().trimmingCharacters(in: .whitespaces) {
+        case "high", "critical", "error":      return "high"
+        case "med", "medium", "important", "warning": return "med"
+        default:                                return "low"
+        }
+    }
+
+    private static func str(_ v: Any?) -> String? {
+        guard let s = v as? String else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    /// Fold a fresh parse into the findings already on the task.
+    ///
+    /// A codeReview re-run re-parses the same findings — ids are content-hashed, so they match —
+    /// and a wholesale assignment would forget which of them the user already turned into tasks.
+    /// The new parse is the source of truth for what *exists* and for the text; `spawnedTaskID` is
+    /// the one field carried over, because only the app ever sets it.
+    public static func mergeFindings(existing: [ReviewFinding],
+                                     parsed: [ReviewFinding]) -> [ReviewFinding] {
+        let spawned = Dictionary(existing.map { ($0.id, $0.spawnedTaskID) },
+                                 uniquingKeysWith: { a, b in a ?? b })
+        return parsed.map { f in
+            var out = f
+            if out.spawnedTaskID == nil { out.spawnedTaskID = spawned[f.id] ?? nil }
+            return out
+        }
     }
 
     /// Parse the brainstorm YAML deliverable into typed suggestions.

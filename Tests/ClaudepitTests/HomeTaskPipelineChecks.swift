@@ -57,5 +57,18 @@ func homeTaskPipelineChecks() -> [Bool] {
         try expect(!out[6].inFlight, "done")
     })
 
+    results.append(check("a fix task sits in Backlog exactly once until it runs") {
+        // A task created from review findings plans [.implement, .codeReview] but leaves `phase`
+        // nil, precisely so this strip counts it once. Setting phase at creation would put it in
+        // Backlog by status AND in Impl by phase.
+        var fix = ProjectTask(id: "f1", name: "Fix findings",
+                              phase: nil, status: .backlog,
+                              plannedPhases: [.implement, .codeReview])
+        fix.followUp = TaskFollowUp(parentTaskID: "p1", findingIDs: ["a"])
+        let out = buildTaskPipeline(tasks: [fix])
+        try expectEqual(out.map(\.count), [1, 0, 0, 0, 0, 0, 0], "Backlog only")
+        try expectEqual(out.reduce(0) { $0 + $1.count }, 1, "counted exactly once")
+    })
+
     return results
 }

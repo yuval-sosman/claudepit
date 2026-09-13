@@ -74,7 +74,10 @@ struct MenuBarPanel: View {
         return Button {
             if let pane = herdrPane {
                 let cwd = app.activePath?.path ?? NSHomeDirectory()
-                Task { await WorktreeResumer.focusPane(paneID: pane, cwd: cwd) }
+                Task {
+                    await WorktreeResumer.focusPane(paneID: pane, cwd: cwd)
+                    app.activateHerdrHost()   // herdr is a TUI — selecting the pane is only half
+                }
             } else {
                 open(item.target)
             }

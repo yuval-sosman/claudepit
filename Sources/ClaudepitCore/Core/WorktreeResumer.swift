@@ -18,13 +18,18 @@ public enum WorktreeResumer {
     /// Focus the herdr tab hosting `paneID`. Returns false when the pane no longer exists —
     /// callers can fall back to launching something new. Shared by "Focus in Herdr" everywhere
     /// (session rows, Home's Live Agents, the resume path below).
+    ///
+    /// Selecting the tab is only half of it: herdr is a TUI inside a terminal application, so the
+    /// window still has to be raised — `AppState.activateHerdrHost`, at each call site, since
+    /// `NSRunningApplication` is AppKit and this is Core.
     @discardableResult
     public static func focusPane(paneID: String, cwd: String) async -> Bool {
         let dir = URL(filePath: cwd)
         guard let obj = await Herdr.runJSON(["pane", "get", paneID], cwd: dir),
               let tabID = Herdr.tabID(fromPaneJSON: obj) else { return false }
-        _ = await Herdr.run(["tab", "focus", tabID], cwd: dir)
-        return true
+        // Resolved from the live pane a moment ago, so this tab id cannot be stale; there is no
+        // agent name to prefer here (these rows are addressed by pane, not by agent).
+        return await HerdrFocus.focus(agentName: nil, tabID: tabID, cwd: dir)
     }
 
     /// Resume a Claude session. If `existingPaneID` is provided (session already open in herdr),

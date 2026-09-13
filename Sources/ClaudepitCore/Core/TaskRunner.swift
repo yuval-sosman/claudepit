@@ -21,6 +21,80 @@ public actor TaskRunner {
     /// read while an agent sits unchanged at its prompt. See `seqChanged`.
     private var lastSeenSeq: [String: Int] = [:]
 
+    /// Actor-side re-entrancy guard for `stepAutoRun`. `AppState.driving` is MainActor state and
+    /// cannot protect a step kicked off from a button while a poller tick is already in flight.
+    private var autoStepping: Set<String> = []
+
+
+    // MARK: - Auto-run
+
+    /// Advance one armed task by at most one step.
+    ///
+    /// This is the **sole owner** of an armed task: `AppState.driveRunningTasks`/`driveBlockedTasks`
+    /// skip `autoRun == true`, so exactly one code path writes an armed task's status and two stale
+    /// snapshots can never clobber each other. Because it owns the task it also does the landing
+    /// work those pollers would have done.
+    ///
+    /// Safe to call every tick — it no-ops unless the task is actually ready to move. The phase
+    /// launch itself blocks for the whole phase (`runPhase` waits up to 60 min), which is what
+    /// paces the chain: every intervening tick finds the id in `autoStepping` and returns.
+    public func stepAutoRun(_ task: ProjectTask, allTasks: [ProjectTask],
+                            projectSlug: String, projectRoot: URL) async {
+        guard task.isAutoRunning else { return }
+        guard !launching.contains(task.id), !autoStepping.contains(task.id) else { return }
+        autoStepping.insert(task.id)
+        defer { autoStepping.remove(task.id) }
+
+        // 1. Land whatever is in flight — the driveRunning/driveBlocked work, done here instead.
+        switch task.status {
+        case .running: await resolveRunning(task, projectSlug: projectSlug, projectRoot: projectRoot)
+        case .blocked: await resolveBlocked(task, projectSlug: projectSlug, projectRoot: projectRoot)
+        default: break
+        }
+
+        // 2. Re-read: those write through TaskStore, and the caller's copy came off a MainActor
+        //    snapshot that may already be a tick old.
+        guard let fresh = TaskStore.shared.load(id: task.id, projectSlug: projectSlug),
+              fresh.isAutoRunning else { return }
+
+        // 3. Decide.
+        switch AutoRun.nextStep(fresh, allTasks: allTasks) {
+        case .wait:
+            return
+
+        case .start(let phase):
+            await runPhase(fresh, phase: phase, projectSlug: projectSlug, projectRoot: projectRoot)
+
+        case .retry(let phase):
+            // A `.failed` implement usually means the 60-minute wait expired — and a timed-out wait
+            // does not stop the agent, which is very likely still working. Launching a second one
+            // would put two Claudes in one checkout. Only retry when nothing is live.
+            let name = Self.agentName(id: fresh.id, phase: phase)
+            guard !(await agentExists(name)) else { return }
+            // Spend the retry BEFORE launching, so a crash mid-retry cannot buy a second one.
+            try? TaskStore.shared.update(id: fresh.id, projectSlug: projectSlug) {
+                $0.autoRunRetried = ($0.autoRunRetried ?? []) + [phase]
+            }
+            guard let again = TaskStore.shared.load(id: fresh.id, projectSlug: projectSlug) else { return }
+            await runPhase(again, phase: phase, projectSlug: projectSlug, projectRoot: projectRoot)
+
+        case .finish:
+            disarmAutoRun(fresh.id, projectSlug: projectSlug, reason: nil)
+
+        case .halt(let why):
+            disarmAutoRun(fresh.id, projectSlug: projectSlug, reason: why)
+        }
+    }
+
+    /// Clear the armed flag and the retry budget. `reason == nil` means it finished normally.
+    public func disarmAutoRun(_ id: String, projectSlug: String, reason: String?) {
+        try? TaskStore.shared.update(id: id, projectSlug: projectSlug) {
+            $0.autoRun = false
+            $0.autoRunRetried = nil
+            $0.autoRunHaltReason = reason
+        }
+    }
+
 
     // MARK: - Public API
 
@@ -154,14 +228,18 @@ public actor TaskRunner {
     public func answer(_ task: ProjectTask, projectSlug: String, projectRoot: URL, text: String) async {
         guard task.worktree?.paneID != nil else { return }
         var t = task
+        // `defer`, not a bare remove after the wait: an early exit added here later would
+        // otherwise park the id and `resolveRunning` would skip this task for good.
         launching.insert(t.id)
+        defer { launching.remove(t.id) }
         t.status = .running
         t.updatedAt = Date().timeIntervalSince1970
         try? TaskStore.shared.save(t, projectSlug: projectSlug)
         let name = Self.agentName(id: t.id, phase: t.phase)
         await herdr(["agent", "prompt", name, text], cwd: projectRoot)
         let result = await waitForTurn(name, cwd: projectRoot, timeoutMS: "600000")
-        launching.remove(t.id)
+        // Held through `observe` (the `defer` above), matching `runPhase`: releasing it here let a
+        // poller read the agent as `idle` and land the task while this observer was still writing.
         await observe(&t, promptResult: result, projectSlug: projectSlug, projectRoot: projectRoot)
     }
 
@@ -174,15 +252,18 @@ public actor TaskRunner {
         defer { launching.remove(t.id) }
         t.phase = phase
         let commands = Self.taskCommands(for: projectRoot)
-        guard Self.commandAvailable(for: phase, in: commands) else {
+        guard Self.commandAvailable(for: phase, task: t, in: commands) else {
             fail(&t, projectSlug); return
         }
         guard await ensureWorktree(&t, projectSlug: projectSlug, projectRoot: projectRoot,
                                    commands: commands) != nil else { return }
-        // If the agent for this phase is already live, just focus its tab — don't re-prompt.
+        // If the agent for this phase is already live, just focus it — don't re-prompt.
+        // Focus by AGENT NAME first: the stored tabID is a snapshot taken when the pane was made
+        // and goes stale on a herdr restart, at which point `tab focus` no-ops and the click looks
+        // dead. Raising the terminal window is the app layer's half (`activateHerdrHost`).
         let name = Self.agentName(id: t.id, phase: phase)
-        if await agentReady(name), let tabID = t.worktree?.tabID {
-            await herdr(["tab", "focus", tabID], cwd: nil)
+        if await agentReady(name) {
+            await HerdrFocus.focus(agentName: name, tabID: t.worktree?.tabID)
             return
         }
         // Fresh tab+pane+session (closes the previous phase's tab).
@@ -216,6 +297,21 @@ public actor TaskRunner {
     /// The task-command file a phase's prompt invokes as `/claudepit-task-<name>`.
     static func commandFilename(for phase: TaskPhase) -> String {
         "claudepit-task-\(phase.commandName).md"
+    }
+
+    /// The command a phase runs *for this task*. A fix task swaps `implement` for the
+    /// findings-driven `fix` body: `implement` is written around "follow the plan at planPath",
+    /// and a fix task has neither plan nor spec. Swapping the body rather than adding a sixth
+    /// `TaskPhase` keeps the board columns, Home's pipeline and `expectedArtifact` untouched.
+    static func commandFilename(for phase: TaskPhase, task: ProjectTask) -> String {
+        if phase == .implement, task.isFixTask { return "claudepit-task-fix.md" }
+        return commandFilename(for: phase)
+    }
+
+    /// Whether the command this task runs for `phase` is actually installed.
+    static func commandAvailable(for phase: TaskPhase, task: ProjectTask,
+                                 in commands: [(filename: String, body: String)]) -> Bool {
+        commands.contains { $0.filename == commandFilename(for: phase, task: task) }
     }
 
     /// Whether the phase's slash-command is actually among the installed commands.
@@ -360,7 +456,7 @@ public actor TaskRunner {
         defer { launching.remove(task.id) }
 
         let commands = Self.taskCommands(for: projectRoot)
-        guard Self.commandAvailable(for: phase, in: commands) else {
+        guard Self.commandAvailable(for: phase, task: task, in: commands) else {
             fail(&task, projectSlug); return
         }
 
@@ -373,7 +469,8 @@ public actor TaskRunner {
         try? TaskStore.shared.save(task, projectSlug: projectSlug)
 
         // Fresh tab+pane+session per phase (closes the previous phase's tab).
-        guard let paneID = await openPhaseTab(&task, phase: phase, projectSlug: projectSlug) else {
+        guard let paneID = await openPhaseTab(&task, phase: phase, projectSlug: projectSlug,
+                                              focus: !task.isAutoRunning) else {
             fail(&task, projectSlug); return
         }
 
@@ -385,14 +482,22 @@ public actor TaskRunner {
     /// Close the task's previous phase tab (if any) and open a fresh tab+pane at the worktree,
     /// persisting the new tab/pane onto task.worktree. Falls back to a plain pane split if
     /// tab creation fails. Returns the new pane id.
-    private func openPhaseTab(_ task: inout ProjectTask, phase: TaskPhase, projectSlug: String) async -> String? {
+    private func openPhaseTab(_ task: inout ProjectTask, phase: TaskPhase, projectSlug: String,
+                              focus: Bool = true) async -> String? {
         guard var wt = task.worktree else { return nil }
+        // Hand the phase's canonical agent name back BEFORE closing the tab that hosts it: herdr
+        // has no `agent stop`, and `agent start` answers `agent_name_taken` while a stale agent
+        // still holds the name — at which point `agentReady` matches the dead agent and the
+        // prompt goes nowhere. Fixes the manual Retry path too, not just auto-run.
+        await releaseAgentName(Self.agentName(id: task.id, phase: phase))
         if let oldTab = wt.tabID { await herdr(["tab", "close", oldTab], cwd: nil) }
         let label = "task-\(task.id)-\(phase.commandName)"
         let cwd = URL(filePath: wt.path)
         if let fresh = await Herdr.tabCreate(cwd: cwd, label: label) {
             wt.paneID = fresh.paneID; wt.tabID = fresh.tabID
-            await herdr(["tab", "focus", fresh.tabID], cwd: nil)   // tabCreate is --no-focus; navigate to it now
+            // tabCreate is --no-focus; navigate to it now — except on an unattended run, which
+            // would otherwise yank the user's terminal focus once per phase for an hour.
+            if focus { await herdr(["tab", "focus", fresh.tabID], cwd: nil) }
         } else if let pane = await spawnPane(cwd: cwd) {
             wt.paneID = pane; wt.tabID = nil
         } else {
@@ -416,10 +521,22 @@ public actor TaskRunner {
         // `agent list` before prompting — `agent start` returns `agent_name_taken` (an error, so
         // herdr()==nil) once the agent exists, so we can't gate on its return value alone.
         // ponytail: 5×2s ceiling; raise the count if slow shells still miss the prompt.
+        // Everything after `--` goes to the claude binary (herdr: `[-- [AGENT_ARG]...]`).
+        var claudeArgs = ["--permission-mode", "auto"]
+        // A fix task continues the session that wrote the code under review, so the agent already
+        // holds the implementation context. Only meaningful in the worktree that session ran in —
+        // which is the parent's worktree, inherited when the task was created.
+        if phase == .implement, let sid = task.followUp?.resumeSessionID, !sid.isEmpty {
+            claudeArgs += ["--resume", sid]
+        }
+        // Unattended: disable the tools that would park the session waiting for a human, and tell
+        // the agent to decide for itself instead. Empty for a normal hand-driven run.
+        claudeArgs += AutoRun.claudeArgs(for: task)
         for attempt in 0..<5 {
             await herdr(["agent", "start", agentName, "--kind", "claude", "--pane", pane,
-                         "--timeout", "120000", "--", "--permission-mode", "auto"],
-                        cwd: URL(filePath: wtPath))
+                         "--timeout", "120000", "--"] + claudeArgs,
+                        cwd: URL(filePath: wtPath),
+                        timeout: Self.ceiling(forHerdrTimeoutMS: "120000"))
             if await agentReady(agentName) { break }
             if attempt < 4 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
         }
@@ -445,7 +562,7 @@ public actor TaskRunner {
     /// window just falls through to the real wait.
     private func waitForTurn(_ agentName: String, cwd: URL?, timeoutMS: String?) async -> [String: Any]? {
         await herdr(["agent", "wait", agentName, "--until", Herdr.AgentState.working,
-                     "--timeout", "20000"], cwd: cwd)
+                     "--timeout", "20000"], cwd: cwd, timeout: Self.ceiling(forHerdrTimeoutMS: "20000"))
         guard let timeoutMS else { return nil }
         // `done` is in herdr's status enum but its Claude manifest never emits it — `idle` is how a
         // finished turn actually reports. Waiting only on blocked/done (as this used to) meant every
@@ -454,7 +571,15 @@ public actor TaskRunner {
                             "--until", Herdr.AgentState.idle,
                             "--until", Herdr.AgentState.blocked,
                             "--until", Herdr.AgentState.done,
-                            "--timeout", timeoutMS], cwd: cwd)
+                            "--timeout", timeoutMS], cwd: cwd,
+                           timeout: Self.ceiling(forHerdrTimeoutMS: timeoutMS))
+    }
+
+    /// `Subprocess` ceiling for a herdr call that carries its own `--timeout <ms>`: herdr's own
+    /// budget plus a minute of slack. Without this the 120s default would kill a legitimate
+    /// 30-minute `agent wait` two minutes in, and every long phase would land in `.failed`.
+    static func ceiling(forHerdrTimeoutMS ms: String) -> TimeInterval {
+        (Double(ms).map { $0 / 1000 } ?? Subprocess.defaultTimeout) + 60
     }
 
     /// The named agent exists and is interactive-ready (source of truth = `agent list`).
@@ -463,6 +588,31 @@ public actor TaskRunner {
               let result = listObj["result"] as? [String: Any],
               let agents = result["agents"] as? [[String: Any]] else { return false }
         return agents.contains { ($0["name"] as? String) == name && ($0["interactive_ready"] as? Bool) == true }
+    }
+
+    /// Existence only. `agentReady` additionally requires `interactive_ready`, which a stale agent
+    /// can lose while still holding its name — so the two questions are genuinely different.
+    func agentExists(_ name: String) async -> Bool {
+        guard let listObj = await herdr(["agent", "list"], cwd: nil),
+              let result = listObj["result"] as? [String: Any],
+              let agents = result["agents"] as? [[String: Any]] else { return false }
+        return agents.contains { ($0["name"] as? String) == name }
+    }
+
+    /// Free a phase's canonical agent name so the next launch can reuse it. herdr has no
+    /// `agent stop`, so renaming is the only lever. Idempotent; a no-op when no such agent exists.
+    private func releaseAgentName(_ name: String) async {
+        defer {
+            // `lastSeenSeq` is keyed by NAME, and the name is reused across launches — without this
+            // a fresh agent inherits the previous run's seq and `seqChanged` suppresses its first
+            // scrollback read, losing the CLAUDEPIT_ARTIFACT: marker. Latent bug, surfaced by retry.
+            lastSeenSeq[name] = nil
+        }
+        guard await agentExists(name) else { return }
+        if await herdr(["agent", "rename", name, "--clear"], cwd: nil) == nil {
+            // --clear rejected (older herdr): move it aside under a name nothing will match.
+            await herdr(["agent", "rename", name, "\(name)-stale"], cwd: nil)
+        }
     }
 
     /// Post-`--wait`: route the artifact and land the task (no chaining to the next phase).
@@ -516,7 +666,11 @@ public actor TaskRunner {
     private func routeArtifact(_ task: inout ProjectTask, projectSlug: String, projectRoot: URL) async -> Bool {
         let agentName = Self.agentName(id: task.id, phase: task.phase)
         let phase = task.phase
-        let out = await herdrRaw(["agent", "read", agentName, "--source", "recent-unwrapped", "--lines", "400"],
+        // 1000, not 400: `createPlan` and `implement` have no deterministic artifact, so the
+        // CLAUDEPIT_ARTIFACT: marker is the ONLY thing that can report them done — and an
+        // unattended agent prints more (it also emits an `## Assumptions` block), pushing the
+        // marker further back. A marker that scrolls out costs a full re-run of the phase.
+        let out = await herdrRaw(["agent", "read", agentName, "--source", "recent-unwrapped", "--lines", "1000"],
                                  cwd: projectRoot) ?? ""
         // Marker first; then the deterministic path the prompt handed the agent, but only if that
         // file actually landed. The fallback matters when the scrollback is gone (herdr restarted,
@@ -533,8 +687,19 @@ public actor TaskRunner {
         case .createPlan:  task.links.planPath = marked ?? task.links.planPath
         case .codeReview:
             task.links.reviewPath = marked ?? expected ?? task.links.reviewPath
-            let parsed = TaskTransition.parseFindings(from: out)
-            if !parsed.isEmpty { task.links.reviewFindings = parsed }
+            // The FILE first, scrollback only as a fallback. The block is written into review.md,
+            // so the file is complete; scrollback is a 400-line window that a long review overruns
+            // and that is gone entirely once herdr restarts or the pane closes.
+            let fileText = task.links.reviewPath
+                .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? ""
+            var parsed = TaskTransition.parseFindings(from: fileText)
+            if parsed.isEmpty { parsed = TaskTransition.parseFindings(from: out) }
+            // Merge, never replace: a re-run re-parses the same findings and a bare assignment
+            // would drop the spawnedTaskID links the user built in the findings sheet.
+            if !parsed.isEmpty {
+                task.links.reviewFindings = TaskTransition.mergeFindings(
+                    existing: task.links.reviewFindings, parsed: parsed)
+            }
         case .implement:   await captureSessionID(into: &task, projectSlug: projectSlug)
         case .none:        break
         }
@@ -630,7 +795,9 @@ public actor TaskRunner {
         let dir = Paths.taskDir(projectSlug: projectSlug, id: task.id).path
         let brainstorm = Paths.taskBrainstormFile(projectSlug: projectSlug, id: task.id).path
         let today = Self.todayString()
-        let command = "/claudepit-task-\(phase.commandName)"
+        // Derived from the filename, not the phase: a fix task runs /claudepit-task-fix at implement.
+        let command = "/" + Self.commandFilename(for: phase, task: task)
+            .replacingOccurrences(of: ".md", with: "")
 
         var kv: [String]
         if phase == .brainstorm {
@@ -638,6 +805,18 @@ public actor TaskRunner {
             // No plansDir/specPath/planPath/reviewPath/worktreePath — those are downstream noise here.
             kv = ["taskDir=\(dir)",
                   "brainstormPath=\(task.links.brainstormPath ?? brainstorm)",
+                  "today=\(today)"]
+        } else if phase == .implement, task.isFixTask {
+            // A fix task has no spec and no plan and never will — listing those keys would only
+            // send the agent looking for files nobody is going to write. Its context is the
+            // parent's review plus the findings carried in the brief below.
+            kv = ["taskDir=\(dir)",
+                  "worktreePath=\(task.worktree?.path ?? dir)",
+                  "fixPath=\(dir)/fix.md",
+                  "parentReviewPath=\(task.followUp?.parentReviewPath ?? "")",
+                  "parentSpecPath=\(task.followUp?.parentSpecPath ?? "")",
+                  "parentPlanPath=\(task.followUp?.parentPlanPath ?? "")",
+                  "reviewPath=\(dir)/review.md",
                   "today=\(today)"]
         } else {
             let wtPath = task.worktree?.path ?? dir
@@ -669,7 +848,9 @@ public actor TaskRunner {
 
         // Task definition is the brief for the pre-spec phases; downstream phases argue from the
         // spec/plan instead (passed as paths), so repeating it there would compete with them.
-        if phase == .brainstorm || phase == .writeSpec {
+        // A fix task is the third case: it has no spec and no plan to argue from, so the findings
+        // carried in its description/requirements ARE its brief.
+        if phase == .brainstorm || phase == .writeSpec || (phase == .implement && task.isFixTask) {
             out.append("")
             out.append("## Description")
             let desc = task.description.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -685,6 +866,18 @@ public actor TaskRunner {
             out.append("## Attachments")
             out.append("User-provided context — read every file below from `attachmentsDir`:")
             out += visibleAttachments.map { "- \($0)" }
+        }
+
+        // The enforcement is the appended system prompt (AutoRun.claudeArgs); this is what a human
+        // sees when they open the pane, and the fallback if that flag is ever dropped. Kept before
+        // `## Paths` so the key=value block stays the last thing in the prompt.
+        if task.isAutoRunning {
+            out.append("")
+            out.append("## Unattended run")
+            out.append("Nobody is watching this pane and nobody can answer you. Do not ask — decide, "
+                     + "take the option you would have recommended, and record it under "
+                     + "`## Assumptions` in this phase's deliverable. Print the `CLAUDEPIT_ARTIFACT:` "
+                     + "line last.")
         }
 
         out.append("")
@@ -730,23 +923,19 @@ public actor TaskRunner {
     // MARK: - subprocess
 
     @discardableResult
-    nonisolated private func herdr(_ args: [String], cwd: URL?) async -> [String: Any]? {
-        await Herdr.runJSON(args, cwd: cwd)
+    /// Every herdr/git call on the drive path is bounded (`Subprocess`). This is not a nicety: an
+    /// unbounded call suspends its caller forever, and the poller that awaited it never reaches the
+    /// `driving.remove` that would let the task be looked at again.
+    nonisolated private func herdr(_ args: [String], cwd: URL?,
+                                   timeout: TimeInterval = Subprocess.defaultTimeout) async -> [String: Any]? {
+        await Herdr.runJSON(args, cwd: cwd, timeout: timeout)
     }
-    nonisolated private func herdrRaw(_ args: [String], cwd: URL?) async -> String? {
-        await Herdr.run(args, cwd: cwd)
+    nonisolated private func herdrRaw(_ args: [String], cwd: URL?,
+                                      timeout: TimeInterval = Subprocess.defaultTimeout) async -> String? {
+        await Herdr.run(args, cwd: cwd, timeout: timeout)
     }
     nonisolated private func git(_ args: [String]) async -> String? {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global().async {
-                let p = Process(); p.executableURL = URL(filePath: "/usr/bin/env")
-                p.arguments = ["git"] + args
-                let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-                do { try p.run() } catch { cont.resume(returning: nil); return }
-                p.waitUntilExit()
-                guard p.terminationStatus == 0 else { cont.resume(returning: nil); return }
-                cont.resume(returning: String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8))
-            }
-        }
+        guard let r = await Subprocess.run("/usr/bin/env", ["git"] + args), r.ok else { return nil }
+        return r.stdout
     }
 }

@@ -768,21 +768,151 @@ polish; "coverage could be broader" is Minor, not Important.
 
 ## Step 4 — Report
 
-Write to the absolute `reviewPath=` in the arguments: Strengths (specific, with file:line);
-findings grouped Critical / Important / Minor (each with file:line, what, why, fix); Assessment —
-ready to merge? yes | with fixes | no, plus 1-2 sentences of reasoning.
+Write to the absolute `reviewPath=` in the arguments, in this order:
 
-Then print the machine-readable block — one line per finding, `severity | title | detail`, where
-severity is high (=Critical), med (=Important), or low (=Minor); titles short and specific; the
-detail names file:line. Example:
+1. **Strengths** — specific, with file:line.
+2. **Findings**, grouped Critical / Important / Minor. Give each one a label (`C1`, `I2`, `M3`), a
+   short specific title, and the three questions answered under their own bold headings:
+   **What.** the defect · **Why it matters.** the consequence · **Fix.** the concrete remedy.
+   Name file:line for each.
+3. **Assessment** — ready to merge? yes | with fixes | no, plus 1-2 sentences of reasoning.
+4. **The machine-readable block**, last in the file (described below).
+
+## The machine-readable block
+
+Claudepit reads this block **out of the file** to build its findings screen, so it must be written
+into `reviewPath` — not only printed. Print it as well, so a reader watching the pane sees it.
+
+It is a JSON array between the two markers, one object per finding, ordered highest severity first.
+The field names follow SARIF (the industry standard for static-analysis results) wherever SARIF has
+an equivalent, so this converts to a SARIF run mechanically; `what`/`why`/`fix` are the narrative
+fields SARIF has no first-class home for.
+
+| field | required | notes |
+|---|---|---|
+| `ruleId` | yes | your own label for the finding — `C1`, `I2`, `M3`. Lets a reader find it in the prose above. |
+| `severity` | yes | `high` (=Critical), `med` (=Important), `low` (=Minor). SARIF's `error`/`warning`/`note` are accepted too. |
+| `category` | yes | one of `correctness`, `tests`, `security`, `performance`, `maintainability`, `docs`. |
+| `title` | yes | short and specific — it is the headline in the UI. No trailing period. |
+| `locations` | yes | array of `"path/to/File.swift:41"` strings, repo-relative. Empty array only if the finding genuinely has no site. |
+| `what` | yes | the defect itself, 1-3 sentences. Plain prose, no heading. |
+| `why` | yes | the consequence if it is not fixed. This is what the reader uses to triage. |
+| `fix` | yes | the concrete remedy — what to change, where. Specific enough to act on without re-reading the review. |
+
+Emit **exactly the same set of findings** as the prose above, in the same order. It is a
+restatement for the machine, not a summary: `what`/`why`/`fix` carry the substance of the prose
+sections, so a reader who only ever sees the UI is not missing the argument. Write valid JSON —
+escape newlines and quotes inside the strings, and do not wrap the array in a code fence.
 
 CLAUDEPIT_FINDINGS_BEGIN
-high | Null deref in parseUser | parseUser() force-unwraps an optional that is nil on empty input (Parser.swift:41)
-low | Rename foo | foo is a vague name for a URL builder (Client.swift:12)
+[
+  {
+    "ruleId": "C1",
+    "severity": "high",
+    "category": "correctness",
+    "title": "Null deref in parseUser",
+    "locations": ["Sources/Parser.swift:41"],
+    "what": "parseUser() force-unwraps `json[\\"name\\"]`, which is nil for an empty request body.",
+    "why": "Any client that posts an empty body crashes the process rather than getting a 400.",
+    "fix": "Bind with `guard let name = json[\\"name\\"] as? String else { return .invalid }`."
+  },
+  {
+    "ruleId": "M1",
+    "severity": "low",
+    "category": "maintainability",
+    "title": "foo is a vague name for a URL builder",
+    "locations": ["Sources/Client.swift:12"],
+    "what": "`foo(_:)` builds and returns a request URL, but its name says nothing about that.",
+    "why": "Call sites read as `foo(path)`, so a reader has to open the definition to know what it returns.",
+    "fix": "Rename to `requestURL(for:)` — four call sites, all in Client.swift."
+  }
+]
 CLAUDEPIT_FINDINGS_END
+
+If you found nothing, emit the markers around an empty array `[]`.
 
 After the file is written and the block printed, print on its own line, LAST:
 CLAUDEPIT_ARTIFACT: <the absolute reviewPath you wrote>
+"""
+
+    public static let taskCommandFix = """
+---
+description: Fix a Claudepit task's review findings in place (app-owned; regenerated on launch).
+---
+Arguments — Claudepit's phase brief: the task definition, then a `## Paths` section of
+absolute `key=value` paths (one per line). Read the paths from there.
+
+$ARGUMENTS
+
+Fix the review findings listed under `## Requirements` above. There is no spec and no plan for
+this task: **the findings are the spec.** Read the full review at the absolute
+`parentReviewPath=` in the arguments first — each finding's entry there carries the file:line and
+the argument behind it that the one-line summary does not.
+
+You may already be resumed into the session that wrote this code, in which case you know it
+already — re-read the review anyway; the findings are someone else's reading of your work.
+
+## Scope is the finding list, and nothing else
+
+Fix exactly the findings you were given. Anything else you notice — a neighbouring bug, a
+refactor that would be nice, a test that could be broader — is **out of scope**: note it in the
+report and leave the code alone. Unrequested changes are a defect here, because the diff this
+task produces is read against the finding list and nothing else.
+
+You are already inside the task's git worktree: never create another worktree or branch, never
+run git worktree commands, and never dispatch a subagent in worktree isolation.
+
+**NEVER commit or stage. This is a HARD rule, no exceptions:**
+- Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
+  `git add -A && git commit -m ...`). These commands are DENIED and will fail.
+- Leave EVERY change unstaged in the working tree. The user reviews and commits from Claudepit's
+  Review Changes (Source Control) sheet — that is the ONLY place commits happen.
+- `git status`, `git diff`, and reads are fine; anything that stages or commits is not.
+
+## How to execute
+
+Create one todo per finding and work them in the order given (high severity first). These are
+small, related fixes in code you can see, so do them yourself — reserve the Task tool for a
+finding that turns out to be a genuine piece of work, and then brief that subagent with the
+finding's full text, the hard rules above, and a DONE/BLOCKED report contract. Never dispatch two
+implementers in parallel: they share this worktree and will conflict.
+
+**A finding you disagree with is a verdict, not a skip.** If the review is wrong, say so in the
+report with the evidence that disproves it and leave the code unchanged. What you must not do is
+quietly pass over a finding — every item on the list gets an explicit verdict.
+
+After each fix, run the narrowest test that covers it and read the output.
+
+## Rulings, not stalls
+
+Small ambiguities are yours to decide: rule, record the ruling in the report, keep going. Reserve
+AskUserQuestion for decisions that genuinely belong to the user — a finding whose fix would change
+product behavior, or one that implies a scope change.
+
+## Close-out — evidence before claims
+
+The iron law: NO COMPLETION CLAIM WITHOUT FRESH EVIDENCE. If you did not run the command in this
+session and read its output, you cannot claim it passes.
+1. **Reality check** — `git status --porcelain` and `git diff --stat`: the diff contains the
+   fixes and nothing else.
+2. **Build** — run the project's full build; evidence is exit 0.
+3. **Tests** — run the FULL suite and read the pass/fail counts line; 0 failures.
+Anything red from this work gets fixed before you finish.
+
+## Report
+
+Write to the absolute `fixPath=` in the arguments. One `##` section per finding, in the order
+given, each with:
+- the finding's title and severity,
+- **Verdict** — Fixed | Not a defect | Deferred (and why, for the last two),
+- what changed, with file:line,
+- **Evidence** — the command you ran and its result line.
+
+End the file with an "Out of scope" section listing anything you noticed and deliberately left
+alone, then the build and full-suite result lines.
+
+After the file is written, print on its own line, LAST:
+CLAUDEPIT_ARTIFACT: <the absolute fixPath you wrote>
 """
 
     public static let taskCommands: [(filename: String, body: String)] = [
@@ -791,6 +921,7 @@ CLAUDEPIT_ARTIFACT: <the absolute reviewPath you wrote>
         ("claudepit-task-plan.md", taskCommandPlan),
         ("claudepit-task-implement.md", taskCommandImplement),
         ("claudepit-task-review.md", taskCommandReview),
+        ("claudepit-task-fix.md", taskCommandFix),
     ]
 
     /// Commands removed from the pipeline; installers sweep these from projects and worktrees.

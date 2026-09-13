@@ -21,6 +21,47 @@ func taskCommandGuardChecks() -> [Bool] {
         }
     })
 
+    results.append(check("a fix task swaps implement for the findings-driven fix command") {
+        var fix = ProjectTask(id: "f1", plannedPhases: [.implement, .codeReview])
+        fix.followUp = TaskFollowUp(parentTaskID: "p1", findingIDs: ["a"])
+        try expectEqual(TaskRunner.commandFilename(for: .implement, task: fix),
+                        "claudepit-task-fix.md", "fix task at implement")
+        try expectEqual(TaskRunner.commandFilename(for: .codeReview, task: fix),
+                        "claudepit-task-review.md", "its other phases are untouched")
+
+        let plain = ProjectTask(id: "p2")
+        try expectEqual(TaskRunner.commandFilename(for: .implement, task: plain),
+                        "claudepit-task-implement.md", "an ordinary task still runs implement")
+
+        // A follow-up the user put back on the full pipeline has a plan again, so it must get the
+        // command that reads one.
+        var full = fix
+        full.plannedPhases = ProjectTask.defaultPhases
+        try expect(!full.isFixTask, "planning createPlan opts back out of the fix command")
+        try expectEqual(TaskRunner.commandFilename(for: .implement, task: full),
+                        "claudepit-task-implement.md", "full follow-up runs implement")
+    })
+
+    results.append(check("the fix command is in the catalog and gated like the others") {
+        let catalog = Set(ManagedConfig.catalog.filter { $0.kind == .commandMarkdown }.map(\.filename))
+        try expect(catalog.contains("claudepit-task-fix.md"), "catalog has the fix command")
+
+        let base = try tempDir()
+        store.seedIfNeeded(base)
+        var fix = ProjectTask(id: "f1", plannedPhases: [.implement, .codeReview])
+        fix.followUp = TaskFollowUp(parentTaskID: "p1", findingIDs: ["a"])
+        try expect(TaskRunner.commandAvailable(for: .implement, task: fix,
+                                               in: TaskRunner.taskCommands(for: base)),
+                   "available when enabled")
+        store.setEnabled(base, "task-fix", false)
+        let off = TaskRunner.taskCommands(for: base)
+        try expect(!TaskRunner.commandAvailable(for: .implement, task: fix, in: off),
+                   "unavailable once switched off")
+        // Switching the fix command off must not take the ordinary implement phase with it.
+        try expect(TaskRunner.commandAvailable(for: .implement, task: ProjectTask(id: "p2"), in: off),
+                   "a normal implement is unaffected")
+    })
+
     results.append(check("every phase's command filename exists in the catalog") {
         let catalog = Set(ManagedConfig.catalog.filter { $0.kind == .commandMarkdown }.map(\.filename))
         for phase in ProjectTask.defaultPhases {
