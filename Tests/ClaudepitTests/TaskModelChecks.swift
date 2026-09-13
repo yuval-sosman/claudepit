@@ -332,5 +332,157 @@ func taskModelChecks() -> [Bool] {
         try expectEqual(again?.links.specPath, "/somewhere/else/spec.md", "existing link preserved")
     })
 
+    // MARK: - Follow-up tasks and finding merges
+
+    results.append(check("followUp round-trips, and a task.json without it decodes to nil") {
+        var t = ProjectTask(id: "f1", name: "Fix", plannedPhases: [.implement, .codeReview])
+        t.followUp = TaskFollowUp(parentTaskID: "p1", findingIDs: ["a", "b"],
+                                  resumeSessionID: "sess", parentReviewPath: "/tmp/r.md",
+                                  parentSpecPath: "/tmp/s.md", parentPlanPath: "/tmp/p.md")
+        let back = try JSONDecoder().decode(ProjectTask.self, from: JSONEncoder().encode(t))
+        try expectEqual(back.followUp, t.followUp, "round-trip")
+
+        // Every task.json written before this feature has no followUp key at all.
+        let legacy = #"{"version":2,"id":"old","name":"Old","description":"","status":"backlog","priority":"normal","tags":[],"dependsOn":[],"plannedPhases":["writeSpec"],"requirements":[],"createdAt":0,"updatedAt":0,"links":{"brainstormSuggestions":[],"sessionIDs":[],"reviewFindings":[]}}"#
+        let old = try JSONDecoder().decode(ProjectTask.self, from: Data(legacy.utf8))
+        try expect(old.followUp == nil, "missing key decodes to nil")
+        try expect(!old.isFixTask, "and is not a fix task")
+    })
+
+    results.append(check("isFixTask needs the link AND no plan phase") {
+        var t = ProjectTask(id: "f1", plannedPhases: [.implement, .codeReview])
+        try expect(!t.isFixTask, "no link → not a fix task")
+        t.followUp = TaskFollowUp(parentTaskID: "p1", findingIDs: [])
+        try expect(t.isFixTask, "link + no plan phase")
+        t.plannedPhases = ProjectTask.defaultPhases
+        try expect(!t.isFixTask, "a follow-up back on the full pipeline has a plan to follow")
+    })
+
+    results.append(check("mergeFindings keeps the links a re-review would have thrown away") {
+        let existing = [
+            ReviewFinding(id: "a", title: "A", detail: "d", severity: "med", spawnedTaskID: "task-1"),
+            ReviewFinding(id: "gone", title: "Gone", detail: "d", severity: "low", spawnedTaskID: "task-2"),
+        ]
+        let parsed = [
+            ReviewFinding(id: "a", title: "A rephrased", detail: "d", severity: "high"),
+            ReviewFinding(id: "new", title: "New", detail: "d", severity: "low"),
+        ]
+        let merged = TaskTransition.mergeFindings(existing: existing, parsed: parsed)
+        try expectEqual(merged.map(\.id), ["a", "new"], "the new parse decides membership and order")
+        try expectEqual(merged[0].spawnedTaskID, "task-1", "an existing link survives the re-parse")
+        try expectEqual(merged[0].title, "A rephrased", "but the text comes from the new parse")
+        try expectEqual(merged[0].severity, "high", "including severity")
+        try expect(merged[1].spawnedTaskID == nil, "a genuinely new finding has no link")
+    })
+
+    results.append(check("worktreeBusy names the co-tenant, and only while it is live") {
+        var parent = ProjectTask(id: "p1")
+        parent.worktree = TaskWorktree(branch: "b", path: "/tmp/wt")
+        var child = ProjectTask(id: "c1")
+        child.worktree = TaskWorktree(branch: "b", path: "/tmp/wt/")   // same dir, other spelling
+        var other = ProjectTask(id: "o1")
+        other.worktree = TaskWorktree(branch: "z", path: "/tmp/elsewhere")
+        other.status = .running
+
+        parent.status = .backlog
+        try expect(TaskTransition.worktreeBusy(child, allTasks: [parent, child, other]) == nil,
+                   "an idle co-tenant does not block")
+        parent.status = .running
+        try expectEqual(TaskTransition.worktreeBusy(child, allTasks: [parent, child, other]), "p1",
+                        "a running co-tenant does")
+        parent.status = .blocked
+        try expectEqual(TaskTransition.worktreeBusy(child, allTasks: [parent, child, other]), "p1",
+                        "so does a blocked one — its agent still holds the checkout")
+        child.status = .running
+        try expect(TaskTransition.worktreeBusy(other, allTasks: [parent, child, other]) == nil,
+                   "a different worktree is never busy")
+        try expect(TaskTransition.worktreeBusy(ProjectTask(id: "n1"), allTasks: [parent, child]) == nil,
+                   "a task with no worktree is never busy")
+    })
+
+    results.append(check("a task.json with no auto-run keys decodes cleanly") {
+        // remapV1 preserves none of tags/plannedPhases/suggestions, so their survival proves the
+        // PLAIN decode branch was taken rather than the lossy v1 fallback.
+        let obj: [String: Any] = [
+            "version": 2, "id": "abc123", "name": "T", "description": "",
+            "status": "awaitingReview", "phase": "writeSpec", "priority": "high",
+            "tags": ["ui"], "dependsOn": [], "plannedPhases": ["writeSpec", "implement"],
+            "requirements": ["r1"], "createdAt": 1.0, "updatedAt": 2.0,
+            "links": ["brainstormSuggestions": [], "sessionIDs": [], "reviewFindings": []],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: obj)
+        guard let t = TaskStore.decode(data) else { try expect(false, "decode failed"); return }
+        try expectEqual(t.tags, ["ui"], "plain decode, not remapV1")
+        try expectEqual(t.plannedPhases, [.writeSpec, .implement], "pipeline kept")
+        try expect(t.autoRun == nil, "a missing flag is nil, not a decode failure")
+        try expect(t.autoRunRetried == nil, "missing retry budget is nil")
+        try expect(t.autoRunHaltReason == nil, "missing halt reason is nil")
+        try expect(!t.isAutoRunning, "nil reads as off")
+    })
+
+    results.append(check("auto-run fields round-trip") {
+        let t = ProjectTask(id: "rt1", name: "T", phase: .implement, status: .blocked,
+                            autoRun: true, autoRunRetried: [.writeSpec, .implement],
+                            autoRunHaltReason: "Implement failed twice")
+        let data = try! JSONEncoder().encode(t)
+        guard let back = TaskStore.decode(data) else { try expect(false, "decode failed"); return }
+        try expect(back.isAutoRunning, "flag survives")
+        try expectEqual(back.autoRunRetried, [.writeSpec, .implement], "budget survives")
+        try expectEqual(back.autoRunHaltReason, "Implement failed twice", "reason survives")
+    })
+
+    results.append(check("a retired phase is stripped from autoRunRetried too") {
+        let obj: [String: Any] = [
+            "version": 2, "id": "abc123", "name": "T", "description": "",
+            "status": "failed", "phase": "verify", "priority": "normal",
+            "tags": [], "dependsOn": [], "plannedPhases": ["implement", "verify"],
+            "requirements": [], "createdAt": 1.0, "updatedAt": 2.0,
+            "autoRunRetried": ["verify", "implement"],
+            "links": ["brainstormSuggestions": [], "sessionIDs": [], "reviewFindings": []],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: obj)
+        guard let t = TaskStore.decode(data) else { try expect(false, "decode failed"); return }
+        try expectEqual(t.autoRunRetried, [.implement], "verify stripped, implement kept")
+        try expect(t.phase == .codeReview, "the task itself still falls forward to codeReview")
+    })
+
+    results.append(check("healArtifactLinks adopts findings from review.md, and upgrades legacy ones") {
+        let projectsRoot = try tempDir()
+        let slug = "claudepit-check"
+        let dir = projectsRoot.appending(path: slug).appending(path: "tasks").appending(path: "t9")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let reviewURL = dir.appending(path: "review.md")
+
+        let doc = """
+        # Code Review
+
+        CLAUDEPIT_FINDINGS_BEGIN
+        [{"ruleId":"C1","severity":"high","category":"correctness","title":"Null deref",
+          "locations":["Sources/Parser.swift:41"],"what":"unwraps nil","why":"crashes","fix":"guard"}]
+        CLAUDEPIT_FINDINGS_END
+        """
+        try Data(doc.utf8).write(to: reviewURL)
+
+        // 1. A task that recorded no findings at all picks them up on the next load.
+        var t = ProjectTask(id: "t9", phase: .codeReview, status: .awaitingReview)
+        let healed = TaskTransition.healArtifactLinks(t, projectSlug: slug, projectsRoot: projectsRoot)
+        try expectEqual(healed?.links.reviewFindings.count, 1, "finding adopted")
+        try expectEqual(healed?.links.reviewFindings.first?.fix, "guard", "structured, not a blob")
+
+        // 2. A task holding the old one-line format is upgraded in place — no re-review needed.
+        t.links.reviewPath = reviewURL.path
+        t.links.reviewFindings = [ReviewFinding(id: "old", title: "Null deref", detail: "unwraps nil",
+                                                severity: "high", spawnedTaskID: "task-7")]
+        let upgraded = TaskTransition.healArtifactLinks(t, projectSlug: slug, projectsRoot: projectsRoot)
+        try expectEqual(upgraded?.links.reviewFindings.count, 1, "still one finding")
+        try expect(upgraded?.links.reviewFindings.first?.isStructured == true, "now structured")
+
+        // 3. Already structured → left alone, so this can run on every loadTasks without churn.
+        var done = t
+        done.links.reviewFindings = upgraded?.links.reviewFindings ?? []
+        try expect(TaskTransition.healArtifactLinks(done, projectSlug: slug, projectsRoot: projectsRoot) == nil,
+                   "idempotent once upgraded")
+    })
+
     return results
 }

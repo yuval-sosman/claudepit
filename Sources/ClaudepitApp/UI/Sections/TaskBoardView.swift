@@ -83,6 +83,8 @@ struct TaskBoardView: View {
                     }
                     .buttonStyle(.plain)
                     .draggable(task.id)
+                    // On the outer Button, so the whole card is the right-click hit area.
+                    .taskContextMenu(task, app: app)
                 }
                 if isTargeted {
                     RoundedRectangle(cornerRadius: 10)

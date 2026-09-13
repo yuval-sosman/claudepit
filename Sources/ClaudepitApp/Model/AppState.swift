@@ -154,6 +154,12 @@ final class AppState: ObservableObject {
     @Published var focusMemoryFileID: String?
     @Published var breadcrumbSessionCrumb: String?   // set when navigating to Plans from a session
     @Published var breadcrumbSessionID: String?      // session ID to restore when tapping back
+    /// Whether this project's `/claudepit-task-fix` command is switched on in App Settings.
+    /// Stored, not computed: reading it needs the config store, and the findings sheet consults it
+    /// from a view body to disable "Create fix task" — a fix task created while the command is off
+    /// would otherwise fail at run time with nothing but "Phase failed".
+    @Published var fixCommandEnabled: Bool = true
+
     @Published var memoryEnabled: Bool = true {
         didSet {
             guard !isInitializing, memoryEnabled != oldValue, let base = activePath else { return }
@@ -179,6 +185,7 @@ final class AppState: ObservableObject {
             activePath = URL(filePath: p)
             appConfig.seedIfNeeded(URL(filePath: p))
             memoryEnabled = appConfig.isEnabled(URL(filePath: p), "memory-hook")
+            fixCommandEnabled = appConfig.isEnabled(URL(filePath: p), "task-fix")
         }
         reload()
         migrateMemoryEnabledIfNeeded()
@@ -225,6 +232,7 @@ final class AppState: ObservableObject {
         if id == "memory-hook" || id == "memory-system-prompt" {
             memoryEnabled = appConfig.isEnabled(base, "memory-hook")
         }
+        if id == "task-fix" { fixCommandEnabled = on }
         syncManagedConfigs()
     }
 
@@ -245,6 +253,7 @@ final class AppState: ObservableObject {
         appConfig.seedIfNeeded(url)
         isInitializing = true
         memoryEnabled = appConfig.isEnabled(url, "memory-hook")
+        fixCommandEnabled = appConfig.isEnabled(url, "task-fix")
         isInitializing = false
         recentPaths.removeAll { $0 == url }
         recentPaths.insert(url, at: 0)
@@ -257,6 +266,7 @@ final class AppState: ObservableObject {
     func clearPath() {
         activePath = nil
         memoryEnabled = true
+        fixCommandEnabled = true
         reload()
         restartWatching()
     }
@@ -392,6 +402,7 @@ final class AppState: ObservableObject {
         reloadMemory()
         loadTasks()
         reloadPlanFiles()
+        driveAutoRunTasks()   // first: armed tasks claim their id in `driving` before the others look
         driveBlockedTasks()
         driveRunningTasks()
         plansChangeToken += 1
@@ -551,13 +562,17 @@ final class AppState: ObservableObject {
     /// FileWatcher alone can leave a running task's card stale for minutes. Poll herdr while —
     /// and only while — some task is actually in flight; idle projects cost nothing.
     private func syncTaskPolling() {
-        let active = tasks.contains { $0.status == .running || $0.status == .blocked }
+        // `isAutoRunning` is in the predicate for the chain's sake: an armed task spends most of its
+        // life at `.awaitingReview` between phases, and without this the timer invalidates the
+        // moment a phase lands — the chain would then stall until some unrelated watcher tick.
+        let active = tasks.contains { $0.status == .running || $0.status == .blocked || $0.isAutoRunning }
         if active {
             guard taskPollTimer == nil else { return }
             taskPollTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.refreshHerdrAgents()
+                    self.driveAutoRunTasks()   // first: armed tasks claim their id in `driving`
                     self.driveRunningTasks()
                     self.driveBlockedTasks()
                 }
@@ -572,14 +587,28 @@ final class AppState: ObservableObject {
     /// runner landed before the file was written, or one that finished while the app was closed,
     /// otherwise leaves e.g. `specPath` nil and the detail view's "Review spec" button disabled for
     /// a spec.md that plainly exists. Persists only when something was actually filled in.
+    /// The write-back must persist **everything** heal produced, or heal never converges: it would
+    /// re-derive the same change on the next load, `TaskStore.update` would bump `updatedAt`, the
+    /// FileWatcher would fire, and `reload()` would land back here — forever. `reviewFindings`
+    /// (which heal adopts and upgrades from `review.md`) was missing from this list, and that is
+    /// precisely the loop it caused. Anything heal learns to fill in next belongs here too.
     private func healArtifactLinks(into task: inout ProjectTask, projectSlug: String) {
         guard let healed = TaskTransition.healArtifactLinks(task, projectSlug: projectSlug) else { return }
         task = healed
         let links = healed.links
+        // Re-read inside the mutation rather than saving `healed` wholesale: the copy in hand came
+        // off a load that may already be a beat behind a runner write, and `??` lets a concurrent
+        // writer's value win.
         try? TaskStore.shared.update(id: task.id, projectSlug: projectSlug) {
             $0.links.brainstormPath = $0.links.brainstormPath ?? links.brainstormPath
             $0.links.specPath = $0.links.specPath ?? links.specPath
             $0.links.reviewPath = $0.links.reviewPath ?? links.reviewPath
+            if !links.reviewFindings.isEmpty {
+                // mergeFindings keeps each finding's spawnedTaskID, so persisting the upgrade
+                // never costs the user the follow-up tasks they created from the old findings.
+                $0.links.reviewFindings = TaskTransition.mergeFindings(
+                    existing: $0.links.reviewFindings, parsed: links.reviewFindings)
+            }
         }
     }
 
@@ -730,13 +759,24 @@ final class AppState: ObservableObject {
         loadTasks()
     }
 
+    /// Whether another task is checked out at this worktree path.
+    func worktreeIsShared(path: String, excluding id: String) -> Bool {
+        let target = URL(filePath: path).standardizedFileURL.path
+        return tasks.contains { other in
+            guard other.id != id, let p = other.worktree?.path else { return false }
+            return URL(filePath: p).standardizedFileURL.path == target
+        }
+    }
+
     func startTask(_ task: ProjectTask) {
         guard let base = activePath else { return }
+        guard worktreeBusyName(task) == nil else { return }
         let slug = Paths.slug(for: base)
         Task { await TaskRunner.shared.start(task, projectSlug: slug, projectRoot: base) }
     }
     func retryTask(_ task: ProjectTask) {
         guard let base = activePath else { return }
+        guard worktreeBusyName(task) == nil else { return }
         let slug = Paths.slug(for: base)
         Task { await TaskRunner.shared.retry(task, projectSlug: slug, projectRoot: base) }
     }
@@ -752,13 +792,62 @@ final class AppState: ObservableObject {
     private func driveBlockedTasks() {
         guard let base = activePath else { return }
         let slug = Paths.slug(for: base)
-        for task in tasks where task.status == .blocked && !driving.contains(task.id) {
-            driving.insert(task.id)
+        // Armed tasks are owned end-to-end by `driveAutoRunTasks` — exactly one writer per task.
+        for task in tasks where task.status == .blocked && !task.isAutoRunning {
+            guard beginDriving(task.id, ttl: Self.resolveDriveTTL) else { continue }
             Task { [weak self] in
                 await TaskRunner.shared.resolveBlocked(task, projectSlug: slug, projectRoot: base)
-                await MainActor.run { _ = self?.driving.remove(task.id) }
+                await MainActor.run { self?.endDriving(task.id) }
             }
         }
+    }
+
+    /// Drive every armed task one step toward Code Review.
+    ///
+    /// The sole owner of an armed task: the other two pollers skip `isAutoRunning`, so exactly one
+    /// code path writes an armed task's status. `AutoRun.selectStartable` additionally keeps two
+    /// armed tasks that share one checkout (a fix task and its parent) from both launching in the
+    /// same tick and trampling each other's paneID/tabID.
+    func driveAutoRunTasks() {
+        guard let base = activePath else { return }
+        let slug = Paths.slug(for: base)
+        let snapshot = tasks
+        let ready = AutoRun.selectStartable(tasks.filter { $0.isAutoRunning && !isDriving($0.id) })
+        for task in ready {
+            // A step can launch a whole phase, so it claims the launch ceiling, not the poll one.
+            guard beginDriving(task.id, ttl: Self.launchDriveTTL) else { continue }
+            Task { [weak self] in
+                await TaskRunner.shared.stepAutoRun(task, allTasks: snapshot,
+                                                    projectSlug: slug, projectRoot: base)
+                await MainActor.run { self?.endDriving(task.id) }
+            }
+        }
+    }
+
+    /// Arm auto-run: run from the task's current phase forward to Code Review without stopping to
+    /// ask anything, then disarm. Never marks the task done — a human closes it out.
+    func armAutoRun(_ task: ProjectTask) {
+        guard let base = activePath, task.status != .done else { return }
+        guard TaskTransition.canRun(task, allTasks: tasks), worktreeBusyName(task) == nil else { return }
+        let slug = Paths.slug(for: base)
+        try? TaskStore.shared.update(id: task.id, projectSlug: slug) {
+            $0.autoRun = true
+            $0.autoRunRetried = nil        // re-arming after a halt restores the full retry budget
+            $0.autoRunHaltReason = nil
+        }
+        loadTasks()                        // starts the poll timer via syncTaskPolling
+        driveAutoRunTasks()                // …and don't make the user wait 4s for the first step
+    }
+
+    /// Disarm. The phase already running is NOT killed — herdr has no `agent stop` — it finishes
+    /// and simply nothing new starts after it.
+    func stopAutoRun(_ task: ProjectTask) {
+        guard let base = activePath else { return }
+        let slug = Paths.slug(for: base)
+        try? TaskStore.shared.update(id: task.id, projectSlug: slug) {
+            $0.autoRun = false; $0.autoRunRetried = nil; $0.autoRunHaltReason = nil
+        }
+        loadTasks()
     }
 
     /// Poll each `.running` task's live herdr agent. A hand-off phase (brainstorm) runs without
@@ -768,11 +857,12 @@ final class AppState: ObservableObject {
     private func driveRunningTasks() {
         guard let base = activePath else { return }
         let slug = Paths.slug(for: base)
-        for task in tasks where task.status == .running && !driving.contains(task.id) {
-            driving.insert(task.id)
+        // Armed tasks are owned end-to-end by `driveAutoRunTasks` — exactly one writer per task.
+        for task in tasks where task.status == .running && !task.isAutoRunning {
+            guard beginDriving(task.id, ttl: Self.resolveDriveTTL) else { continue }
             Task { [weak self] in
                 await TaskRunner.shared.resolveRunning(task, projectSlug: slug, projectRoot: base)
-                await MainActor.run { _ = self?.driving.remove(task.id) }
+                await MainActor.run { self?.endDriving(task.id) }
             }
         }
     }
@@ -796,14 +886,14 @@ final class AppState: ObservableObject {
             loadTasks(); return
         }
         guard TaskTransition.canRun(task, allTasks: tasks) else { return }
-        guard !driving.contains(task.id) else { return }
-        driving.insert(task.id)
+        guard worktreeBusyName(task) == nil else { return }
+        guard beginDriving(task.id, ttl: Self.launchDriveTTL) else { return }
         var t = task
         t.plannedPhases = TaskTransition.insertPhase(phase, into: t.plannedPhases)
         try? TaskStore.shared.update(id: task.id, projectSlug: slug) { $0.plannedPhases = t.plannedPhases }
         Task {
             await TaskRunner.shared.run(t, phase: phase, projectSlug: slug, projectRoot: base)
-            await MainActor.run { _ = self.driving.remove(task.id) }
+            await MainActor.run { self.endDriving(task.id) }
         }
     }
 
@@ -819,7 +909,10 @@ final class AppState: ObservableObject {
         guard let base = activePath else { return }
         TaskStore.shared.delete(id: task.id, projectSlug: Paths.slug(for: base))
         loadTasks()
-        if let wt = task.worktree {
+        // A fix task shares its parent's worktree — tearing it down would take the other task's
+        // checkout, and its uncommitted work, with it. `loadTasks` has already dropped this task,
+        // so anything still pointing here is a genuine co-tenant.
+        if let wt = task.worktree, !worktreeIsShared(path: wt.path, excluding: task.id) {
             Task {
                 _ = await WorktreeStager.remove(worktreePath: wt.path, force: true)
                 await MainActor.run { self.reloadWorktrees() }
@@ -830,41 +923,117 @@ final class AppState: ObservableObject {
     func openTaskInHerdr(_ task: ProjectTask, phase: TaskPhase) {
         guard let base = activePath else { return }
         let slug = Paths.slug(for: base)
-        Task { await TaskRunner.shared.openInHerdr(task, phase: phase, projectSlug: slug, projectRoot: base) }
+        Task {
+            await TaskRunner.shared.openInHerdr(task, phase: phase, projectSlug: slug, projectRoot: base)
+            activateHerdrHost()
+        }
     }
 
-    /// Spawn a dependent task from a review finding.
-    func createTaskFromFinding(parent: ProjectTask, finding: ReviewFinding) {
-        guard let base = activePath else { return }
+    /// Bring the terminal application hosting herdr to the front.
+    ///
+    /// The other half of every "open/focus in Herdr" action. herdr is a TUI: selecting its pane
+    /// changes nothing the user can see while Claudepit is frontmost, which is why the button read
+    /// as broken. `HerdrFocus` resolves the candidate pids (Core, no AppKit); the activation is
+    /// here because `NSRunningApplication` is AppKit.
+    ///
+    /// Only `.regular` apps qualify — the candidates are ancestors of a herdr process, so the
+    /// chain also contains shells and `login`, which have no application to activate.
+    func activateHerdrHost() {
+        for pid in HerdrFocus.hostCandidatePIDs() {
+            guard let app = NSRunningApplication(processIdentifier: pid),
+                  app.activationPolicy == .regular else { continue }
+            app.activate()
+            return
+        }
+    }
+
+    // MARK: - Review findings → tasks
+
+    /// The task a follow-up would produce, without saving anything — the seed for the New Task
+    /// form's "Create and edit…" path. Built by the same code as the one-click create, so editing
+    /// the form cannot silently give you a differently-shaped task.
+    func followUpDraft(parent: ProjectTask, findings: [ReviewFinding], fixNow: Bool) -> ProjectTask {
+        FindingTaskDraft.task(for: findings, parent: parent, fixNow: fixNow,
+                              now: Date().timeIntervalSince1970)
+    }
+
+    /// Create one task from N findings and focus it. `fixNow` gives it the continuation shape:
+    /// implement → review, no parent dependency, the parent's worktree, and the parent's implement
+    /// session to resume.
+    @discardableResult
+    func createTaskFromFindings(parent: ProjectTask, findings: [ReviewFinding],
+                                fixNow: Bool) -> ProjectTask? {
+        guard !findings.isEmpty else { return nil }
+        return saveFollowUp(followUpDraft(parent: parent, findings: findings, fixNow: fixNow),
+                            parent: parent, findingIDs: findings.map(\.id))
+    }
+
+    /// Persist a follow-up draft (edited or not) and stamp every finding it covers.
+    @discardableResult
+    func saveFollowUp(_ draft: ProjectTask, parent: ProjectTask,
+                      findingIDs: [String]) -> ProjectTask? {
+        guard let base = activePath else { return nil }
         let slug = Paths.slug(for: base)
-        let priority: Priority = {
-            switch finding.severity {
-            case "high": return .high
-            case "med", "medium": return .normal
-            default: return .low
-            }
-        }()
-        var child = ProjectTask()
-        child.name = finding.title
-        child.description = finding.detail
-        child.dependsOn = [parent.id]
-        child.priority = priority
-        child.plannedPhases = ProjectTask.defaultPhases.filter { $0 != .brainstorm }
-        child.status = .backlog
-        child.createdAt = Date().timeIntervalSince1970
-        child.updatedAt = child.createdAt
-        try? TaskStore.shared.save(child, projectSlug: slug)
-        try? TaskStore.shared.update(id: parent.id, projectSlug: slug) { p in
-            if let i = p.links.reviewFindings.firstIndex(where: { $0.id == finding.id }) {
-                p.links.reviewFindings[i].spawnedTaskID = child.id
+        try? TaskStore.shared.save(draft, projectSlug: slug)
+        stampFindings(parentID: parent.id, findingIDs: findingIDs, spawnedTaskID: draft.id)
+        loadTasks()
+        focusTaskID = draft.id
+        return draft
+    }
+
+    /// Point the parent's findings at the task that now covers them. N findings share one id —
+    /// the exact grouping is read back off the child's `followUp.findingIDs`.
+    func stampFindings(parentID: String, findingIDs: [String], spawnedTaskID: String) {
+        guard let base = activePath else { return }
+        let ids = Set(findingIDs)
+        try? TaskStore.shared.update(id: parentID, projectSlug: Paths.slug(for: base)) { p in
+            for i in p.links.reviewFindings.indices where ids.contains(p.links.reviewFindings[i].id) {
+                p.links.reviewFindings[i].spawnedTaskID = spawnedTaskID
             }
         }
-        loadTasks()
-        focusTaskID = child.id
+    }
+
+    /// Tasks created from this task's review findings.
+    func followUps(of task: ProjectTask) -> [ProjectTask] {
+        tasks.filter { $0.followUp?.parentTaskID == task.id }
+    }
+
+    /// Name of another task currently running in this task's worktree, if any — a fix task and its
+    /// parent share one checkout, and two agents editing it at once corrupts both diffs.
+    func worktreeBusyName(_ task: ProjectTask) -> String? {
+        guard let id = TaskTransition.worktreeBusy(task, allTasks: tasks) else { return nil }
+        return tasks.first { $0.id == id }?.name ?? id
     }
 
     // Kanban re-run / drag guard against double-launch on watcher race.
-    private var driving = Set<String>()
+    /// Task ids with a drive call in flight, each mapped to the deadline past which we assume the
+    /// call was lost and let the task be claimed again.
+    ///
+    /// It used to be a plain `Set`, and the entry was removed only *after* the `await` returned —
+    /// so a drive call that never returned parked its id permanently and no poller ever looked at
+    /// that task again. That is what left a finished phase sitting on "Running" with an idle agent
+    /// and its deliverable already on disk. `Subprocess` now bounds the calls that could hang, and
+    /// this deadline is the second line: even a genuinely lost Task frees its id eventually.
+    private var driving: [String: Date] = [:]
+
+    /// Ceiling for a poll (`resolveRunning`/`resolveBlocked`) — a handful of bounded herdr calls.
+    private static let resolveDriveTTL: TimeInterval = 300
+    /// Ceiling for a launch (`moveTask`, auto-run steps). `runPhase` legitimately blocks for the
+    /// whole phase — up to 60 minutes on `implement` — so this must clear that, or the guard would
+    /// expire mid-phase and a second agent could be launched into the same checkout.
+    private static let launchDriveTTL: TimeInterval = 4_200
+
+    /// A drive call is in flight for `id` and has not outlived its deadline.
+    private func isDriving(_ id: String) -> Bool { (driving[id] ?? .distantPast) > Date() }
+
+    /// Claim `id`. False when a live claim already exists.
+    private func beginDriving(_ id: String, ttl: TimeInterval) -> Bool {
+        guard !isDriving(id) else { return false }
+        driving[id] = Date().addingTimeInterval(ttl)
+        return true
+    }
+
+    private func endDriving(_ id: String) { driving[id] = nil }
 
     func navigate(to sectionRaw: String, itemID: String) {
         guard let s = Section(rawValue: sectionRaw) else { return }

@@ -14,22 +14,54 @@ struct TaskDetailView: View {
     @State private var cloning = false
     @State private var editingName = false
     @State private var nameDraft = ""
-    @State private var expandedFinding: String? = nil
+    @State private var showFindingsSheet = false
+    /// A follow-up the user chose to edit before creating. Rendered as the inline New Task form,
+    /// the same way Clone and Edit already are — a modal on top of the findings sheet would not
+    /// match anything else in the app.
+    @State private var pendingFollowUp: PendingFollowUp? = nil
     @State private var attachmentsReload = 0
 
-    /// Source-Control-style sheets size to a stable fraction of the SCREEN (not NSApp.keyWindow,
-    /// which flips to the sheet's own small window once it becomes key → the "opens large then
-    /// shrinks" bug).
+    /// Sheet geometry. Matches `WorktreeCard.openReviewChanges`, so the findings and Source Control
+    /// sheets come up the same size.
+    ///
+    /// Three rules, each one a bug that happened:
+    /// - **Prefer `NSApp.mainWindow`.** Once a sheet is up, `NSApp.keyWindow` IS the sheet, so
+    ///   sizing off it gives the "opens large then shrinks" bug. A sheet is never *main*, so
+    ///   `mainWindow` stays the document window and is safe to read at any time.
+    /// - **Never fall back to the screen.** `visibleFrame * 0.7` is far wider than a windowed app,
+    ///   so any failure to resolve the window produced a sheet overflowing its parent — which is
+    ///   exactly what shipped. A fixed modest default is always safe; the window only shrinks it.
+    /// - **Don't depend on the tap-time capture surviving.** This view is rebuilt whenever the
+    ///   watcher reloads tasks, which can reset `@State`; the capture is a seed, not the source.
+    @State private var capturedSheetSize = CGSize(width: 900, height: 560)
+
     private var reviewSheetSize: CGSize {
         #if canImport(AppKit)
-        if let vis = (NSApp.keyWindow ?? NSApp.mainWindow)?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
-            return CGSize(width: max(900, vis.width * 0.8), height: max(560, vis.height * 0.85))
-        }
+        if let f = NSApp.mainWindow?.frame, f.width > 200, f.height > 200 { return inset(f.size) }
         #endif
-        return CGSize(width: 900, height: 560)
+        return capturedSheetSize
+    }
+
+    private func inset(_ s: CGSize) -> CGSize {
+        CGSize(width: max(700, s.width * 0.92), height: max(480, s.height * 0.92))
+    }
+
+    private func captureSheetSize() {
+        #if canImport(AppKit)
+        guard let f = (NSApp.mainWindow ?? NSApp.keyWindow)?.frame, f.width > 200, f.height > 200
+        else { return }
+        capturedSheetSize = inset(f.size)
+        #endif
     }
 
     private var slug: String { app.activePath.map { Paths.slug(for: $0) } ?? "" }
+
+    /// A follow-up task drafted from review findings, waiting to be edited and saved.
+    private struct PendingFollowUp: Identifiable {
+        let draft: ProjectTask
+        let findings: [ReviewFinding]
+        var id: String { draft.id }
+    }
 
     /// Which edit form is open (drives the .sheet). Edit main vs. new draft.
     private enum EditSheet: Identifiable { case main, draft; var id: Int { self == .main ? 0 : 1 } }
@@ -67,6 +99,14 @@ struct TaskDetailView: View {
                     NewTaskSheet(app: app, onClose: { cloning = false; app.loadTasks() },
                                  prefill: clonePrefill)
                 }
+            } else if let pending = pendingFollowUp {
+                GlassCard {
+                    NewTaskSheet(app: app, onClose: { pendingFollowUp = nil; app.loadTasks() },
+                                 prefill: pending.draft.mainVersion,
+                                 createSeed: .init(draft: pending.draft,
+                                                   parent: task,
+                                                   findingIDs: pending.findings.map(\.id)))
+                }
             } else if let which = editSheet {
                 editForm(which)
             } else {
@@ -76,6 +116,15 @@ struct TaskDetailView: View {
         .sheet(isPresented: $showVersionsSheet) {
             TaskVersionsSheet(taskID: task.id, app: app) { showVersionsSheet = false }
                 .frame(width: 820, height: 620)
+        }
+        .sheet(isPresented: $showFindingsSheet) {
+            ReviewFindingsSheet(task: task, app: app, onCreateAndEdit: { draft, findings in
+                // Set the draft first, then dismiss: the form renders in this same view, so
+                // flipping the sheet off first would show it behind a still-live sheet.
+                pendingFollowUp = PendingFollowUp(draft: draft, findings: findings)
+                showFindingsSheet = false
+            }, onClose: { showFindingsSheet = false })
+            .frame(width: reviewSheetSize.width, height: reviewSheetSize.height)
         }
         .sheet(isPresented: $showBrainstormSheet) {
             ReviewChangesSheet(source: BrainstormChangeSource(taskID: task.id, projectSlug: slug, title: task.name)) {
@@ -87,10 +136,18 @@ struct TaskDetailView: View {
             Button("Delete", role: .destructive) { app.deleteTask(task); onDismiss?() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(task.worktree != nil
-                 ? "This also removes its git worktree and any uncommitted changes in it. This cannot be undone."
-                 : "This cannot be undone.")
+            Text(deleteMessage)
         }
+    }
+
+    /// Delete confirmation copy. A shared worktree is kept — `deleteTask` refuses to remove one
+    /// another task is still checked out at — so promising a removal here would be a lie.
+    private var deleteMessage: String {
+        guard let wt = task.worktree else { return "This cannot be undone." }
+        if app.worktreeIsShared(path: wt.path, excluding: task.id) {
+            return "Its git worktree is kept — another task is working in it. This cannot be undone."
+        }
+        return "This also removes its git worktree and any uncommitted changes in it. This cannot be undone."
     }
 
     private var detailContent: some View {
@@ -358,12 +415,24 @@ struct TaskDetailView: View {
     private var reviewPanel: some View {
         switch task.status {
         case .blocked:
-            Label("Waiting on your reply in Herdr", systemImage: "bubble.left.and.bubble.right")
-                .foregroundStyle(.secondary)
+            // Used to be a bare label with no control at all — a dead end for a halted auto-run,
+            // and not much better for a manual one.
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Waiting on your reply in Herdr", systemImage: "bubble.left.and.bubble.right")
+                    .foregroundStyle(.secondary)
+                haltNotice
+                HStack(spacing: 8) { openInHerdrButton; runToReviewButton; Spacer() }
+            }
         case .failed:
             VStack(alignment: .leading, spacing: 8) {
                 Text("Phase failed.").foregroundStyle(.secondary)
-                Button("Retry") { app.retryTask(task) }.buttonStyle(.borderedProminent).tint(.orange).controlSize(.small)
+                haltNotice
+                HStack(spacing: 8) {
+                    Button("Retry") { app.retryTask(task) }
+                        .buttonStyle(.borderedProminent).tint(.orange).controlSize(.small)
+                    runToReviewButton
+                    Spacer()
+                }
             }
         case .running:
             HStack(spacing: 8) {
@@ -373,13 +442,26 @@ struct TaskDetailView: View {
                 openInHerdrButton
             }
         case .awaitingReview:
-            awaitingPanel
+            VStack(alignment: .leading, spacing: 8) {
+                haltNotice        // covers the pipeline-exhausted and needs-your-input halts
+                awaitingPanel
+            }
         case .backlog:
             let can = TaskTransition.canRun(task, allTasks: app.tasks)
-            Button("Run") { app.startTask(task) }
-                .buttonStyle(.borderedProminent).controlSize(.small)
-                .disabled(!can)
-                .help(can ? "" : "Blocked by: " + TaskTransition.unmetDependencies(task, allTasks: app.tasks).map(depName).joined(separator: ", "))
+            // A fix task shares its parent's checkout, so "can run" is also "is the checkout free".
+            let busy = app.worktreeBusyName(task)
+            VStack(alignment: .leading, spacing: 8) {
+                haltNotice
+                HStack(spacing: 8) {
+                    Button("Run") { app.startTask(task) }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        .disabled(!can || busy != nil)
+                        .help(busy.map { "\($0) is running in this worktree" }
+                              ?? (can ? "" : "Blocked by: " + TaskTransition.unmetDependencies(task, allTasks: app.tasks).map(depName).joined(separator: ", ")))
+                    runToReviewButton
+                    Spacer()
+                }
+            }
         case .done:
             Label("Task complete", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
         }
@@ -442,7 +524,7 @@ struct TaskDetailView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button { showBrainstormSheet = true } label: {
+                    Button { captureSheetSize(); showBrainstormSheet = true } label: {
                         Label("Review changes", systemImage: "arrow.left.arrow.right").font(.callout)
                     }.buttonStyle(.borderedProminent).controlSize(.small)
                 }
@@ -508,45 +590,74 @@ struct TaskDetailView: View {
         }
     }
 
+    /// Findings banner — the same shape as the brainstorm ready-for-review banner.
+    ///
+    /// This panel used to render every finding as its own row with its own Create button. In a
+    /// 250pt column that truncated each title to a few words and let only one expand at a time, so
+    /// ten findings were unreadable. Triage moved to `ReviewFindingsSheet`; what stays here is the
+    /// count, so you can see at a glance whether anything is waiting.
+    @ViewBuilder
     private var codeReviewPanel: some View {
+        let findings = task.links.reviewFindings
+        let open = findings.filter { $0.spawnedTaskID == nil }
+        let children = app.followUps(of: task)
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(task.links.reviewFindings) { finding in findingRow(finding) }
-        }
-    }
-
-    private func findingRow(_ f: ReviewFinding) -> some View {
-        let spawned = f.spawnedTaskID
-        return VStack(alignment: .leading, spacing: 4) {
-            Button { expandedFinding = expandedFinding == f.id ? nil : f.id } label: {
-                HStack(spacing: 8) {
-                    Text(f.severity.uppercased()).font(.system(size: 9, weight: .bold))
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(severityColor(f.severity).opacity(0.25), in: Capsule())
-                        .foregroundStyle(severityColor(f.severity))
-                    Text(f.title).font(.callout).lineLimit(1)
+            if findings.isEmpty {
+                Label(reviewFileExists
+                      ? "The review recorded no findings. Open review.md to read it."
+                      : "Reviewing in Herdr — findings will appear here when ready.",
+                      systemImage: reviewFileExists ? "checkmark.seal" : "hourglass")
+                    .font(.callout).foregroundStyle(.secondary).padding(.vertical, 6)
+            } else {
+                HStack(spacing: 12) {
+                    Image(systemName: "checklist").font(.title3).foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(findingsSummary).font(.callout.weight(.semibold))
+                        Text(open.isEmpty
+                             ? "Every finding has a task."
+                             : "Pick the ones to fix — several can go into one task.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    if let tid = spawned {
-                        Button { app.focusTaskID = tid; app.selected = .tasks } label: {
-                            Text("Created →").font(.caption).foregroundStyle(Color.accentColor)
-                        }.buttonStyle(.plain)
-                    } else {
-                        Button("Create dependent task") { app.createTaskFromFinding(parent: task, finding: f) }
-                            .controlSize(.small)
+                    Button { captureSheetSize(); showFindingsSheet = true } label: {
+                        Label("Review findings", systemImage: "arrow.left.arrow.right").font(.callout)
+                    }.buttonStyle(.borderedProminent).controlSize(.small)
+                }
+                .padding(12)
+                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 1))
+            }
+            if !children.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(children.count) follow-up task\(children.count == 1 ? "" : "s")")
+                        .font(.caption2).fontWeight(.bold).foregroundStyle(.secondary).tracking(0.5)
+                    ForEach(children) { c in
+                        Button { app.focusTaskID = c.id; app.selected = .tasks } label: {
+                            Label(c.name, systemImage: "arrow.turn.down.right")
+                                .font(.caption).lineLimit(1)
+                        }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
                     }
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if expandedFinding == f.id {
-                Text(f.detail).font(.caption).foregroundStyle(.secondary).padding(.leading, 8)
             }
         }
-        .padding(8)
-        .background(.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private func severityColor(_ s: String) -> Color {
-        switch s { case "high": return .red; case "med", "medium": return .orange; default: return .secondary }
+    private var reviewFileExists: Bool {
+        guard let p = task.links.reviewPath else { return false }
+        return FileManager.default.fileExists(atPath: p)
+    }
+
+    /// "10 findings · 1 med · 9 low · 3 triaged" — zero buckets omitted.
+    private var findingsSummary: String {
+        let all = task.links.reviewFindings
+        var parts = ["\(all.count) finding\(all.count == 1 ? "" : "s")"]
+        for (label, rank) in [("high", 0), ("med", 1), ("low", 2)] {
+            let c = all.filter { $0.severityRank == rank }.count
+            if c > 0 { parts.append("\(c) \(label)") }
+        }
+        let done = all.filter { $0.spawnedTaskID != nil }.count
+        if done > 0 { parts.append("\(done) triaged") }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Shared bits
@@ -579,12 +690,77 @@ struct TaskDetailView: View {
     /// summary while a phase is awaiting review — same bordered style, so the two match.
     @ViewBuilder
     private var phaseActions: some View {
-        if task.status == .awaitingReview, task.phase != nil {
+        if task.isAutoRunning {
+            autoRunBanner          // auto-run owns advancement, so Next is deliberately hidden
+        } else if task.status == .awaitingReview, task.phase != nil {
             HStack(spacing: 8) {
                 openInHerdrButton
                 nextButton
+                runToReviewButton
                 Spacer()
             }
+        }
+    }
+
+    /// Arm unattended execution. Gated exactly like Run — same dependency and shared-checkout
+    /// rules apply, since it is the same launch, just repeated.
+    private static let autoRunHelp =
+        "Runs each phase back-to-back without asking you anything, and stops at Code Review. "
+        + "The agent decides open questions itself and records them under \"Assumptions\" in "
+        + "each deliverable."
+
+    /// Explanation for the Run-to-review button: why it is unavailable, or what it will do.
+    private var autoRunHelpText: String {
+        if let busy = app.worktreeBusyName(task) { return "\(busy) is running in this worktree" }
+        let unmet = TaskTransition.unmetDependencies(task, allTasks: app.tasks)
+        if !unmet.isEmpty { return "Blocked by: " + unmet.map(depName).joined(separator: ", ") }
+        return Self.autoRunHelp
+    }
+
+    /// Arm (or re-arm) unattended execution. Renders nothing while a chain is live — the banner
+    /// owns that state and offers Stop instead. "Resume" rather than "Run to review" once a halt
+    /// has been recorded, since re-arming also restores the retry budget.
+    @ViewBuilder
+    private var runToReviewButton: some View {
+        if !task.isAutoRunning, task.status != .done {
+            let can = TaskTransition.canRun(task, allTasks: app.tasks)
+            let busy = app.worktreeBusyName(task)
+            Button(task.autoRunHaltReason == nil ? "Run to review" : "Resume auto-run") {
+                app.armAutoRun(task)
+            }
+            .buttonStyle(.bordered).controlSize(.small)
+            .disabled(!can || busy != nil)
+            .help(autoRunHelpText)
+        }
+    }
+
+    private var autoRunBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "forward.end.alt.fill").foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Auto-running to Code Review").font(.callout.weight(.semibold))
+                Text(task.phase.map { "Currently: \($0.title)" } ?? "Starting…")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            openInHerdrButton
+            Button("Stop") { app.stopAutoRun(task) }
+                .buttonStyle(.bordered).controlSize(.small)
+                .help("The phase already running finishes — herdr has no way to stop an agent "
+                    + "mid-turn — but nothing new starts after it.")
+        }
+        .padding(12)
+        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 1))
+    }
+
+    /// Why a halted auto-run stopped. Rendered in every status arm that can hold one, because a
+    /// halt is exactly the moment the user needs to know the unattended run gave up.
+    @ViewBuilder
+    private var haltNotice: some View {
+        if !task.isAutoRunning, let why = task.autoRunHaltReason {
+            Label("Auto-run stopped: \(why)", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(.orange)
         }
     }
 

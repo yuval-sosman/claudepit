@@ -107,5 +107,92 @@ func taskPromptChecks() -> [Bool] {
         try expect(!p.contains("Tags:"), "no empty tags line")
     })
 
+    // MARK: - Fix tasks (created from another task's review findings)
+
+    func fixTask() -> ProjectTask {
+        var t = ProjectTask(id: "fix99", name: "Fix 3 review findings from \"Home feed\"",
+                            priority: .normal, plannedPhases: [.implement, .codeReview],
+                            requirements: ["[MED] Tie-break test cannot fail",
+                                           "[LOW] Blank first bullet renders an empty row"])
+        t.description = "From the code review of \"Home feed\":\n\n- **[MED]** Tie-break test cannot fail"
+        t.worktree = TaskWorktree(branch: "task/par1-home", path: "/tmp/wt-home")
+        t.followUp = TaskFollowUp(parentTaskID: "par1", findingIDs: ["a", "b", "c"],
+                                  resumeSessionID: "sess-a",
+                                  parentReviewPath: "/tmp/par1/review.md",
+                                  parentSpecPath: "/tmp/par1/spec.md")
+        return t
+    }
+
+    results.append(check("a fix task's implement phase invokes the fix command") {
+        let lines = TaskRunner.phasePrompt(fixTask(), phase: .implement, projectSlug: slug)
+            .components(separatedBy: "\n")
+        try expectEqual(lines.first, "/claudepit-task-fix", "line 1")
+        try expectEqual(lines.count > 1 ? lines[1] : "x", "", "blank line 2")
+    })
+
+    results.append(check("a fix task gets the findings as its brief") {
+        // The whole point: implement normally argues from a spec and a plan, and a fix task has
+        // neither — without this it would receive a name and nothing else.
+        let p = TaskRunner.phasePrompt(fixTask(), phase: .implement, projectSlug: slug)
+        try expect(p.contains("## Description"), "has a description")
+        try expect(p.contains("## Requirements"), "has requirements")
+        for r in fixTask().requirements { try expect(p.contains(r), "carries \(r)") }
+    })
+
+    results.append(check("a fix task's paths point at the parent, not at files nobody will write") {
+        let p = TaskRunner.phasePrompt(fixTask(), phase: .implement, projectSlug: slug)
+        try expect(p.contains("parentReviewPath=/tmp/par1/review.md"), "parent review")
+        try expect(p.contains("parentSpecPath=/tmp/par1/spec.md"), "parent spec")
+        try expect(p.contains("worktreePath=/tmp/wt-home"), "the parent's worktree")
+        try expect(p.contains("fixPath="), "where to write the report")
+        try expect(!p.contains("planPath"), "no planPath — a fix task never has one")
+        try expect(!p.contains("plansDir"), "no plansDir either")
+    })
+
+    results.append(check("a missing parent artifact is stated, never emitted as a bare key") {
+        var t = fixTask()
+        t.followUp?.parentSpecPath = nil
+        let p = TaskRunner.phasePrompt(t, phase: .implement, projectSlug: slug)
+        try expect(!p.contains("parentSpecPath=\n"), "no bare key the agent would resolve against cwd")
+        try expect(p.contains("Not produced yet"), "named in the missing list instead")
+    })
+
+    results.append(check("an ordinary implement prompt is unchanged by any of this") {
+        let p = TaskRunner.phasePrompt(task(), phase: .implement, projectSlug: slug)
+        try expectEqual(p.components(separatedBy: "\n").first, "/claudepit-task-implement", "line 1")
+        try expect(p.contains("planPath"), "still told about its plan path")
+        try expect(!p.contains("## Description"), "still argues from the spec, not the description")
+        try expect(!p.contains("parentReviewPath"), "no follow-up keys")
+    })
+
+    results.append(check("the unattended section appears only for an armed task") {
+        var armed = task(); armed.autoRun = true
+        for phase in allPhases {
+            let on = TaskRunner.phasePrompt(armed, phase: phase, projectSlug: slug)
+            try expect(on.contains("## Unattended run"), "\(phase.commandName) armed carries the section")
+            let off = TaskRunner.phasePrompt(task(), phase: phase, projectSlug: slug)
+            try expect(!off.contains("## Unattended run"), "\(phase.commandName) unarmed does not")
+        }
+    })
+
+    results.append(check("the unattended section never migrates onto line 1") {
+        var armed = task(); armed.autoRun = true
+        for phase in allPhases {
+            let lines = TaskRunner.phasePrompt(armed, phase: phase, projectSlug: slug)
+                .components(separatedBy: "\n")
+            try expectEqual(lines.first, "/claudepit-task-\(phase.commandName)",
+                            "\(phase.commandName) line 1 still the bare slash-command")
+        }
+    })
+
+    results.append(check("the unattended section stays above the Paths block") {
+        var armed = task(); armed.autoRun = true
+        let p = TaskRunner.phasePrompt(armed, phase: .writeSpec, projectSlug: slug)
+        guard let u = p.range(of: "## Unattended run"), let k = p.range(of: "## Paths") else {
+            try expect(false, "both sections must be present"); return
+        }
+        try expect(u.lowerBound < k.lowerBound, "key=value pairs stay the last thing in the prompt")
+    })
+
     return results
 }

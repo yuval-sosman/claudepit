@@ -62,6 +62,11 @@ public struct ManagedConfig: Identifiable, Sendable {
             kind: .commandMarkdown, filename: "claudepit-task-review.md",
             builtinDefault: HookScripts.taskCommandReview, defaultEnabled: true, defaultNumber: nil),
         ManagedConfig(
+            id: "task-fix", title: "Task Command: Fix Findings",
+            detail: "The /claudepit-task-fix slash-command, written to this project's .claude/commands/. Run instead of Implement by a task created from another task's review findings — there is no plan for Implement to follow.",
+            kind: .commandMarkdown, filename: "claudepit-task-fix.md",
+            builtinDefault: HookScripts.taskCommandFix, defaultEnabled: true, defaultNumber: nil),
+        ManagedConfig(
             id: "cleanup-period", title: "Prevent Session Cleanup",
             detail: "Sets cleanupPeriodDays in this project's .claude/settings.json so Claude keeps old session transcripts (Claudepit reads them). Default 3650 (~10 years).",
             kind: .number, filename: "", builtinDefault: "", defaultEnabled: true, defaultNumber: 3650),

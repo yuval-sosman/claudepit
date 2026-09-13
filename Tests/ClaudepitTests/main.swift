@@ -43,11 +43,15 @@ let groups: [(String, () -> [Bool])] = [
     ("TaskCommandGuard", taskCommandGuardChecks),
     ("TaskPrompt", taskPromptChecks),
     ("TaskModel", taskModelChecks),
+    ("AutoRun", autoRunChecks),
     ("TopicStore", topicStoreChecks),
     ("BrainstormChangeSource", brainstormChangeSourceChecks),
     ("TaskDraft", taskDraftChecks),
-    ("Subprocess", subprocessChecks),
     ("WorktreeBase", worktreeBaseChecks),
+    ("FindingTaskDraft", findingTaskDraftChecks),
+    ("ReviewFindingParse", reviewFindingParseChecks),
+    ("Subprocess", subprocessChecks),
+    ("HerdrFocus", herdrFocusChecks),
 ]
 
 var results: [Bool] = []

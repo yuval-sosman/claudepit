@@ -225,7 +225,7 @@ func managedInstallerChecks() -> [Bool] {
         try store.saveContent(base, plan, "EDITED PLAN\n")
         store.setEnabled(base, "task-review", false)
         let bodies = installer(g, base).taskCommandBodies()
-        try expectEqual(bodies.count, 4, "disabled command excluded")
+        try expectEqual(bodies.count, HookScripts.taskCommands.count - 1, "disabled command excluded")
         try expect(!bodies.contains { $0.filename == "claudepit-task-review.md" }, "review excluded")
         try expectEqual(bodies.first { $0.filename == "claudepit-task-plan.md" }?.body,
                         "EDITED PLAN\n", "edited copy used")

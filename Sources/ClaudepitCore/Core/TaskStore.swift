@@ -53,6 +53,12 @@ public struct TaskStore: Sendable {
             obj["plannedPhases"] = planned; touched = true
         }
         if obj["phase"] as? String == "verify" { obj["phase"] = "codeReview"; touched = true }
+        // `autoRunRetried` holds phase raw values too, so it needs the same strip — otherwise the
+        // next retired phase resurrects exactly the decode failure this function exists to fix.
+        if var retried = obj["autoRunRetried"] as? [String], retried.contains("verify") {
+            retried.removeAll { $0 == "verify" }
+            obj["autoRunRetried"] = retried; touched = true
+        }
         guard touched, let clean = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
         return try? JSONDecoder().decode(ProjectTask.self, from: clean)
     }
