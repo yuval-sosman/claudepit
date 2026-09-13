@@ -46,6 +46,8 @@ let groups: [(String, () -> [Bool])] = [
     ("TopicStore", topicStoreChecks),
     ("BrainstormChangeSource", brainstormChangeSourceChecks),
     ("TaskDraft", taskDraftChecks),
+    ("Subprocess", subprocessChecks),
+    ("WorktreeBase", worktreeBaseChecks),
 ]
 
 var results: [Bool] = []

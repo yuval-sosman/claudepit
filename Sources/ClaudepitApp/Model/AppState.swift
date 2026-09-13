@@ -127,6 +127,14 @@ final class AppState: ObservableObject {
     @Published var focusWorktreeName: String?   // set to jump the Worktrees page to a specific worktree
     @Published var autoOpenReviewWorktree: String?   // one-shot: auto-present a worktree's Source Control sheet after focusing
     @Published var worktreeLastCommit: [String: (hash: String, subject: String)] = [:]
+    /// When the worktree scan last ran a `git fetch` for the base branch. Not published — no
+    /// view reads it. The scan runs on every FileWatcher tick, so without this throttle a
+    /// network call would fire every few seconds while a task agent writes its transcript.
+    private var lastBaseFetch: Date?
+    /// One-shot: a worktree path whose Update-from-base should auto-start when its
+    /// `TaskDetailView` appears. Set by the board card's behind pill, consumed and cleared by
+    /// `UpdateFromBaseControl` — the documented focus-field contract.
+    @Published var pendingWorktreeUpdatePath: String?
     @Published var sessions: [SessionSummary] = []
     @Published var loops: [CronEntry] = []
     @Published var tasks: [ProjectTask] = []
@@ -422,13 +430,29 @@ final class AppState: ObservableObject {
 
     /// Read-only worktree scan for the active project, merged with the just-loaded sessions.
     /// Git I/O runs off the main actor (Sendable RawScan); the session merge runs on main.
-    func reloadWorktrees() {
+    ///
+    /// `forceFetch: true` is for an explicit user gesture (the Worktrees refresh button) and
+    /// bypasses the 300 s throttle — the user asked for the latest base. Every other call site
+    /// (the FileWatcher-driven `reloadSessions()`, `onAppear`, the worktree-cleanup refresh,
+    /// `deleteTask`) keeps the default and is throttled. The timestamp is stamped HERE, on the
+    /// main actor, before the scan is awaited, so two overlapping reloads never both fetch.
+    func reloadWorktrees(forceFetch: Bool = false) {
+        let now = Date()
+        let fetch = forceFetch || GitBase.shouldFetch(last: lastBaseFetch, now: now, interval: 300)
+        if fetch { lastBaseFetch = now }
         let path = activePath
         Task { [weak self] in
-            let raw = await Task.detached { WorktreeScanner().scanRaw(activePath: path) }.value
+            // A plain `await`, no `Task.detached`: `scanRaw` is a nonisolated async method on a
+            // Sendable struct and every git call inside it goes through `Subprocess`, which hops
+            // to `DispatchQueue.global()` itself. Nothing blocks the main actor, and — unlike the
+            // `Task.detached` this replaced — nothing occupies a cooperative-pool thread either.
+            let raw = await WorktreeScanner().scanRaw(activePath: path, fetchBase: fetch)
             guard let self, let raw else { self?.worktrees = []; return }
             self.worktrees = WorktreeScanner.merge(
-                parsed: raw.parsed, dirty: raw.dirty, ahead: raw.ahead,
+                parsed: raw.parsed, dirty: raw.dirty, trackedDirty: raw.trackedDirty,
+                ahead: raw.ahead, behind: raw.behind,
+                merging: raw.mergeInProgress, conflicted: raw.conflicted,
+                baseBranch: raw.baseBranch, baseRef: raw.baseRef,
                 sessions: self.sessions, cwdMap: raw.cwdMap)
             let activePaths = Set(self.worktrees.map { $0.path })
             self.worktreeLastCommit = self.worktreeLastCommit.filter { activePaths.contains($0.key) }
