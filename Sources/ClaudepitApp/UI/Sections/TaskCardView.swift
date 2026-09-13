@@ -137,8 +137,16 @@ struct TaskCardView: View {
     /// The board already groups cards by phase in a column, so it hides the
     /// redundant phase pill; the flat list shows it.
     var showPhase: Bool = true
+    /// Tapping the "behind base" pill. Supplied by the board (select the task + arm the
+    /// one-shot); nil in any other host, where the pill degrades to a tooltip-only badge.
+    var onBehindTap: (() -> Void)? = nil
 
     private var blockers: [String] { TaskTransition.unmetDependencies(task, allTasks: app.tasks) }
+    /// This task's worktree, if the last scan found it behind its base.
+    private var behindWorktree: WorktreeInfo? {
+        guard let p = task.worktree?.path else { return nil }
+        return app.worktrees.first { $0.path == p && $0.isBehindBase }
+    }
     @State private var showLegend = false
 
     var body: some View {
@@ -200,6 +208,23 @@ struct TaskCardView: View {
                         let t = app.tasks.first { $0.id == id }
                         return "• \(t?.name ?? id) (\(t?.status.label ?? "missing"))"
                     }.joined(separator: "\n"))
+            }
+            if let bwt = behindWorktree {
+                // The live-agent guard is load-bearing: a herdr Claude agent mid-`implement`
+                // has a clean tree between edits, so canUpdateFromBase alone would happily
+                // merge under it while it holds the pre-merge file contents in context. The
+                // pill stays VISIBLE (the staleness is worth knowing) but its action is off —
+                // the same reasoning that makes ProjectTask.allowsMainEdit lock Edit.
+                let live = task.status == .running || task.status == .blocked
+                Button { onBehindTap?() } label: {
+                    Pill("↓\(bwt.behindCount) behind \(bwt.baseBranch)", color: .orange,
+                         hPadding: 7, vPadding: 2)
+                }
+                .buttonStyle(.plain)
+                .disabled(onBehindTap == nil || live)
+                .help(live
+                      ? "\(bwt.behindCount) commit\(bwt.behindCount == 1 ? "" : "s") behind \(bwt.baseRef). An agent is working in this worktree — merge after it stops."
+                      : "This worktree is \(bwt.behindCount) commit\(bwt.behindCount == 1 ? "" : "s") behind \(bwt.baseRef) — update it")
             }
         }
     }

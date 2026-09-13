@@ -73,7 +73,11 @@ struct TaskBoardView: View {
             } else {
                 ForEach(items) { task in
                     Button { onSelect(task.id) } label: {
-                        TaskCardView(task: task, app: app, showPhase: false)
+                        TaskCardView(task: task, app: app, showPhase: false,
+                                     onBehindTap: {
+                                         app.pendingWorktreeUpdatePath = task.worktree?.path
+                                         onSelect(task.id)
+                                     })
                             .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
                             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.08), lineWidth: 1))
                     }

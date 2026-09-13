@@ -1,6 +1,24 @@
 import Foundation
 @testable import ClaudepitCore
 
+/// Bridge an async op into the synchronous check harness. Same shape as `runAsync` in
+/// WorktreeInspectorChecks and `runAsyncGit` in WorktreeBaseChecks — each is file-private, so
+/// every file that needs one declares it under a distinct name.
+private func runAsyncScan<T: Sendable>(_ op: @escaping @Sendable () async -> T) -> T {
+    let sem = DispatchSemaphore(value: 0)
+    let box = ScanResultBox<T>()
+    Task { box.set(await op()); sem.signal() }
+    sem.wait()
+    return box.get()
+}
+
+private final class ScanResultBox<T>: @unchecked Sendable {
+    private var value: T?
+    private let lock = NSLock()
+    func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
+    func get() -> T { lock.lock(); defer { lock.unlock() }; return value! }
+}
+
 func worktreeScannerChecks() -> [Bool] {
     var results: [Bool] = []
 
@@ -106,7 +124,7 @@ func worktreeScannerChecks() -> [Bool] {
         try "x".write(to: repo.appending(path: ".claude/worktrees/test-wt/b.txt"),
                       atomically: true, encoding: .utf8)
 
-        guard let raw = WorktreeScanner().scanRaw(activePath: repo) else {
+        guard let raw = runAsyncScan({ await WorktreeScanner().scanRaw(activePath: repo) }) else {
             throw CheckFailure(message: "scanRaw returned nil for a valid repo")
         }
         try expectEqual(raw.parsed.count, 1, "one .claude worktree (main skipped)")

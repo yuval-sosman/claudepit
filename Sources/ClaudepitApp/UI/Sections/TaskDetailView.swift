@@ -209,7 +209,40 @@ struct TaskDetailView: View {
                     }
                 }
             }
+            if task.worktree != nil { fieldSection("Worktree") { worktreeRow } }
             fieldSection("Attachments") { attachmentsEditor }
+        }
+    }
+
+    /// The task's worktree plus the shared base-sync control. `info` is recomputed in the body
+    /// on every render, which is what keeps the control's merge-state block live.
+    @ViewBuilder private var worktreeRow: some View {
+        let info = task.worktree.flatMap { w in app.worktrees.first { $0.path == w.path } }
+        VStack(alignment: .leading, spacing: 8) {
+            if let w = task.worktree {
+                Text(w.branch.isEmpty ? "detached" : w.branch)
+                    .font(.callout.monospaced()).foregroundStyle(.secondary)
+                Text(URL(filePath: w.path).lastPathComponent)
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            if let info {
+                // Same live-agent guard as the board pill (§4.9): a running agent holds the
+                // pre-merge file contents in its context. It travels as the *reason* — one input,
+                // not two, so the two hosts cannot disagree — and that reason both disables the
+                // button and explains why. `autoStartFromPending` respects it too: a pending
+                // one-shot on a task whose agent started meanwhile is cleared without running,
+                // so the card's guard cannot be bypassed by a race.
+                UpdateFromBaseControl(
+                    app: app, wt: info,
+                    externallyDisabled: false,
+                    disabledReason: (task.status == .running || task.status == .blocked)
+                        ? UpdateFromBaseControl.liveAgentReason : nil,
+                    autoStartFromPending: true)
+            } else {
+                Text("Worktree not found in the current scan")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 

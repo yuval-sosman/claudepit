@@ -15,16 +15,35 @@ public struct WorktreeScanner {
     }
 
     /// All-Sendable git scan result, ready to merge with sessions on the main actor.
+    /// `baseBranch`/`baseRef` are scan-GLOBAL — resolved once at the repo toplevel, not per
+    /// worktree — so the scan's base and every worktree's comparison ref are the same answer.
     public struct RawScan: Sendable {
         public let parsed: [ParsedWorktree]
         public let dirty: [String: Int]
+        /// `status --porcelain` lines that are not "??" — the merge gate's counter.
+        public let trackedDirty: [String: Int]
         public let ahead: [String: Int]
+        public let behind: [String: Int]
+        /// Worktree paths with a live `MERGE_HEAD`.
+        public let mergeInProgress: Set<String>
+        /// Unmerged paths per worktree; only populated while `MERGE_HEAD` exists, and
+        /// legitimately empty once the user has staged resolutions.
+        public let conflicted: [String: [String]]
+        public let baseBranch: String
+        public let baseRef: String
         /// Fallback binding: worktree path → session ID, populated by scanning
         /// transcripts in the parent repo's project dir for a matching `cwd` field.
         public let cwdMap: [String: String]
-        public init(parsed: [ParsedWorktree], dirty: [String: Int], ahead: [String: Int],
+        public init(parsed: [ParsedWorktree], dirty: [String: Int], trackedDirty: [String: Int] = [:],
+                    ahead: [String: Int], behind: [String: Int] = [:],
+                    mergeInProgress: Set<String> = [], conflicted: [String: [String]] = [:],
+                    baseBranch: String = "", baseRef: String = "",
                     cwdMap: [String: String] = [:]) {
-            self.parsed = parsed; self.dirty = dirty; self.ahead = ahead; self.cwdMap = cwdMap
+            self.parsed = parsed; self.dirty = dirty; self.trackedDirty = trackedDirty
+            self.ahead = ahead; self.behind = behind
+            self.mergeInProgress = mergeInProgress; self.conflicted = conflicted
+            self.baseBranch = baseBranch; self.baseRef = baseRef
+            self.cwdMap = cwdMap
         }
     }
 
@@ -59,9 +78,18 @@ public struct WorktreeScanner {
 }
 
 extension WorktreeScanner {
+    /// New parameters are DEFAULTED and inserted so existing argument order is preserved —
+    /// `merge(parsed:dirty:ahead:sessions:)` and `merge(parsed:dirty:ahead:sessions:cwdMap:)`
+    /// still compile unedited at their 5 existing call sites.
     public static func merge(parsed: [ParsedWorktree],
                              dirty: [String: Int],
+                             trackedDirty: [String: Int] = [:],
                              ahead: [String: Int],
+                             behind: [String: Int] = [:],
+                             merging: Set<String> = [],
+                             conflicted: [String: [String]] = [:],
+                             baseBranch: String = "",
+                             baseRef: String = "",
                              sessions: [SessionSummary],
                              cwdMap: [String: String] = [:]) -> [WorktreeInfo] {
         parsed.map { wt in
@@ -89,6 +117,11 @@ extension WorktreeScanner {
                 path: wt.path, branch: wt.branch, head: wt.head, isLocked: wt.isLocked,
                 lockReason: wt.lockReason,
                 dirtyCount: dirty[wt.path] ?? 0, aheadCount: ahead[wt.path] ?? 0,
+                behindCount: behind[wt.path] ?? 0,
+                trackedDirtyCount: trackedDirty[wt.path] ?? 0,
+                baseBranch: baseBranch, baseRef: baseRef,
+                mergeInProgress: merging.contains(wt.path),
+                conflictedFiles: conflicted[wt.path] ?? [],
                 ownerSessionID: owner?.id ?? subagentMatch?.session.id ?? cwdOwner?.id,
                 ownerSubagentID: subagentMatch?.subagentID,
                 isActive: owner?.isActive ?? subagentMatch?.session.isActive ?? cwdOwner?.isActive ?? false)
@@ -127,42 +160,70 @@ extension WorktreeScanner {
     }
 }
 
+// Every git call below goes through the shared `GitBase.git(_:dir:)` — this scan used to keep its
+// own hand-rolled copy, which left `standardError` undrained and had no timeout at all.
 extension WorktreeScanner {
-    /// Runs a git command in `dir`, returns stdout (trimmed) or nil on non-zero exit / launch failure.
-    private static func git(_ args: [String], dir: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(filePath: "/usr/bin/env")
-        p.arguments = ["git", "-C", dir] + args
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     /// Read-only git scan of the active project's worktrees. Returns only Sendable data
     /// (safe to compute off the main actor); merge with sessions via `merge(...)`.
     /// Returns nil if activePath is nil, git is absent, or the path is not a git repo.
-    public func scanRaw(activePath: URL?) -> RawScan? {
+    ///
+    /// `fetchBase` defaults to FALSE: this runs on every FileWatcher tick, and the throttle
+    /// that decides when a network call is acceptable lives in the caller
+    /// (`AppState.reloadWorktrees`). A failed, skipped or timed-out fetch is silent — the
+    /// counts simply come from the refs already on disk.
+    ///
+    /// Per-worktree git calls: 3 (4 while a merge is in progress). The old upstream-relative
+    /// ahead count (`rev-list --count` against the branch's tracking ref) is REPLACED, not
+    /// added to — it was permanently 0 on task branches, which never have a tracking ref.
+    public func scanRaw(activePath: URL?, fetchBase: Bool = false) async -> RawScan? {
         guard let root = activePath?.path else { return nil }
-        guard let top = Self.git(["rev-parse", "--show-toplevel"], dir: root), !top.isEmpty
+        guard let top = await GitBase.git(["rev-parse", "--show-toplevel"], dir: root), !top.isEmpty
         else { return nil }
-        guard let listing = Self.git(["worktree", "list", "--porcelain"], dir: top) else { return nil }
+        guard let listing = await GitBase.git(["worktree", "list", "--porcelain"], dir: top) else { return nil }
         let parsed = Self.parsePorcelain(listing, repoRoot: top)
 
-        var dirty: [String: Int] = [:], ahead: [String: Int] = [:]
+        // Base resolved ONCE per scan, at the toplevel — so no two worktrees can disagree
+        // about what they are behind. nil base (detached HEAD, no main/master, no origin) is a
+        // legitimate repo shape: ref stays "", counts are skipped, every affordance hides.
+        let base = await GitBase.trunkBranch(repoRoot: top)
+        if fetchBase, let base { await GitBase.fetchBase(repoRoot: top, base: base) }
+        // Spelled out rather than `base.map { ... }`: `Optional.map` takes a non-async closure.
+        var ref = ""
+        if let base { ref = await GitBase.baseRef(repoRoot: top, base: base) }
+
+        var dirty: [String: Int] = [:], trackedDirty: [String: Int] = [:]
+        var ahead: [String: Int] = [:], behind: [String: Int] = [:]
+        var merging: Set<String> = [], conflicted: [String: [String]] = [:]
         for wt in parsed {
-            if let status = Self.git(["status", "--porcelain"], dir: wt.path) {
-                dirty[wt.path] = status.isEmpty ? 0 : status.split(separator: "\n").count
+            // One status call, split by tracked-ness — no extra subprocess.
+            if let status = await GitBase.git(["status", "--porcelain"], dir: wt.path) {
+                let lines = status.isEmpty ? [] : status.split(separator: "\n")
+                dirty[wt.path] = lines.count
+                trackedDirty[wt.path] = lines.filter { !$0.hasPrefix("??") }.count
             }
-            if let cnt = Self.git(["rev-list", "--count", "@{upstream}..HEAD"], dir: wt.path),
-               let n = Int(cnt) { ahead[wt.path] = n }
+            // One call for BOTH counts. Left side = behind, right side = ahead.
+            if !ref.isEmpty,
+               let out = await GitBase.git(["rev-list", "--left-right", "--count", "\(ref)...HEAD"], dir: wt.path),
+               let c = GitBase.parseLeftRight(out) {
+                behind[wt.path] = c.behind
+                ahead[wt.path] = c.ahead
+            }
+            // Merge state is derived every scan, never cached — a merge can be started or
+            // finished in a terminal, and the conflict UI must survive an app relaunch.
+            if await GitBase.git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], dir: wt.path) != nil {
+                merging.insert(wt.path)
+                let unmerged = await GitBase.git(["diff", "--name-only", "--diff-filter=U"], dir: wt.path) ?? ""
+                conflicted[wt.path] = unmerged
+                    .split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+            }
         }
 
         // Build cwd fallback map: scan transcripts in the parent repo's project dir.
         let cwdMap = Self.buildCWDMap(repoRoot: top, worktreePaths: parsed.map { $0.path })
-        return RawScan(parsed: parsed, dirty: dirty, ahead: ahead, cwdMap: cwdMap)
+        return RawScan(parsed: parsed, dirty: dirty, trackedDirty: trackedDirty,
+                       ahead: ahead, behind: behind,
+                       mergeInProgress: merging, conflicted: conflicted,
+                       baseBranch: base ?? "", baseRef: ref, cwdMap: cwdMap)
     }
 
     /// Peeks at transcripts in the parent repo's Claude project dir to find which
@@ -221,12 +282,5 @@ extension WorktreeScanner {
             }
         }
         return counts.max(by: { $0.value < $1.value })?.key
-    }
-
-    /// Convenience: full scan + merge in one call. Returns [] if not a git repo.
-    public func scan(activePath: URL?, sessions: [SessionSummary]) -> [WorktreeInfo] {
-        guard let raw = scanRaw(activePath: activePath) else { return [] }
-        return Self.merge(parsed: raw.parsed, dirty: raw.dirty, ahead: raw.ahead,
-                          sessions: sessions, cwdMap: raw.cwdMap)
     }
 }

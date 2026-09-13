@@ -47,6 +47,7 @@ let groups: [(String, () -> [Bool])] = [
     ("TopicStore", topicStoreChecks),
     ("BrainstormChangeSource", brainstormChangeSourceChecks),
     ("TaskDraft", taskDraftChecks),
+    ("WorktreeBase", worktreeBaseChecks),
     ("FindingTaskDraft", findingTaskDraftChecks),
     ("ReviewFindingParse", reviewFindingParseChecks),
     ("Subprocess", subprocessChecks),

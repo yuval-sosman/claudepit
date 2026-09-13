@@ -12,11 +12,11 @@ struct WorktreesSection: View {
             HStack {
                 Text("Worktrees").font(.title2).bold()
                 Spacer()
-                Button { app.reloadWorktrees() } label: {
+                Button { app.reloadWorktrees(forceFetch: true) } label: {
                     Image(systemName: Icon.refresh).foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Refresh worktrees")
+                .help("Refresh worktrees and fetch the base branch")
             }
 
             if app.worktrees.isEmpty {
@@ -150,11 +150,18 @@ private struct WorktreeCard: View {
                         .help(app.herdrSessions[sid] != nil ? "Focus existing herdr pane" : "Resume Session")
                     }
                 }
-                // Quiet trailing metadata — only what's actionable.
+                // Quiet trailing metadata — only what's actionable. Each renders only when its
+                // own count is non-zero; both are 0 when no base is resolvable.
                 if wt.aheadCount > 0 {
                     Label("\(wt.aheadCount) ahead", systemImage: "arrow.up")
                         .font(.caption).foregroundStyle(.secondary)
-                        .help("\(wt.aheadCount) commit\(wt.aheadCount == 1 ? "" : "s") not pushed to upstream")
+                        .help("\(wt.aheadCount) commit\(wt.aheadCount == 1 ? "" : "s") ahead of \(wt.baseBranch)")
+                }
+                if wt.behindCount > 0 {
+                    // Orange: behind is actionable (there is a button for it). Ahead is not.
+                    Label("\(wt.behindCount) behind", systemImage: "arrow.down")
+                        .font(.caption).foregroundStyle(.orange)
+                        .help("\(wt.behindCount) commit\(wt.behindCount == 1 ? "" : "s") on \(wt.baseRef) not in this worktree")
                 }
             }
         } detail: {
@@ -364,33 +371,51 @@ private struct WorktreeCard: View {
         DispatchQueue.main.async { app.autoOpenReviewWorktree = nil }
     }
 
+    /// Someone is working in this worktree right now. `lockState` is a `kill(pid, 0)` syscall,
+    /// not a subprocess, so reading it from a view body is safe (and the body above already does).
+    private var agentIsLive: Bool { wt.isActive || wt.lockState.isLockedLive }
+
     /// Worktree-state verdict + lock-aware action, on one line. Locked & in use →
     /// no action. Locked & stale (idle + dead pid) → Unlock. Unlocked+clean → Remove.
+    /// Below it, the base-sync control: both worktree-level operations read as one group.
     @ViewBuilder private var cleanupSection: some View {
-        HStack(spacing: 8) {
-            switch wt.lockState {
-            case .lockedLive(let pid):
-                stateText(wt.isActive
-                            ? "Locked and in use by an active session"
-                            : "Locked by a running process (pid \(pid))")
-            case .lockedStale(let pid):
-                pillButton("Unlock", icon: "lock.open.fill") {
-                    runCleanup { await WorktreeStager.unlock(worktreePath: wt.path) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                switch wt.lockState {
+                case .lockedLive(let pid):
+                    stateText(wt.isActive
+                                ? "Locked and in use by an active session"
+                                : "Locked by a running process (pid \(pid))")
+                case .lockedStale(let pid):
+                    pillButton("Unlock", icon: "lock.open.fill") {
+                        runCleanup { await WorktreeStager.unlock(worktreePath: wt.path) }
+                    }
+                    stateText("Locked, but the owning process is gone" + (pid.map { " (pid \($0))" } ?? "") + " and no session is active")
+                case .unlocked:
+                    if wt.isClean {
+                        pillButton("Remove Worktree", icon: Icon.delete) { confirmRemove = true }
+                        stateText("Safe to remove — no uncommitted work")
+                    } else {
+                        pillButton("Remove Worktree", icon: Icon.delete) { confirmRemove = true }
+                        stateText("This worktree is unlocked but has uncommitted files. Removing it will permanently discard that work.", color: .orange)
+                    }
                 }
-                stateText("Locked, but the owning process is gone" + (pid.map { " (pid \($0))" } ?? "") + " and no session is active")
-            case .unlocked:
-                if wt.isClean {
-                    pillButton("Remove Worktree", icon: Icon.delete) { confirmRemove = true }
-                    stateText("Safe to remove — no uncommitted work")
-                } else {
-                    pillButton("Remove Worktree", icon: Icon.delete) { confirmRemove = true }
-                    stateText("This worktree is unlocked but has uncommitted files. Removing it will permanently discard that work.", color: .orange)
-                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
-        }
-        if let err = cleanupError {
-            Text(err).font(.caption2).foregroundStyle(.red)
+            if let err = cleanupError {
+                Text(err).font(.caption2).foregroundStyle(.red)
+            }
+            // `wt` here is the ForEach element, re-read on every scan — the freshness the
+            // control's merge-state block requires.
+            // The SAME live-agent guard the board pill and the task detail panel apply (§4.9):
+            // merging under a working agent rewrites files it is holding in context. `lockState`
+            // rather than `isActive` alone — a task agent carries no `agent_session`, so
+            // `ownerSessionID` may only ever arrive via the cwd fallback, and an unlocked-but-
+            // active worktree is caught by `isActive`.
+            UpdateFromBaseControl(app: app, wt: wt,
+                                  externallyDisabled: cleanupBusy,
+                                  disabledReason: agentIsLive
+                                    ? UpdateFromBaseControl.liveAgentReason : nil)
         }
     }
 

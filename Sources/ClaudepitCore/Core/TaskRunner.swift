@@ -754,31 +754,16 @@ public actor TaskRunner {
     private func gitOK(_ path: String) async -> Bool {
         await git(["-C", path, "rev-parse", "--is-inside-work-tree"]) != nil
     }
-    private func currentBranch(_ root: URL) async -> String? {
-        // --abbrev-ref returns the branch name (master/main/…); nil-ish "HEAD" means detached.
-        let b = await git(["-C", root.path, "rev-parse", "--abbrev-ref", "HEAD"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (b?.isEmpty == false && b != "HEAD") ? b : nil
-    }
-
-    /// The project's trunk — task worktrees always fork from here, never from whatever
-    /// happens to be checked out, so a task never accidentally builds on top of someone's
-    /// half-finished branch. Prefers origin's default branch (works whether it's named
-    /// main/master/trunk/whatever); falls back to a local "main" or "master" branch when
-    /// there's no remote; falls back to the checked-out branch only if neither exists, so
-    /// worktree creation still succeeds somehow.
-    private func trunkBranch(_ root: URL) async -> String? {
-        if let ref = await git(["-C", root.path, "symbolic-ref", "refs/remotes/origin/HEAD"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           let name = ref.split(separator: "/").last, !name.isEmpty {
-            return String(name)
-        }
-        for candidate in ["main", "master"] {
-            if await git(["-C", root.path, "rev-parse", "--verify", "--quiet", candidate]) != nil {
-                return candidate
-            }
-        }
-        return await currentBranch(root)
+    /// The project's trunk — task worktrees always fork from here, never from whatever happens
+    /// to be checked out, so a task never accidentally builds on top of someone's half-finished
+    /// branch. The ladder itself lives in `GitBase.trunkBranch`, which the worktree scan also
+    /// uses, so the scan's base and a worktree's fork point cannot drift.
+    ///
+    /// `nonisolated` so the actor is not held across the call. No continuation hop is needed:
+    /// `GitBase.trunkBranch` is async and runs each of its git calls through `Subprocess`, which
+    /// moves the blocking wait onto `DispatchQueue.global()` itself.
+    nonisolated private func trunkBranch(_ root: URL) async -> String? {
+        await GitBase.trunkBranch(repoRoot: root.path)
     }
 
     /// The prompt a phase's agent receives.

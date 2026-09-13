@@ -231,6 +231,11 @@ struct TasksSection: View {
         case .task(let id):
             if let t = app.tasks.first(where: { $0.id == id }) {
                 TaskDetailView(task: t, app: app, onDismiss: { panel = nil })
+                    // Identity per task: without it SwiftUI reuses one view (and all its @State)
+                    // across task selections, so task A's merge outcome renders over task B's
+                    // counts — a merge that never happened. Also clears the same latent leak for
+                    // nameDraft / expandedFinding / attachmentsReload.
+                    .id(id)
             } else {
                 // Task deleted elsewhere while its panel was open → close.
                 Color.clear.onAppear { panel = nil }
