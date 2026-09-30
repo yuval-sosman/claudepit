@@ -67,6 +67,11 @@ public struct ManagedConfig: Identifiable, Sendable {
             kind: .commandMarkdown, filename: "claudepit-task-fix.md",
             builtinDefault: HookScripts.taskCommandFix, defaultEnabled: true, defaultNumber: nil),
         ManagedConfig(
+            id: "task-merge", title: "Task Command: Merge From Base",
+            detail: "The /claudepit-task-merge slash-command, written to this project's .claude/commands/. Run by the \"Merge with Claude\" button to bring a worktree up to date with its base branch and resolve the conflicts — not a pipeline phase.",
+            kind: .commandMarkdown, filename: "claudepit-task-merge.md",
+            builtinDefault: HookScripts.taskCommandMerge, defaultEnabled: true, defaultNumber: nil),
+        ManagedConfig(
             id: "cleanup-period", title: "Prevent Session Cleanup",
             detail: "Sets cleanupPeriodDays in this project's .claude/settings.json so Claude keeps old session transcripts (Claudepit reads them). Default 3650 (~10 years).",
             kind: .number, filename: "", builtinDefault: "", defaultEnabled: true, defaultNumber: 3650),

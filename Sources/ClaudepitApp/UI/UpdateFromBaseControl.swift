@@ -29,6 +29,10 @@ struct UpdateFromBaseControl: View {
     var disabledReason: String? = nil
     /// When true, auto-start once on appear if `app.pendingWorktreeUpdatePath == wt.path`.
     var autoStartFromPending: Bool = false
+    /// The task that owns this worktree, when a task does. Only used to name the merge agent, so
+    /// that `HomeAgents` attributes it to the task like any other `task-<id>-*` agent. The
+    /// Worktrees host leaves it nil and gets a path-derived name.
+    var taskID: String? = nil
 
     /// The one wording for the live-agent case, shared by every host so they cannot drift. Mirrors
     /// the board pill's tooltip at `TaskCardView`'s behind-pill.
@@ -39,6 +43,11 @@ struct UpdateFromBaseControl: View {
     @State private var fetchFailed = false
     @State private var abortError: String?
     @State private var showReviewChanges = false
+    /// Whether the run that produced `outcome` went through the stashing path. `.conflicted` means
+    /// two different things across the two paths — "your work is untouched, we never started" vs
+    /// "we started, hit conflicts, and put everything back" — and the second needs saying.
+    @State private var lastRunStashed = false
+    @State private var mergeAgentError: String?
     // ponytail: captured once on tap — keyWindow resolves to the sheet after it opens.
     @State private var capturedSheetSize = CGSize(width: 900, height: 560)
 
@@ -66,19 +75,81 @@ struct UpdateFromBaseControl: View {
 
     // MARK: - (a) action row
 
+    /// Pills on their own rows, state line beneath. Three pills plus the sentence do not fit one
+    /// line in the task panel's narrow column, and wrapping the text mid-row pushed the pills
+    /// around as the state changed.
+    ///
+    /// `FlowLayout`, not an `HStack`: an HStack compresses its children to fit, which shrank
+    /// "Update from main" into a two-line pill. Flowing to a second row keeps every label on one
+    /// line at whatever width the host gives us.
     private var actionRow: some View {
-        HStack(spacing: 8) {
-            // A non-nil reason is itself disabling: belt-and-braces, so a host that supplies one
-            // cannot accidentally leave the button live by forgetting the boolean.
-            pill("Update from \(wt.baseBranch)", icon: "arrow.down.circle",
-                 disabled: busy || externallyDisabled || disabledReason != nil || !wt.canUpdateFromBase) { run() }
-                .help(disabledReason ?? "Fetch \(wt.baseRef) and merge it into this worktree")
+        VStack(alignment: .leading, spacing: 6) {
+            FlowLayout(spacing: 8) {
+                // A non-nil reason is itself disabling: belt-and-braces, so a host that supplies
+                // one cannot accidentally leave the button live by forgetting the boolean.
+                pill("Update from \(wt.baseBranch)", icon: "arrow.down.circle",
+                     disabled: standardGate || !wt.canUpdateFromBase) { run() }
+                    .help(effectiveReason ?? "Fetch \(wt.baseRef) and merge it into this worktree")
+                // Only offered when it is the thing the plain button cannot do. Hidden mid-merge:
+                // there is nothing to stash past, and the merge-state block below owns that case.
+                if wt.trackedDirtyCount > 0 && !wt.mergeInProgress {
+                    pill("Stash & update", icon: "archivebox.circle",
+                         disabled: standardGate) { runStashing() }
+                        .help(effectiveReason
+                              ?? "Stash your \(wt.trackedDirtyCount) uncommitted change\(wt.trackedDirtyCount == 1 ? "" : "s"), merge \(wt.baseRef), then restore them")
+                }
+                if offerClaudeMerge {
+                    pill(mergeAgentLive ? "Open merge in herdr" : "Merge with Claude",
+                         icon: mergeAgentLive ? "arrow.up.forward.app" : "sparkles",
+                         disabled: busy || externallyDisabled
+                                   || (!mergeAgentLive && (disabledReason != nil || liveAgentName != nil))) {
+                        launchMergeAgent()
+                    }
+                    .help(claudeMergeHelp)
+                }
+            }
             Text(stateLine)
                 .font(.caption)
                 .foregroundStyle(stateLineColor)
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
+            if let mergeAgentError {
+                Text(mergeAgentError).font(.caption2).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    /// The gate every *git-mutating* pill shares.
+    private var standardGate: Bool { busy || externallyDisabled || effectiveReason != nil }
+
+    /// Worth offering whenever there is a merge to do or something in the way of doing it. Not
+    /// shown on a clean, up-to-date worktree, where it would only be noise.
+    private var offerClaudeMerge: Bool {
+        wt.mergeInProgress || wt.trackedDirtyCount > 0 || wt.isBehindBase
+    }
+
+    /// Any herdr agent live in this checkout. The hosts each guard on their own proxy for this
+    /// (`wt.isActive`/lock state, or `task.status`), and neither sees the merge agent we launch
+    /// ourselves — so the control checks directly rather than trusting the host to have noticed.
+    private var liveAgentName: String? { app.worktreeAgentName(path: wt.path) }
+    private var mergeAgentName: String {
+        TaskRunner.mergeAgentName(taskID: taskID, worktreePath: wt.path)
+    }
+    private var mergeAgentLive: Bool { liveAgentName == mergeAgentName }
+
+    /// The host's reason, else one the control worked out for itself.
+    private var effectiveReason: String? {
+        if let disabledReason { return disabledReason }
+        if mergeAgentLive { return "Claude is merging this worktree — open the pane to follow it." }
+        if liveAgentName != nil { return Self.liveAgentReason }
+        return nil
+    }
+
+    private var claudeMergeHelp: String {
+        if mergeAgentLive { return "Focus the herdr pane where Claude is merging this worktree" }
+        if let disabledReason { return disabledReason }
+        if let liveAgentName { return "\(liveAgentName) is working in this worktree — merge after it stops." }
+        return "Open a Claude agent in herdr to merge \(wt.baseRef) and resolve the conflicts"
     }
 
     /// The reason is appended rather than replacing the chain: the user needs BOTH facts — how
@@ -86,15 +157,18 @@ struct UpdateFromBaseControl: View {
     /// line because macOS can swallow hover on a disabled control, so the tooltip alone would
     /// leave the button looking broken.
     private var stateLine: String {
-        guard let disabledReason else { return baseStateLine }
-        return "\(baseStateLine). \(disabledReason)"
+        guard let effectiveReason else { return baseStateLine }
+        return "\(baseStateLine). \(effectiveReason)"
     }
 
     /// First match wins, so a conflicted worktree is never described merely as dirty.
     private var baseStateLine: String {
         if wt.mergeInProgress { return "Merge in progress — resolve or abort below" }
         if wt.trackedDirtyCount > 0 {
-            return "\(wt.trackedDirtyCount) uncommitted change\(wt.trackedDirtyCount == 1 ? "" : "s") — commit or discard first"
+            // Names the way out rather than the obstacle: "commit or discard first" was a dead
+            // end that sent the user off to a terminal, which is the whole reason Stash & update
+            // exists. The pill it names is rendered right above this line.
+            return "\(wt.trackedDirtyCount) uncommitted change\(wt.trackedDirtyCount == 1 ? "" : "s") — use Stash & update, or commit them first"
         }
         if wt.behindCount > 0 {
             return "\(wt.behindCount) commit\(wt.behindCount == 1 ? "" : "s") behind \(wt.baseBranch)"
@@ -164,15 +238,32 @@ struct UpdateFromBaseControl: View {
             Text("Merged \(wt.baseRef). Now \(freshBehind) behind, \(freshAhead) ahead of \(wt.baseBranch).")
                 .font(.caption).foregroundStyle(.secondary)
         case .dirty(let n):
-            Text("\(n) uncommitted change\(n == 1 ? "" : "s") — commit or discard first")
+            Text("\(n) uncommitted change\(n == 1 ? "" : "s") — use Stash & update, or commit them first")
                 .font(.caption).foregroundStyle(.orange)
         case .failed(let msg):
             Text(msg).font(.caption2).foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
-        case .conflicted:
-            // Deliberately nothing: the merge-state block above already shows the paths and
-            // the buttons after the reload. Rendering both would duplicate the list.
-            EmptyView()
+        case .conflicted(let paths):
+            if lastRunStashed {
+                // The stashing path aborts and pops on conflict, so there is NO merge-state block
+                // to explain this one — without a line here the click would look like it did
+                // nothing at all.
+                Text("\(wt.baseBranch) conflicts with this branch in \(paths.count) file\(paths.count == 1 ? "" : "s"). "
+                     + "Nothing was changed — your uncommitted work is back exactly as it was. "
+                     + "Use Merge with Claude to resolve it.")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                // Deliberately nothing: the merge-state block above already shows the paths and
+                // the buttons after the reload. Rendering both would duplicate the list.
+                EmptyView()
+            }
+        case .stashConflicted(let paths):
+            Text("Merged \(wt.baseRef), but restoring your changes conflicted in \(paths.count) "
+                 + "file\(paths.count == 1 ? "" : "s"). Your work is safe — git kept the stash entry. "
+                 + "Resolve the conflicts, then drop it.")
+                .font(.caption).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -188,9 +279,16 @@ struct UpdateFromBaseControl: View {
     /// Fetch (when there is an origin) then merge. The explicit action ALWAYS fetches,
     /// ignoring the scan's 5-minute throttle — the user asked for the *latest* base. A failed
     /// fetch does not abort the merge; it merges against the refs on disk and says so.
-    private func run() {
+    private func run() { merge(stashing: false) }
+
+    /// Stash the uncommitted tracked changes, merge, restore them. Same fetch-then-merge shape as
+    /// `run()` — only the stager call differs, so the two share one function rather than drifting.
+    private func runStashing() { merge(stashing: true) }
+
+    private func merge(stashing: Bool) {
         guard !busy else { return }
-        busy = true; outcome = nil; fetchFailed = false; abortError = nil
+        busy = true; outcome = nil; fetchFailed = false; abortError = nil; mergeAgentError = nil
+        lastRunStashed = stashing
         let path = wt.path, ref = wt.baseRef, base = wt.baseBranch
         let root = app.activePath?.path
         Task {
@@ -201,9 +299,28 @@ struct UpdateFromBaseControl: View {
                 let ok = await GitBase.fetchBase(repoRoot: root, base: base)
                 fetchFailed = !ok
             }
-            outcome = await WorktreeStager.updateFromBase(worktreePath: path, baseRef: ref)
+            outcome = stashing
+                ? await WorktreeStager.updateFromBaseStashing(worktreePath: path, baseRef: ref)
+                : await WorktreeStager.updateFromBase(worktreePath: path, baseRef: ref)
             busy = false
             app.reloadWorktrees()   // refreshes counts, merge state and conflicted files
+        }
+    }
+
+    /// Hand the merge to a Claude agent in herdr. Fire-and-forget by design: nothing here polls
+    /// it, and the agent's own pane is where the user watches it. Clicking again while it lives
+    /// only focuses that pane (Core enforces it too — this is not the only caller).
+    private func launchMergeAgent() {
+        guard !busy else { return }
+        mergeAgentError = nil
+        let conflicted = wt.conflictedFiles
+        app.openMergeAgent(worktreePath: wt.path, branch: wt.branch,
+                           baseRef: wt.baseRef, baseBranch: wt.baseBranch,
+                           taskID: taskID, conflicted: conflicted) { ok in
+            if !ok {
+                mergeAgentError = "Could not start the merge agent. Check that herdr is running and "
+                                + "that Task Command: Merge From Base is enabled in App Settings."
+            }
         }
     }
 
@@ -226,7 +343,7 @@ struct UpdateFromBaseControl: View {
     private func startIfPending() {
         guard autoStartFromPending, app.pendingWorktreeUpdatePath == wt.path else { return }
         app.pendingWorktreeUpdatePath = nil
-        guard !externallyDisabled, disabledReason == nil, wt.canUpdateFromBase, !busy else { return }
+        guard !externallyDisabled, effectiveReason == nil, wt.canUpdateFromBase, !busy else { return }
         run()
     }
 
@@ -248,7 +365,7 @@ struct UpdateFromBaseControl: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 10, weight: .medium))
-                Text(title).font(.caption).fontWeight(.medium)
+                Text(title).font(.caption).fontWeight(.medium).fixedSize()
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 7))

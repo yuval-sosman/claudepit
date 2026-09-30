@@ -11,6 +11,19 @@ func homeLayoutChecks() -> [Bool] {
         try expectEqual(HomeLayout.rightColumnFraction, 0.45, "rightColumnFraction")
     })
 
+    results.append(check("balancedColumns: balanced rows, and no trap on unlimited widths") {
+        let cols = { (w: CGFloat, n: Int) in HomeLayout.balancedColumns(width: w, count: n, minWidth: 104, spacing: 8) }
+        try expectEqual(cols(1040, 6), 6, "wide: one row")
+        try expectEqual(cols(600, 6), 3, "fits five: 3 + 3, not 5 + 1")
+        try expectEqual(cols(350, 6), 3, "card: 3 + 3")
+        try expectEqual(cols(260, 6), 2, "narrow: 2 + 2 + 2")
+        try expectEqual(cols(0, 6), 1, "unmeasured: one column")
+        try expectEqual(cols(.infinity, 6), 6, "unlimited proposal: one row, no crash")
+        try expectEqual(cols(.nan, 5), 5, "NaN: one row, no crash")
+        try expectEqual(cols(-50, 3), 1, "negative: one column")
+        try expectEqual(cols(500, 0), 1, "no tiles")
+    })
+
     results.append(check("isTwoColumn: false below 640, true at and above") {
         try expectEqual(HomeLayout.isTwoColumn(width: 0), false, "width 0")
         try expectEqual(HomeLayout.isTwoColumn(width: 639), false, "width 639")

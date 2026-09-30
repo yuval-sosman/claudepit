@@ -209,7 +209,7 @@ steal the user's terminal focus once per phase.
 
 `AppState.liveState(of:)` matches the agent by **name** (`TaskRunner.agentName`) and only then by pane id, and reads `herdrAgents` — *not* `herdrSessions`. Task agents carry no `agent_session`, so `Herdr.AgentEntry.sessionID` is Optional and the session-keyed map never contains them; requiring one used to drop every task agent from `agent list` and left the board's live state permanently dead.
 
-**Phase commands** — `ManagedInstaller.sync()` writes six `<project>/.claude/commands/claudepit-task-{brainstorm,spec,plan,implement,review,fix}.md` slash-commands on launch (**project-scoped**, Claudepit-managed projects only), **overwrite-if-changed**, and sweeps retired ones (`HookScripts.retiredTaskCommandFilenames` — currently the removed `verify` phase's command; `TaskRunner.installCommands` runs the same sweep in worktrees). Tasks that still carry `verify` in `task.json` are healed on load by `TaskStore.remapRemovedPhases` (phase `verify` falls forward to `codeReview`). Task **worktrees** get the same bodies: `TaskRunner.installCommands(inWorktree:commands:)` requires the caller to pass them, and `ensureWorktree` builds them with `ManagedInstaller.taskCommandBodies()` from the `projectRoot` it is already given — so a worktree receives the user's edited copies and honors the enable toggles instead of the `HookScripts` built-ins. `ManagedInstaller.migrateTaskCommandLocationsIfNeeded()` removes any stale global copies under `~/.claude/commands/` and the 4 pre-slash-command subagents under `~/.claude/agents/` — once per machine, recorded in the `completedMigrations` `UserDefaults` key. **Do not edit these files by hand** — edit the source in `HookScripts.swift` (`taskCommands` / `taskCommand*` strings).
+**Phase commands** — `ManagedInstaller.sync()` writes seven `<project>/.claude/commands/claudepit-task-{brainstorm,spec,plan,implement,review,fix,merge}.md` slash-commands on launch (**project-scoped**, Claudepit-managed projects only), **overwrite-if-changed**, and sweeps retired ones (`HookScripts.retiredTaskCommandFilenames` — currently the removed `verify` phase's command; `TaskRunner.installCommands` runs the same sweep in worktrees). Tasks that still carry `verify` in `task.json` are healed on load by `TaskStore.remapRemovedPhases` (phase `verify` falls forward to `codeReview`). Task **worktrees** get the same bodies: `TaskRunner.installCommands(inWorktree:commands:)` requires the caller to pass them, and `ensureWorktree` builds them with `ManagedInstaller.taskCommandBodies()` from the `projectRoot` it is already given — so a worktree receives the user's edited copies and honors the enable toggles instead of the `HookScripts` built-ins. `ManagedInstaller.migrateTaskCommandLocationsIfNeeded()` removes any stale global copies under `~/.claude/commands/` and the 4 pre-slash-command subagents under `~/.claude/agents/` — once per machine, recorded in the `completedMigrations` `UserDefaults` key. **Do not edit these files by hand** — edit the source in `HookScripts.swift` (`taskCommands` / `taskCommand*` strings).
 
 **Review findings → tasks.** A `codeReview` phase writes a `CLAUDEPIT_FINDINGS_BEGIN … END` block
 **into `review.md`**, and `routeArtifact` parses **the file** first (scrollback is only a fallback —
@@ -271,6 +271,51 @@ instead of being emitted as a bare `key=`, which the agent would resolve against
 **Deep links** — from a task's detail view, buttons jump to the produced artifact using the app's focus pattern (there is no `navHistory`/`NavEntry` — that was removed): `app.focusPlanPath = path; app.selected = .plans` and `app.focusSessionID = sid; app.selected = .sessions`. `PlansSection`/`SessionsSection` consume the focus fields via `.onChange`.
 
 **Versions** — a task keeps a **main version** (its top-level `name`/`topic`/`description`/`requirements`/`priority`/`tags`/`dependsOn` fields — TaskRunner and all views read these directly) plus optional **suggestion versions** in `ProjectTask.suggestions: [TaskVersion]?` (both `topic` and `suggestions` are Optional for Codable back-compat — missing keys decode to `nil`). Suggestions are alternate proposals compared against main. Pure mutations live on `ProjectTask`: `applyField(_:from:)` (per-field Accept) and `promote(_:now:)` (Make main — keeps old main as a suggestion). **Suggestion** editing is **backlog-only**: once `status != .backlog` the versions UI and the New Draft button are locked (`TaskVersionsSheet` shows its lock banner, and the five suggestion mutators on `AppState` guard on `status == .backlog`). The **Edit** button — which edits main in place, writing straight through `TaskStore.update` with no `AppState` guard — is wider: `ProjectTask.allowsMainEdit` keeps it available in the **Backlog** and **Brainstorm** columns (`phase == nil || phase == .brainstorm`, excluding `.done`), minus `.running`/`.blocked`, because brainstorm is the phase whose job *is* refining the request, but a live herdr agent already holds the old description in its prompt and would never see the edit. UI: `NewTaskSheet` doubles as the create/edit/draft form (`editing`/`taskID`/`draftMode` params); `TaskVersionsSheet` is the two-pane compare/edit/accept/promote view (reuses `planDiffLines`/`PlanDiffView`). Per-project free-text **topics** persist in `TopicStore` at `~/.claude/claudepit-task-topics/<slug>.json` (seeds the New Task Topic combo box).
+
+## Updating a Worktree From Its Base
+
+`UpdateFromBaseControl` (`UI/UpdateFromBaseControl.swift`) is the ONE view for this, hosted by both
+`WorktreesSection`'s WORKTREE STATE block and `TaskDetailView`'s Worktree row, so the two can never
+disagree. It offers up to three pills:
+
+- **Update from `<base>`** — `WorktreeStager.updateFromBase`. Refuses a tracked-dirty tree.
+- **Stash & update** — `WorktreeStager.updateFromBaseStashing`. Shown only when the tree is dirty
+  and no merge is open.
+- **Merge with Claude** — `TaskRunner.openMergeAgent`, via `AppState.openMergeAgent`.
+
+**The stashing path restores everything on every failure.** stash (tracked only, never `-u`) →
+merge → pop; a conflicted *merge* aborts and pops, returning `.conflicted`, so the user is never
+left holding both a half-merge and a stash. Only a conflicted *pop* leaves work to do, and that is
+the new `.stashConflicted` outcome — git keeps the stash entry on a conflicted pop, so nothing is
+lost. Two git facts the state machine depends on, both verified rather than assumed: `git stash
+push` with nothing to save prints "No local changes to save" and exits **0** (hence the
+`refs/stash` before/after comparison — the exit code lies), and a conflicted `git stash pop` keeps
+the entry while a clean one drops it.
+
+**The merge agent is not a phase.** `openMergeAgent` is a hand-off like `openInHerdr`, but it never
+touches task status — a merge is not a phase, and marking the task `.running` would hand it to the
+pollers, which would land it on a phase result it never produced. `mergeAgentName` is deliberately
+outside the `TaskPhase` namespace (`task-<id>-merge`, or `merge-<dirname>` with no task) so
+`resolveRunning`/`resolveBlocked` cannot mistake it for a phase agent, while `HomeAgents` still
+attributes it to the task via the `task-<id>-` prefix. It opens its **own** tab via
+`Herdr.tabCreate` and persists nothing onto `task.worktree` — `openPhaseTab` would close the
+task's stored tab and overwrite `paneID`/`tabID`, which is the bookkeeping every phase focus
+depends on.
+
+**The agent resolves, it does not commit.** `TaskRunner.installGitDenyList` denies
+`Bash(git add:*)`/`Bash(git commit:*)`/`Bash(git stage:*)`/`Bash(git push:*)` in every task
+worktree, and deny wins over `--permission-mode auto`. `claudepit-task-merge.md` therefore tells
+the agent to drive `git fetch`/`git stash`/`git merge` (none of which are denied), resolve the
+conflict markers, verify the build, and stop — the user finishes from the control's existing
+**Review changes** → `WorktreeStager.commit`. Do not weaken the deny-list to "fix" this.
+
+**The live-agent guard is the control's own.** Each host passes a *proxy* for it — `wt.isActive`/
+lock state in Worktrees, `task.status` in the task panel — and neither sees the merge agent, which
+belongs to no phase and takes no worktree lock. `AppState.worktreeAgentName(path:)` answers it
+directly off the cached `herdrAgents` list (`Herdr.AgentEntry` already carries `cwd`, so there is
+no subprocess and it is safe from a view body). When the live agent *is* our merge agent, the pill
+becomes **Open merge in herdr** and only focuses — navigate, don't re-prompt, the same rule
+`openInHerdr` follows.
 
 ## claude -p Subprocess Calls
 
@@ -417,3 +462,71 @@ instead leaves one dead hook per machine, each failing with exit 127 on every fi
 Nothing about "this machine" is persisted; the home directory is re-derived on every
 launch. That is what keeps the checkout shareable — saving a prefix on first run would
 re-break it the moment someone else opened it.
+
+## Home and Usage
+
+Home answers each question once. **Left column (work):** Tasks, Live Agents, Recent. **Right
+column (numbers):** `HomeLimitsCard` "Claude Code" (limit gauges, credits, what's using the
+limits — from the CLI's `/usage` caches), `HomeUsageCard` "Usage" (what the work cost — counted
+from transcripts, for **this project** or **all projects**, 7D/30D/90D), `HomeHabitsCard`
+"Activity" (the year heatmap and rhythm — from `stats-cache.json`). An earlier layout repeated
+per-model tokens, tokens per day and token totals in two cards with two different numbers; the
+stats cache's token/model fields are no longer read at all (`StatsSnapshot` keeps only activity).
+Don't reintroduce a second source for cost, tokens or models — extend the Usage card instead.
+
+**Counting** (`Core/ProjectUsage.swift`, rules in its header comment) follows the claude-usage
+plugin's definitions (a separate project — share the *definitions*, never the code): an API
+call is `message.id + requestId` (Claude Code writes one line per content block, each repeating
+the usage — summing lines doubles every total), keeping the line with the most output tokens;
+`<synthetic>` is not a call; prompts are main-thread `promptSource` `typed`/`queued` lines;
+active time caps each gap at five minutes; hit rate is Σ cache reads ÷ Σ context. When this was
+built, a 30-day claudepit window and two single sessions matched that plugin's report exactly
+on every figure; re-check against it after changing a rule. `SessionTranscript` applies the same
+per-call rule to its `.turnUsage` events (a later line of a call replaces the event in place),
+so the transcript view's token line is no longer doubled either.
+
+- **Prices** (`Core/ModelPricing.swift`): USD per MTok with 5-minute and 1-hour cache writes
+  apart, fast mode and regional routing as multipliers. An unlisted model is priced like the
+  nearest version of its family and named under the card; add a table line to price a new model
+  exactly. `canonical` folds provider ids (`us.anthropic.…-v1:0`, `@2025…`, `[1m]`, dates).
+- **Scanning** (`Core/ProjectUsageScanner.swift`): each file's `TranscriptDigest` is cached by
+  path + mtime + size, so a rescan re-reads only transcripts that changed (first scan ≈1 s per
+  100 MB). `base == nil` scans every project. `AppState.reloadProjectUsage()` counts the scope in
+  `AppState.usageScope` (persisted), is coalesced (one trailing rescan, and a rescan when the
+  scope or project changed mid-scan), and runs from `reloadSessions()` only while Home is
+  showing. A folder URL with a trailing `/` must still find the checkout — `slug(_:)` strips it.
+- **Colours**: stacked bars are ordered by a fixed key (model family tier via
+  `ModelBadge.familyOrder`, or the fixed token-type order) so neighbours are always the pairs
+  the palette was checked for; `ModelBadge.color(for:)` is the one model→colour map for the
+  whole window, and `UsagePalette` (`UI/UsageViews.swift`) holds the rest. Change a colour or an
+  order only together, and re-check them as a set.
+- Shared pieces (`StatTile`, `CostBreakdownView`, `StackedBar`, `Money`/`Percent`/`Elapsed`)
+  live in `UI/UsageViews.swift`, used by Home and the session report alike.
+
+## Session Report
+
+A session's **Report** button (`SessionDetailView`, top right of the filter row) opens
+`SessionReportView` as a sheet inside the app, styled and sized like the Source Control sheet
+(title bar with refresh and close, Esc closes; 92% of the main window, measured at tap time
+because `keyWindow` becomes the sheet once it opens). The `SessionReportRequest` carries every
+path the report needs, so it reads files only. From a subagent's transcript it opens the parent
+session's report (the subagent is a row there). Tiles lay out through `BalancedGridLayout`
+(`UI/UsageViews.swift`): balanced rows at any width, never 5 + 1. Its column math is
+`HomeLayout.balancedColumns` in Core, tested — SwiftUI measures with `nil` and `.infinity` widths
+too (Home's lazy stack does on open), and `Int(.infinity)` traps, which once crashed Home.
+
+`Core/SessionReport.swift` builds it from the session's main transcript plus its subagents,
+parsed with `TranscriptDigest.parse(…, detail: true)` (per-thread input/compaction/tool-list/
+resume timelines and tool timings, collected only when asked). Cost, prompts, active time and
+the breakdowns come from `ProjectUsageSummary` over that one session, so they are exactly Home's.
+Per session it adds: context per main-thread call (with compactions), cache misses — a call that
+re-wrote more than 1,000 tokens of its thread's history, re-written = `max(0, min(previous
+context − cache read − input, cache write))`, none across a compaction — each with its idle time
+(from the previous response's end to the request start), the thread's cache lifetime (1 h when
+it wrote mostly 1-hour entries, else 5 min), a cause (`SessionReport.cause`: model switch, tool
+list change, subagent resumed, return after a break, waiting on you, slow tool, slow API, effort
+change, the CLI's logged reason) and its extra cost (re-written × (write − read price)); plus
+subagents (calls, cost, hit rate, peak, misses) and tools (calls, failures, total time).
+
+- Checks: `Tests/ClaudepitTests/ProjectUsageChecks.swift` (usage, scanner, report) and
+  `SessionTranscriptChecks.swift` (one `.turnUsage` per call).

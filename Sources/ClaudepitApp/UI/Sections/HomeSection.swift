@@ -144,16 +144,21 @@ struct HomeSection: View {
             VStack(spacing: 16) {
                 tasksPipelineCard
                 if !attention.isEmpty || !liveAgents.isEmpty { attentionCard }
+                HomeLimitsCard(app: app)
                 HomeUsageCard(app: app)
                 HomeActivityCard(app: app)
+                HomeHabitsCard(app: app)
             }
         }
     }
 
-    /// The wide column carries the text-heavy activity feed; the narrow one gets the gauges
-    /// and short lists. The reverse assignment left a tall void beside the feed — the right
-    /// column was several screens of wrapped text while the left ended after two cards.
-    /// Needs attention sits between Tasks and Recent at the same width (user's placement).
+    /// Work on the left, numbers on the right — each card answers one question, once:
+    /// - Left (wide): Tasks, Live Agents, Recent — what is happening, text-heavy, needs the width.
+    /// - Right: Claude Code (how close to the limits), Usage (what the work cost, per project or
+    ///   for all of them), Activity (the year's rhythm).
+    /// Recent is the tallest card and the three number cards together roughly match it, so
+    /// neither column ends in a void. (The first cut put the text feed in the narrow column and
+    /// left a tall void beside it; a later one repeated token and model totals in two cards.)
     private var leftColumn: some View {
         VStack(spacing: 16) {
             tasksPipelineCard
@@ -164,7 +169,9 @@ struct HomeSection: View {
 
     private var rightColumn: some View {
         VStack(spacing: 16) {
+            HomeLimitsCard(app: app)
             HomeUsageCard(app: app)
+            HomeHabitsCard(app: app)
         }
     }
 

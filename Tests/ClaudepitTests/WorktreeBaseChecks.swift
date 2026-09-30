@@ -482,5 +482,159 @@ func worktreeBaseChecks() -> [Bool] {
         try expectEqual(try rungit(wt, ["rev-parse", "HEAD"]), preMerge, "HEAD back to pre-merge")
     })
 
+    // MARK: - WorktreeStager.updateFromBaseStashing
+
+    results.append(check("updateFromBaseStashing: clean tree delegates to the plain path") {
+        let repo = try makeRepo()
+        try rungit(repo, ["worktree", "add", "-q", ".claude/worktrees/wt", "-b", "task/s0"])
+        let wt = repo.appending(path: ".claude/worktrees/wt")
+
+        // Nothing to stash, nothing to merge.
+        let r0 = runAsyncGit { await WorktreeStager.updateFromBaseStashing(worktreePath: wt.path, baseRef: "main") }
+        try expectEqual(r0, .upToDate, "clean + nothing new behaves exactly like updateFromBase")
+        try expectEqual(try rungit(wt, ["stash", "list"]), "", "no stash was created for a clean tree")
+
+        // Clean, but main moved.
+        try "main\n".write(to: repo.appending(path: "m.txt"), atomically: true, encoding: .utf8)
+        try rungit(repo, ["add", "m.txt"]); try rungit(repo, ["commit", "-qm", "m"])
+        let r1 = runAsyncGit { await WorktreeStager.updateFromBaseStashing(worktreePath: wt.path, baseRef: "main") }
+        try expectEqual(r1, .merged, "clean + new commits merges")
+        try expectEqual(try rungit(wt, ["stash", "list"]), "", "still no stash")
+    })
+
+    results.append(check("updateFromBaseStashing: dirty tree merges and the changes come back") {
+        let repo = try makeRepo()
+        try "orig\n".write(to: repo.appending(path: "b.txt"), atomically: true, encoding: .utf8)
+        try rungit(repo, ["add", "b.txt"]); try rungit(repo, ["commit", "-qm", "add b"])
+        try rungit(repo, ["worktree", "add", "-q", ".claude/worktrees/wt", "-b", "task/s1"])
+        let wt = repo.appending(path: ".claude/worktrees/wt")
+        // main moves on a file the dirty edit does not touch.
+        try "main-side\n".write(to: repo.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+        try rungit(repo, ["commit", "-qam", "main edit"])
+        // Uncommitted work in the worktree, plus an untracked file that must NOT be swept.
+        try "WORK IN PROGRESS\n".write(to: wt.appending(path: "b.txt"), atomically: true, encoding: .utf8)
+        try "scratch\n".write(to: wt.appending(path: "scratch.txt"), atomically: true, encoding: .utf8)
+
+        let r = runAsyncGit { await WorktreeStager.updateFromBaseStashing(worktreePath: wt.path, baseRef: "main") }
+        try expectEqual(r, .merged, "the dirty tree no longer refuses")
+        try expectEqual(try String(contentsOf: wt.appending(path: "b.txt"), encoding: .utf8),
+                        "WORK IN PROGRESS\n", "the uncommitted edit is back, byte for byte")
+        try expectEqual(try String(contentsOf: wt.appending(path: "a.txt"), encoding: .utf8),
+                        "main-side\n", "main's commit landed")
+        try expect(FileManager.default.fileExists(atPath: wt.appending(path: "scratch.txt").path),
+                   "untracked file untouched — no -u on the stash")
+        try expectEqual(try rungit(wt, ["stash", "list"]), "", "a clean pop drops the entry")
+        try expect(rungitOK(wt, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]) == nil, "no merge left open")
+    })
+
+    results.append(check("updateFromBaseStashing: a conflicting base restores EVERYTHING") {
+        let repo = try makeRepo()
+        try "orig\n".write(to: repo.appending(path: "b.txt"), atomically: true, encoding: .utf8)
+        try rungit(repo, ["add", "b.txt"]); try rungit(repo, ["commit", "-qm", "add b"])
+        try rungit(repo, ["worktree", "add", "-q", ".claude/worktrees/wt", "-b", "task/s2"])
+        let wt = repo.appending(path: ".claude/worktrees/wt")
+        // Both sides commit a.txt -> the MERGE conflicts, independently of the dirty file.
+        try "main-side\n".write(to: repo.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+        try rungit(repo, ["commit", "-qam", "main edit"])
+        try "wt-side\n".write(to: wt.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+        try rungit(wt, ["commit", "-qam", "wt edit"])
+        let preMerge = try rungit(wt, ["rev-parse", "HEAD"])
+        try "WORK IN PROGRESS\n".write(to: wt.appending(path: "b.txt"), atomically: true, encoding: .utf8)
+
+        let r = runAsyncGit { await WorktreeStager.updateFromBaseStashing(worktreePath: wt.path, baseRef: "main") }
+        try expectEqual(r, .conflicted(["a.txt"]), "reports which paths conflict")
+        // The whole point: the click is a no-op when it cannot succeed cleanly.
+        try expect(rungitOK(wt, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]) == nil,
+                   "the half-merge was aborted — never leave both a merge AND a stash open")
+        try expectEqual(try rungit(wt, ["rev-parse", "HEAD"]), preMerge, "HEAD back where it was")
+        try expectEqual(try String(contentsOf: wt.appending(path: "b.txt"), encoding: .utf8),
+                        "WORK IN PROGRESS\n", "the uncommitted edit was restored")
+        try expectEqual(try String(contentsOf: wt.appending(path: "a.txt"), encoding: .utf8),
+                        "wt-side\n", "no trace of main's side")
+        try expectEqual(try rungit(wt, ["stash", "list"]), "", "the stash was popped, not left behind")
+    })
+
+    results.append(check("updateFromBaseStashing: a conflicting pop keeps the stash entry") {
+        let repo = try makeRepo()
+        try rungit(repo, ["worktree", "add", "-q", ".claude/worktrees/wt", "-b", "task/s3"])
+        let wt = repo.appending(path: ".claude/worktrees/wt")
+        // main rewrites a.txt; the worktree has an UNCOMMITTED edit to the same line. The merge
+        // fast-forwards cleanly (the branch itself never touched a.txt) and the POP is what
+        // conflicts.
+        try "main-side\n".write(to: repo.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+        try rungit(repo, ["commit", "-qam", "main edit"])
+        try "my-side\n".write(to: wt.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+
+        let r = runAsyncGit { await WorktreeStager.updateFromBaseStashing(worktreePath: wt.path, baseRef: "main") }
+        try expectEqual(r, .stashConflicted(["a.txt"]), "the merge landed; restoring the work did not")
+        try expect(try rungit(wt, ["stash", "list"]).contains("claudepit"),
+                   "git keeps the entry on a conflicted pop — the user's work is never lost")
+        try expect(try String(contentsOf: wt.appending(path: "a.txt"), encoding: .utf8)
+                       .contains("<<<<<<<"), "conflict markers are in the file to resolve")
+    })
+
+    results.append(check("updateFromBaseStashing: mid-merge worktree is refused, not stashed") {
+        let repo = try makeRepo()
+        try rungit(repo, ["worktree", "add", "-q", ".claude/worktrees/wt", "-b", "task/s4"])
+        let wt = repo.appending(path: ".claude/worktrees/wt")
+        try "main-side\n".write(to: repo.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+        try rungit(repo, ["commit", "-qam", "main edit"])
+        try "wt-side\n".write(to: wt.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+        try rungit(wt, ["commit", "-qam", "wt edit"])
+        _ = runAsyncGit { await WorktreeStager.updateFromBase(worktreePath: wt.path, baseRef: "main") }
+
+        let r = runAsyncGit { await WorktreeStager.updateFromBaseStashing(worktreePath: wt.path, baseRef: "main") }
+        try expectEqual(r, .conflicted(["a.txt"]), "re-entry reports the live merge")
+        try expectEqual(try rungit(wt, ["stash", "list"]), "",
+                        "a conflicted merge is also dirty — it must never be stashed away")
+    })
+
+    // MARK: - Merge agent naming + prompt
+
+    results.append(check("mergeAgentName: task-scoped when we know the task, path-derived when not") {
+        try expectEqual(TaskRunner.mergeAgentName(taskID: "abc123", worktreePath: "/x/task-abc123-thing"),
+                        "task-abc123-merge", "HomeAgents claims the task-<id>- prefix")
+        try expectEqual(TaskRunner.mergeAgentName(taskID: nil, worktreePath: "/x/y/feature-wt"),
+                        "merge-feature-wt", "Worktrees host has no task")
+        try expectEqual(TaskRunner.mergeAgentName(taskID: "", worktreePath: "/x/y/feature-wt"),
+                        "merge-feature-wt", "empty id is no id")
+        // Must not collide with any phase agent, or the pollers would land the task on a status
+        // it never earned.
+        for phase in TaskPhase.allCases {
+            try expect(TaskRunner.agentName(id: "abc123", phase: phase) != "task-abc123-merge",
+                       "\(phase) agent name collides with the merge agent")
+        }
+    })
+
+    results.append(check("mergePrompt: slash-command alone on line 1, one key=value per line") {
+        let p = TaskRunner.mergePrompt(worktreePath: "/w/t", branch: "task/x",
+                                       baseRef: "origin/main", baseBranch: "main")
+        let lines = p.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        try expectEqual(lines.first, "/claudepit-task-merge",
+                        "Claude Code hands everything AFTER line 1 to the command as $ARGUMENTS")
+        for pair in ["worktreePath=/w/t", "baseRef=origin/main", "baseBranch=main", "branch=task/x"] {
+            try expect(lines.contains(pair), "\(pair) is alone on its own line")
+        }
+        try expect(p.contains("## Paths (absolute — use exactly as given)"), "paths header matches phasePrompt")
+        try expect(!p.contains("## Already conflicted"), "no conflict section when there are none")
+
+        let c = TaskRunner.mergePrompt(worktreePath: "/w/t", branch: "task/x",
+                                       baseRef: "origin/main", baseBranch: "main",
+                                       conflicted: ["Sources/A.swift", "Sources/B.swift"])
+        try expect(c.contains("## Already conflicted"), "conflicts are stated when known")
+        try expect(c.contains("- Sources/A.swift") && c.contains("- Sources/B.swift"), "each path listed")
+    })
+
+    results.append(check("the merge command carries the guardrails the deny-list requires") {
+        let b = HookScripts.taskCommandMerge
+        try expect(b.contains("NEVER commit or stage"), "no-commit rule — git add/commit are DENIED in a task worktree")
+        try expect(b.contains("never run `git worktree` commands") || b.contains("never run `git worktree`"),
+                   "worktree rule")
+        try expect(b.contains("swift build --product ClaudepitApp"), "names the build that works on the CLI toolchain")
+        try expect(b.contains("worktreePath=") && b.contains("baseRef=") && b.contains("baseBranch="),
+                   "reads its paths by name, matching mergePrompt's key=value block")
+        try expect(b.contains("Do not use `-u`"), "untracked files are not swept — matches updateFromBaseStashing")
+    })
+
     return results
 }

@@ -91,7 +91,7 @@ func hookScriptsChecks() -> [Bool] {
             try expect(cmd.body.hasPrefix("---\ndescription:"), "\(cmd.filename) has front matter")
             try expect(cmd.filename.hasPrefix("claudepit-task-"), "\(cmd.filename) naming")
         }
-        try expectEqual(HookScripts.taskCommands.count, 6, "five phase commands + the fix variant")
+        try expectEqual(HookScripts.taskCommands.count, 7, "five phase commands + the fix and merge variants")
     })
 
     results.append(check("the fix command keeps the guardrails a findings fix depends on") {

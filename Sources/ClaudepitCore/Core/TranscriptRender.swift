@@ -429,50 +429,24 @@ private func between(_ s: String, _ open: String, _ close: String) -> String? {
 
 // MARK: - Session aggregate stats
 
-public struct ModelStat {
-    public let model: String
-    public var input = 0, output = 0, cacheRead = 0, cacheWrite = 0, messages = 0
-    public init(model: String) { self.model = model }
-    var total: Int { input + output + cacheRead + cacheWrite }
-}
-
+/// Token totals for the context panel under a transcript. One `.turnUsage` per API call (see
+/// `SessionTranscript`), so these are true totals. Everything richer — cost, per-model splits,
+/// cache misses, tools — is the session report's (`SessionReport`).
 public struct SessionStats {
     public var input = 0, output = 0, cacheRead = 0, cacheWrite = 0
-    public var userMessages = 0, assistantMessages = 0, toolCalls = 0
-    public var topTools: [(label: String, count: Int)] = []
-    public var perModel: [ModelStat] = []
+    /// API calls (one `.turnUsage` each).
+    public var assistantMessages = 0
     public var total: Int { input + output + cacheRead + cacheWrite }
     public init() {}
 }
 
 public func sessionStats(_ events: [SessionEvent]) -> SessionStats {
     var s = SessionStats()
-    var models: [String: ModelStat] = [:]
-    var tools: [ToolInvocation] = []
-    for e in events {
-        switch e {
-        case .userMessage(let blocks):
-            let t = blocks.compactMap { if case .text(let s) = $0 { return s } else { return nil } }.joined(separator: "\n")
-            if t.hasPrefix("<command-") || t.hasPrefix("<local-command-") { continue }
-            s.userMessages += 1
-        case .turnUsage(let u):
-            s.assistantMessages += 1
-            s.input += u.inputTokens; s.output += u.outputTokens
-            s.cacheRead += u.cacheReadTokens; s.cacheWrite += u.cacheWriteTokens
-            var m = models[u.model] ?? ModelStat(model: u.model)
-            m.input += u.inputTokens; m.output += u.outputTokens
-            m.cacheRead += u.cacheReadTokens; m.cacheWrite += u.cacheWriteTokens
-            m.messages += 1
-            models[u.model] = m
-        case .tool(let inv):
-            tools.append(inv)
-        default:
-            break
-        }
+    for case .turnUsage(let u) in events {
+        s.assistantMessages += 1
+        s.input += u.inputTokens; s.output += u.outputTokens
+        s.cacheRead += u.cacheReadTokens; s.cacheWrite += u.cacheWriteTokens
     }
-    s.toolCalls = tools.count
-    s.topTools = ToolInvocation.counts(tools)
-    s.perModel = models.values.sorted { $0.total > $1.total }
     return s
 }
 

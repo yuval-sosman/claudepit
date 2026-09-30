@@ -26,6 +26,11 @@ public enum WorktreeUpdateOutcome: Equatable, Sendable {
     case merged
     /// The merge left these paths unmerged; `MERGE_HEAD` is live.
     case conflicted([String])
+    /// `updateFromBaseStashing` only: the base merge LANDED, but restoring the stashed work
+    /// conflicted in these paths. The stash entry is kept — git only drops it on a clean pop
+    /// (verified: a conflicted `stash pop` exits 1 and prints "The stash entry is kept") — so
+    /// nothing is lost even if the user walks away.
+    case stashConflicted([String])
     /// git's own stderr (or stdout when stderr is empty).
     case failed(String)
 }
@@ -200,6 +205,84 @@ public enum WorktreeStager {
         let err = m.err.trimmingCharacters(in: .whitespacesAndNewlines)
         let out = m.out.trimmingCharacters(in: .whitespacesAndNewlines)
         return .failed(err.isEmpty ? (out.isEmpty ? "git merge failed" : out) : err)
+    }
+
+    /// `updateFromBase`, but a dirty tree no longer refuses: stash the tracked changes, merge,
+    /// then restore them. This is the one-click answer to the dead end the plain path leaves —
+    /// "3 uncommitted changes — commit or discard first" is the single most common state of a
+    /// task worktree that is mid-implement and drifting behind its base.
+    ///
+    /// **Every failure path restores the worktree to exactly its prior state.** A conflicted base
+    /// merge aborts and pops, so the user is never left holding both a half-merge and a stash —
+    /// that is a worse dead end than the one this exists to remove, and the Claude merge agent is
+    /// the answer for that case.
+    ///
+    /// Untracked files are deliberately NOT stashed (no `-u`): they never blocked `updateFromBase`
+    /// either, and a task worktree's `.claude/commands/*` are git-excluded, so `-u` would sweep
+    /// them for nothing.
+    public static func updateFromBaseStashing(worktreePath: String, baseRef: String) async -> WorktreeUpdateOutcome {
+        // 1. Already mid-merge? Same verdict as the plain path, and attempt nothing.
+        if await git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], at: worktreePath).ok {
+            let unmerged = await unmergedPaths(worktreePath)
+            return unmerged.isEmpty
+                ? .failed("A merge is already in progress — commit or abort it first")
+                : .conflicted(unmerged)
+        }
+        // 2. Nothing tracked to stash → this IS the plain path. One behaviour for the clean case
+        //    means no caller ever has to decide which function to call.
+        let st = await git(["status", "--porcelain", "--untracked-files=no"], at: worktreePath)
+        if st.out.split(separator: "\n", omittingEmptySubsequences: true).isEmpty {
+            return await updateFromBase(worktreePath: worktreePath, baseRef: baseRef)
+        }
+        // 3. Stash. The exit code cannot be trusted: `git stash push` with nothing to save prints
+        //    "No local changes to save" and exits **0** (verified). Compare the stash ref instead
+        //    — if it did not move, nothing was saved and popping later would restore the WRONG
+        //    entry (or fail), so refuse before touching the branch.
+        let stashBefore = await stashRef(worktreePath)
+        let push = await git(["stash", "push", "--message", "claudepit: update from \(baseRef)"], at: worktreePath)
+        let stashAfter = await stashRef(worktreePath)
+        guard stashAfter != stashBefore, stashAfter != nil else {
+            return .failed(gitMessage(push, fallback: "git stash push saved nothing — the worktree was left untouched"))
+        }
+        // 4. Merge. Decide by HEAD sha, never by matching "Already up to date" (git localizes it).
+        let before = await head(worktreePath)
+        let m = await git(["merge", "--no-edit", baseRef], at: worktreePath)
+        guard m.ok else {
+            // Restore exactly: abort the half-merge, then put the user's work back.
+            let unmerged = await unmergedPaths(worktreePath)
+            _ = await git(["merge", "--abort"], at: worktreePath)
+            let pop = await git(["stash", "pop"], at: worktreePath)
+            if !pop.ok {
+                return .failed(gitMessage(pop, fallback: "the merge was aborted but your stashed changes could not be restored — they are safe in `git stash list`"))
+            }
+            if !unmerged.isEmpty { return .conflicted(unmerged) }
+            return .failed(gitMessage(m, fallback: "git merge failed"))
+        }
+        let after = await head(worktreePath)
+        // 5. Restore. A conflicted pop KEEPS the stash entry, so the user's work survives even if
+        //    they abandon the conflict half-resolved.
+        let pop = await git(["stash", "pop"], at: worktreePath)
+        if !pop.ok {
+            let unmerged = await unmergedPaths(worktreePath)
+            if !unmerged.isEmpty { return .stashConflicted(unmerged) }
+            return .failed(gitMessage(pop, fallback: "merged \(baseRef), but your stashed changes could not be restored — they are safe in `git stash list`"))
+        }
+        return before == after ? .upToDate : .merged
+    }
+
+    /// The current stash tip, or nil when the stash is empty.
+    private static func stashRef(_ dir: String) async -> String? {
+        let r = await git(["rev-parse", "--quiet", "--verify", "refs/stash"], at: dir)
+        let sha = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (r.ok && !sha.isEmpty) ? sha : nil
+    }
+
+    /// git's own words for a failure — stderr, else stdout, else the caller's fallback.
+    private static func gitMessage(_ r: (ok: Bool, out: String, err: String), fallback: String) -> String {
+        let err = r.err.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !err.isEmpty { return err }
+        let out = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.isEmpty ? fallback : out
     }
 
     /// `git merge --abort`. Matches the (ok, message) convention of `unlock`/`remove`.

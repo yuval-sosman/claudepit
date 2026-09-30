@@ -7,6 +7,10 @@ public struct SessionTranscript: @unchecked Sendable {
     private var toolIndexByID: [String: Int] = [:]   // tool_use_id → index into events
     private var partialBytes = Data()                 // leftover bytes not yet ending in \n
     private var lastModel: String = ""                // most recent real API model, for compact_boundary
+    /// `message.id + requestId` → index of that API call's `.turnUsage` event. Claude Code writes
+    /// one line per content block, each repeating the call's usage (earlier lines with partial
+    /// output counts), so appending one event per line double-counted every total built on them.
+    private var usageIndexByCall: [String: Int] = [:]
 
     public init() {}
 
@@ -108,12 +112,21 @@ public struct SessionTranscript: @unchecked Sendable {
             if let model = m["model"] as? String, model != "<synthetic>",
                let u = m["usage"] as? [String: Any] {
                 lastModel = model
-                events.append(.turnUsage(TurnUsage(
+                let usage = TurnUsage(
                     inputTokens: u["input_tokens"] as? Int ?? 0,
                     outputTokens: u["output_tokens"] as? Int ?? 0,
                     cacheReadTokens: u["cache_read_input_tokens"] as? Int ?? 0,
                     cacheWriteTokens: u["cache_creation_input_tokens"] as? Int ?? 0,
-                    model: model)))
+                    model: model)
+                // One event per API call: a later line of the same call replaces the event in
+                // place, keeping the line with the most output (the complete count).
+                let key = (m["id"] as? String).map { "\($0)|\(obj["requestId"] as? String ?? "")" }
+                if let key, let idx = usageIndexByCall[key], case .turnUsage(let old) = events[idx] {
+                    if usage.outputTokens >= old.outputTokens { events[idx] = .turnUsage(usage) }
+                } else {
+                    if let key { usageIndexByCall[key] = events.count }
+                    events.append(.turnUsage(usage))
+                }
             }
         case "system":
             if let c = obj["content"] as? String { events.append(.systemNote(c)) }

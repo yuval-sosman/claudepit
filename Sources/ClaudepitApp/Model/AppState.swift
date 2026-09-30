@@ -123,6 +123,25 @@ final class AppState: ObservableObject {
     @Published private(set) var claudeVersion: String?
     @Published private(set) var isRefreshingUsage = false
     private var lastUsageRefreshAttempt: Date?
+    /// Usage counted from the transcripts themselves, one summary per Home period, for the
+    /// scope Home shows. `projectUsagePath` records which project `.project` counted, so a
+    /// project switch never shows the previous project's numbers while the new scan runs.
+    @Published private(set) var projectUsage: [UsageScope: [UsagePeriod: ProjectUsageSummary]] = [:]
+    @Published private(set) var projectUsagePath: URL?
+    @Published private(set) var isScanningProjectUsage = false
+    /// Home's scope switch. Stored here (not in the view) because it decides what the watcher-
+    /// driven rescan counts; all projects is only ever scanned once someone asks for it.
+    @Published var usageScope: UsageScope = UsageScope(
+        rawValue: UserDefaults.standard.string(forKey: "homeUsageScope") ?? "") ?? .project {
+        didSet {
+            guard usageScope != oldValue else { return }
+            UserDefaults.standard.set(usageScope.rawValue, forKey: "homeUsageScope")
+            reloadProjectUsage()
+        }
+    }
+    /// Owns the per-file digest cache, so a rescan re-reads only transcripts that changed.
+    private let projectUsageScanner = ProjectUsageScanner()
+    private var projectUsageRescanPending = false
     @Published var worktrees: [WorktreeInfo] = []
     @Published var focusWorktreeName: String?   // set to jump the Worktrees page to a specific worktree
     @Published var autoOpenReviewWorktree: String?   // one-shot: auto-present a worktree's Source Control sheet after focusing
@@ -396,6 +415,50 @@ final class AppState: ObservableObject {
         return result
     }
 
+    /// Recount usage for the current `usageScope` from the transcripts, off the main actor.
+    /// Coalesced: a call while a scan runs schedules exactly one more once it lands, since the
+    /// watcher can fire in bursts while an agent writes. Cheap after the first scan — unchanged
+    /// files come from the scanner's cache, so a rescan costs a stat per transcript plus the ones
+    /// growing.
+    func reloadProjectUsage() {
+        let scope = usageScope
+        let base = activePath
+        if scope == .project && base == nil {
+            projectUsage[.project] = nil
+            projectUsagePath = nil
+            return
+        }
+        if isScanningProjectUsage {
+            projectUsageRescanPending = true
+            return
+        }
+        isScanningProjectUsage = true
+        if scope == .project, projectUsagePath != base { projectUsage[.project] = nil }
+        let scanner = projectUsageScanner
+        Task { [weak self] in
+            let summaries = await Task.detached(priority: .utility) {
+                let now = Date()
+                let since = UsagePeriod.allCases.map { $0.window(now: now).start }.min() ?? now
+                let digest = scanner.digest(for: scope == .project ? base : nil, since: since)
+                return Dictionary(uniqueKeysWithValues: UsagePeriod.allCases.map {
+                    ($0, ProjectUsageSummary.build(digest, window: $0.window(now: now)))
+                })
+            }.value
+            guard let self else { return }
+            self.isScanningProjectUsage = false
+            let stale = self.usageScope != scope || (scope == .project && self.activePath != base)
+            if !stale {
+                self.projectUsage[scope] = summaries
+                if scope == .project { self.projectUsagePath = base }
+            }
+            // The scope or project changed mid-scan, or the watcher fired again: count once more.
+            if stale || self.projectUsageRescanPending {
+                self.projectUsageRescanPending = false
+                self.reloadProjectUsage()
+            }
+        }
+    }
+
     func reload() {
         store.reload(activePath: activePath)
         reloadSessions()
@@ -419,6 +482,9 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 self.sessions = result
                 self.reloadWorktrees()
+                // Only Home shows project usage, and new transcript activity is what just
+                // triggered this reload — elsewhere, Home's onAppear catches up.
+                if self.selected == .home { self.reloadProjectUsage() }
             }
         }
         refreshHerdrAgents()
@@ -917,6 +983,38 @@ final class AppState: ObservableObject {
                 _ = await WorktreeStager.remove(worktreePath: wt.path, force: true)
                 await MainActor.run { self.reloadWorktrees() }
             }
+        }
+    }
+
+    /// Name of any herdr agent whose cwd is this checkout, or nil when none is.
+    ///
+    /// No subprocess: `Herdr.AgentEntry` already carries `cwd` and `herdrAgents` is the poller's
+    /// cached list, so this is safe to read from a view body (the rule that
+    /// `Executable.find`/`Herdr.available()` exist to protect).
+    ///
+    /// Both `UpdateFromBaseControl` hosts guard on a *proxy* for this — `wt.isActive`/lock state
+    /// in Worktrees, `task.status` in the task panel — and neither sees the one-off merge agent,
+    /// which belongs to no task phase and takes no worktree lock.
+    func worktreeAgentName(path: String) -> String? {
+        guard !path.isEmpty else { return nil }
+        return herdrAgents.first { $0.cwd == path }?.name
+    }
+
+    /// Open a Claude agent in herdr to merge a worktree's base branch into it. `done` reports
+    /// whether it actually started, so a disabled command or a missing herdr surfaces as a
+    /// message instead of a button that silently does nothing.
+    func openMergeAgent(worktreePath: String, branch: String, baseRef: String, baseBranch: String,
+                        taskID: String?, conflicted: [String] = [],
+                        done: @MainActor @escaping (Bool) -> Void = { _ in }) {
+        guard let base = activePath else { done(false); return }
+        Task {
+            let ok = await TaskRunner.shared.openMergeAgent(
+                worktreePath: worktreePath, branch: branch, baseRef: baseRef,
+                baseBranch: baseBranch, taskID: taskID, projectRoot: base, conflicted: conflicted)
+            // Core selects the pane; this raises the terminal window. Doing only the first half
+            // is indistinguishable from the button being broken.
+            if ok { activateHerdrHost() }
+            done(ok)
         }
     }
 

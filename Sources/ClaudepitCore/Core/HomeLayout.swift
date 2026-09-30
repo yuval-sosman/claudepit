@@ -11,11 +11,26 @@ public enum HomeLayout {
     /// Right column never narrows past this; plan names and session titles need the room.
     public static let minRightColumnWidth: CGFloat = 300
     /// Share of the usable width the right column asks for before the floor applies.
-    /// 0.45 (was 0.40) since the Claude Code card grew the year heatmap and model charts —
-    /// the extra width goes straight into heatmap cell size.
+    /// 0.45 (was 0.40): the right column carries the number cards — limits, usage (six tiles and
+    /// a cost chart) and the year heatmap — and the extra width goes into tiles and heatmap cells.
     public static let rightColumnFraction: CGFloat = 0.45
 
     public static func isTwoColumn(width: CGFloat) -> Bool { width >= twoColumnMinWidth }
+
+    /// Columns for `count` stat tiles in balanced rows: the fewest rows the width allows, then
+    /// the fewest columns that keep that many rows — 6 across, 3 + 3 or 2 + 2 + 2, never 5 + 1.
+    ///
+    /// SwiftUI measures with an **unlimited** proposal too (a lazy stack sizing its children
+    /// ideally proposes `.infinity`), and `Int(.infinity)` traps — that crashed Home on open. A
+    /// width that isn't finite means "no limit": everything goes in one row.
+    public static func balancedColumns(width: CGFloat, count: Int, minWidth: CGFloat,
+                                       spacing: CGFloat) -> Int {
+        guard count > 0 else { return 1 }
+        guard width.isFinite else { return count }
+        let fit = max(1, Int(max(0, width + spacing) / (minWidth + spacing)))
+        let rows = (count + fit - 1) / fit
+        return (count + rows - 1) / rows
+    }
 
     /// Column widths for `width`, or `nil` when the layout should stack into one column.
     /// `left + columnSpacing + right == width`.

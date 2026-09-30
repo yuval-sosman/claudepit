@@ -238,7 +238,8 @@ struct TaskDetailView: View {
                     externallyDisabled: false,
                     disabledReason: (task.status == .running || task.status == .blocked)
                         ? UpdateFromBaseControl.liveAgentReason : nil,
-                    autoStartFromPending: true)
+                    autoStartFromPending: true,
+                    taskID: task.id)
             } else {
                 Text("Worktree not found in the current scan")
                     .font(.caption).foregroundStyle(.secondary)

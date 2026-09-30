@@ -325,6 +325,107 @@ public actor TaskRunner {
         commands.contains { $0.filename == commandFilename(for: phase) }
     }
 
+    // MARK: - Merge agent (one-off, not a phase)
+
+    /// The command file the merge agent invokes. Not derived from a `TaskPhase` — merging is not
+    /// a pipeline phase, and adding one would ripple into the board columns, Home's pipeline,
+    /// `expectedArtifact` and `CardState` for no gain.
+    public static let mergeCommandFilename = "claudepit-task-merge.md"
+
+    /// Agent name for a one-off merge. Deliberately OUTSIDE the `TaskPhase` namespace that
+    /// `agentName(id:phase:)` produces, so `resolveRunning`/`resolveBlocked` — which look up the
+    /// task's *current phase* name — can never mistake a merge agent for a phase agent and land
+    /// the task on a status it did not earn. The `task-<id>-` prefix is kept when we know the
+    /// task, because `HomeAgents.resolveTarget` claims that prefix and the merge genuinely does
+    /// belong to that task in Home's Live Agents list.
+    public static func mergeAgentName(taskID: String?, worktreePath: String) -> String {
+        if let id = taskID, !id.isEmpty { return "task-\(id)-merge" }
+        return "merge-\(URL(filePath: worktreePath).lastPathComponent)"
+    }
+
+    /// The merge agent's brief. Same contract as `phasePrompt`: the slash-command **alone on line
+    /// 1** (Claude Code hands everything after it to the command as `$ARGUMENTS`), then prose,
+    /// then one `key=value` per line under `## Paths` — every command body reads its paths by
+    /// name, so the pairs must never be packed back onto line 1.
+    public static func mergePrompt(worktreePath: String, branch: String, baseRef: String,
+                                   baseBranch: String, conflicted: [String] = []) -> String {
+        var out: [String] = []
+        out.append("/claudepit-task-merge")
+        out.append("")
+        out.append("That slash-command is your only instruction set for this job.")
+        out.append("")
+        out.append("## Job")
+        out.append("Bring this worktree up to date with `\(baseBranch)` and resolve whatever gets "
+                 + "in the way. Claudepit's one-click update could not do it unattended.")
+        if !conflicted.isEmpty {
+            out.append("")
+            out.append("## Already conflicted")
+            out.append("A merge is in progress and these paths are unmerged:")
+            out += conflicted.map { "- \($0)" }
+        }
+        out.append("")
+        out.append("## Paths (absolute — use exactly as given)")
+        out.append("worktreePath=\(worktreePath)")
+        out.append("baseRef=\(baseRef)")
+        out.append("baseBranch=\(baseBranch)")
+        out.append("branch=\(branch)")
+        return out.joined(separator: "\n")
+    }
+
+    /// Open an interactive Claude agent in a herdr pane to merge `baseRef` into this worktree.
+    ///
+    /// A hand-off, like `openInHerdr`: no `--wait`, nothing observes it, and it never touches
+    /// task status — a merge is not a phase, and marking the task `.running` would hand it to the
+    /// pollers, which would then land it on a phase result it never produced.
+    ///
+    /// Returns false when the command is switched off or herdr never brought the agent up, so the
+    /// caller can say so instead of leaving the user staring at a button that did nothing.
+    @discardableResult
+    public func openMergeAgent(worktreePath: String, branch: String, baseRef: String,
+                               baseBranch: String, taskID: String?, projectRoot: URL,
+                               conflicted: [String] = []) async -> Bool {
+        let name = Self.mergeAgentName(taskID: taskID, worktreePath: worktreePath)
+        guard !launching.contains(name) else { return false }
+        launching.insert(name)
+        defer { launching.remove(name) }
+
+        // This worktree may predate the merge command — `ensureWorktree`'s self-heal is not on
+        // this path, and an agent handed a `/` command that exists nowhere just sits there.
+        let commands = Self.taskCommands(for: projectRoot)
+        guard commands.contains(where: { $0.filename == Self.mergeCommandFilename }) else { return false }
+        Self.installCommands(inWorktree: worktreePath, commands: commands)
+
+        // Already live? Navigate, don't re-prompt — the same rule `openInHerdr` follows, so
+        // repeated clicks don't spam a session that is mid-merge.
+        if await agentReady(name) {
+            await HerdrFocus.focus(agentName: name, tabID: nil, cwd: URL(filePath: worktreePath))
+            return true
+        }
+        await releaseAgentName(name)
+        let cwd = URL(filePath: worktreePath)
+        // Its OWN tab. Never `openPhaseTab`: that closes the task's stored tab and overwrites
+        // `worktree.paneID`/`tabID`, which is the bookkeeping every phase focus depends on.
+        guard let fresh = await Herdr.tabCreate(cwd: cwd, label: "merge-\(branch)") else { return false }
+        // User-initiated, so focus it (unlike an armed auto-run, which must not steal focus).
+        await herdr(["tab", "focus", fresh.tabID], cwd: nil)
+        let pane = fresh.paneID
+        // A freshly-created pane may not be at its shell prompt yet; `agent start` fails detection
+        // until it is. Same 5×2s ceiling as startAgent.
+        for attempt in 0..<5 {
+            await herdr(["agent", "start", name, "--kind", "claude", "--pane", pane,
+                         "--timeout", "120000", "--", "--permission-mode", "auto"],
+                        cwd: cwd, timeout: Self.ceiling(forHerdrTimeoutMS: "120000"))
+            if await agentReady(name) { break }
+            if attempt < 4 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
+        }
+        guard await agentReady(name) else { return false }
+        let prompt = Self.mergePrompt(worktreePath: worktreePath, branch: branch,
+                                      baseRef: baseRef, baseBranch: baseBranch,
+                                      conflicted: conflicted)
+        await herdr(["agent", "prompt", name, prompt], cwd: cwd)
+        return true
+    }
+
     // MARK: - Worktree
 
     /// Reuse the task's worktree if it exists + is a valid git repo, else create one.

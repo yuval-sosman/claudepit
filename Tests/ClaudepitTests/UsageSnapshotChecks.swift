@@ -183,17 +183,6 @@ func usageSnapshotChecks() -> [Bool] {
         try expectEqual(StatsCache.parseDaily(root: statsRoot(legacy)).count, 0, "no rows")
     })
 
-    results.append(check("StatsCache.today matches the row for now's calendar day") {
-        let days = StatsCache.parseDaily(root: statsRoot(statsJSON))
-        let hit = StatsCache.today(days, now: noonUTC(2026, 9, 7), calendar: utc)
-        try expectEqual(hit?.messageCount, 4, "2026-09-07 row")
-    })
-
-    results.append(check("StatsCache.today returns nil when the CLI wrote no row for today") {
-        let days = StatsCache.parseDaily(root: statsRoot(statsJSON))
-        try expect(StatsCache.today(days, now: noonUTC(2026, 9, 9), calendar: utc) == nil, "no row")
-    })
-
     results.append(check("gauges list session, week, then each model-scoped week") {
         let snap = UsageSnapshot(
             fetchedAt: Date(timeIntervalSince1970: 0),

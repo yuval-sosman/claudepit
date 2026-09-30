@@ -46,11 +46,11 @@ func statsSnapshotChecks() -> [Bool] {
     func daysOnly(_ dates: [String]) -> StatsSnapshot {
         StatsSnapshot(days: dates.map {
             StatsCacheDay(date: $0, messageCount: 1, sessionCount: 1, toolCallCount: 0)
-        }, dailyModelTokens: [], modelTotals: [:], totalSessions: 0, totalMessages: 0,
+        }, totalSessions: 0, totalMessages: 0,
            longestSession: nil, firstSessionDate: nil, hourCounts: [:])
     }
 
-    results.append(check("parseSnapshot reads every v5 key") {
+    results.append(check("parseSnapshot reads the activity keys of the v5 cache") {
         let snap = snapshot()
         try expectEqual(snap.days.count, 4, "activity days")
         try expectEqual(snap.totalSessions, 55, "sessions")
@@ -59,27 +59,13 @@ func statsSnapshotChecks() -> [Bool] {
                         LongestSession(durationMs: 58689896, messageCount: 433), "longest")
         try expectEqual(snap.firstSessionDate, "2026-09-06T18:31:06.340Z", "first session")
         try expectEqual(snap.hourCounts[15], 26, "hour counts keyed by Int")
-        try expectEqual(snap.dailyModelTokens.count, 2, "daily model tokens")
-        try expectEqual(snap.dailyModelTokens[0].tokensByModel["claude-sonnet-5"], 50, "day tokens")
-        try expectEqual(snap.modelTotals["claude-opus-5"],
-                        ModelTotals(inputTokens: 10, outputTokens: 20,
-                                    cacheReadTokens: 30, cacheCreationTokens: 40), "model totals")
     })
 
     results.append(check("an empty or older-schema root parses to an empty snapshot, not nil") {
         let snap = snapshot("{}")
         try expectEqual(snap.days.count, 0, "no days")
         try expectEqual(snap.totalSessions, 0, "zero sessions")
-        try expect(snap.longestSession == nil && snap.favoriteModel == nil, "empty derivations")
-    })
-
-    results.append(check("favoriteModel is the largest total-token model, totalTokens the sum") {
-        let snap = snapshot()
-        try expectEqual(snap.favoriteModel, "claude-opus-5", "favorite")
-        try expectEqual(snap.totalTokens, 110, "100 + 10")
-        try expectEqual(snap.aggregateTotals,
-                        ModelTotals(inputTokens: 11, outputTokens: 22,
-                                    cacheReadTokens: 33, cacheCreationTokens: 44), "field-wise sum")
+        try expect(snap.longestSession == nil && snap.peakHour == nil, "empty derivations")
     })
 
     results.append(check("mostActiveDay and peakHour pick the maxima") {

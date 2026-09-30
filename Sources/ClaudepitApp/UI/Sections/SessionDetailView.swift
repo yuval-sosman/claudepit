@@ -18,7 +18,6 @@ struct SessionDetailView: View {
     @State private var cachedStats: SessionStats = .init()
     @State private var activeFilters: Set<TimelineMarker.Kind> = []
     @State private var allExpanded = false
-    @State private var showStats = false
     @State private var contextReport: String?   // nil = not loaded; set → show popover
     @State private var loadingContext = false
     /// Bumped when Expand/Collapse All is pressed; rows react via .onChange. Resets on re-entry.
@@ -26,6 +25,10 @@ struct SessionDetailView: View {
     @State private var showSummary = false
     @State private var isGeneratingSummary = false
     @StateObject private var tailer = SessionTailer()
+    /// The report sheet's subject, set on tap. Sized once at tap time from the main window, like
+    /// the Source Control sheet — `keyWindow` becomes the sheet itself once it opens.
+    @State private var reportRequest: SessionReportRequest?
+    @State private var reportSheetSize = CGSize(width: 900, height: 600)
 
     struct ExpandCommand: Equatable { var token: Int; var expand: Bool }
 
@@ -160,13 +163,23 @@ struct SessionDetailView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
 
-                Button { showStats.toggle() } label: {
-                    Image(systemName: "chart.bar.fill").font(.system(size: 14))
+                // The full report opens as a sheet over the app, sized like Source Control.
+                // A subagent's calls are part of its parent's report (one subagent row there).
+                Button {
+                    if let f = (NSApp.mainWindow ?? NSApp.keyWindow)?.frame, f.width > 200, f.height > 200 {
+                        reportSheetSize = CGSize(width: max(760, f.width * 0.92), height: max(520, f.height * 0.92))
+                    }
+                    reportRequest = SessionReportRequest(session: parentSummary ?? summary)
+                } label: {
+                    Label("Report", systemImage: "chart.bar.xaxis")
+                        .labelStyle(.titleAndIcon).font(.caption)
                 }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
-                .help("Session info")
-                .popover(isPresented: $showStats, arrowEdge: .bottom) {
-                    SessionStatsView(stats: cachedStats).frame(width: 420)
+                .help(parentSummary == nil ? "Usage report: cost, context, cache misses, subagents, tools"
+                                           : "Usage report for the parent session, this subagent included")
+                .sheet(item: $reportRequest) { request in
+                    SessionReportView(request: request)
+                        .frame(width: reportSheetSize.width, height: reportSheetSize.height)
                 }
             }
             .padding(.bottom, 8)
@@ -1012,82 +1025,6 @@ private struct ContextReportView: View {
     }
 }
 
-/// Aggregate session stats popover: token usage, per-model, messages, tools.
-private struct SessionStatsView: View {
-    let stats: SessionStats
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .top, spacing: 20) {
-                    tokenUsage
-                    modelDetails
-                }
-                Divider()
-                messagesAndTools
-            }
-            .padding(16)
-        }
-        .frame(maxHeight: 460)
-    }
-
-    private var tokenUsage: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Token Usage").font(.headline)
-            row("Input", stats.input)
-            row("Output", stats.output)
-            row("Cache read", stats.cacheRead)
-            row("Cache write", stats.cacheWrite)
-            Divider()
-            row("Total", stats.total, bold: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var modelDetails: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Model Details").font(.headline)
-            ForEach(stats.perModel, id: \.model) { m in
-                VStack(alignment: .leading, spacing: 2) {
-                    ModelBadge(model: m.model)
-                    Text("In: \(m.input.formatted()) · Out: \(m.output.formatted())")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("Cache read: \(m.cacheRead.formatted()) · write: \(m.cacheWrite.formatted())")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("\(m.messages) message\(m.messages == 1 ? "" : "s")")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var messagesAndTools: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Messages & Tools").font(.headline)
-            row("Your messages", stats.userMessages)
-            row("Assistant messages", stats.assistantMessages)
-            row("Tool calls", stats.toolCalls)
-            if !stats.topTools.isEmpty {
-                Text(stats.topTools.prefix(8).map { "\($0.label) ×\($0.count)" }.joined(separator: "   "))
-                    .font(.caption.monospaced()).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true).padding(.top, 2)
-            }
-        }
-    }
-
-    private func row(_ label: String, _ value: Int, bold: Bool = false) -> some View {
-        HStack {
-            Text(label).fontWeight(bold ? .bold : .regular)
-            Spacer()
-            Text(value.formatted()).fontWeight(bold ? .bold : .regular).monospacedDigit()
-        }
-        .font(.callout)
-    }
-}
-
 /// Small colored pill naming the model that produced a response. Color-coded by model
 /// family (not by config scope — see `ManagedBadge`'s scope palette, which this
 /// deliberately avoids) so a session or subagent transcript that switches models mid-way
@@ -1110,14 +1047,31 @@ struct ModelBadge: View {
     private var color: Color { ModelBadge.color(for: model) }
 
     /// One family→color mapping for every surface that tints by model (this badge, Home's
-    /// model-token bars), so the same model never wears two colors in one window.
+    /// model-token bars and cost breakdown), so the same model never wears two colors in one
+    /// window. The hues are the old system ones (pink, cyan, mint, indigo) stepped for the dark
+    /// surface: Sonnet's cyan and Haiku's mint were too close to tell apart side by side.
+    /// Checked as a categorical palette on the card surface in `familyOrder`, the order Home
+    /// stacks them in — re-check both if either changes.
     static func color(for model: String) -> Color {
+        switch family(model) {
+        case "fable", "mythos": return rgb(0x90, 0x85, 0xE9)   // violet
+        case "opus":            return rgb(0xD5, 0x51, 0x81)   // magenta
+        case "sonnet":          return rgb(0x39, 0x87, 0xE5)   // blue
+        case "haiku":           return rgb(0x19, 0x9E, 0x70)   // aqua
+        default:                return .gray
+        }
+    }
+
+    /// Stacking order for segments colored by `color(for:)`, biggest tier first.
+    static let familyOrder = ["fable", "mythos", "opus", "sonnet", "haiku"]
+
+    static func family(_ model: String) -> String {
         let m = model.lowercased()
-        if m.contains("opus") { return .pink }
-        if m.contains("sonnet") { return .cyan }
-        if m.contains("haiku") { return .mint }
-        if m.contains("fable") { return .indigo }
-        return .gray
+        return familyOrder.first { m.contains($0) } ?? ""
+    }
+
+    private static func rgb(_ r: Int, _ g: Int, _ b: Int) -> Color {
+        Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
     }
 }
 

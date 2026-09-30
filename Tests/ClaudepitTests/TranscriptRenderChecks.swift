@@ -256,7 +256,7 @@ func transcriptRenderChecks() -> [Bool] {
         try? FileManager.default.removeItem(at: tmp)
     })
 
-    results.append(check("sessionStats aggregates tokens, models, messages, tools") {
+    results.append(check("sessionStats totals tokens and counts API calls") {
         let events: [SessionEvent] = [
             .userMessage([.text("hello")]),
             .assistantText("hi"),
@@ -270,12 +270,7 @@ func transcriptRenderChecks() -> [Bool] {
         try expectEqual(s.output, 1410, "total output")
         try expectEqual(s.cacheRead, 82247, "cache read")
         try expectEqual(s.total, 223 + 1410 + 82247 + 12642, "grand total")
-        try expectEqual(s.userMessages, 2, "user messages")
         try expectEqual(s.assistantMessages, 2, "assistant messages = turnUsage count")
-        try expectEqual(s.toolCalls, 1, "tool calls")
-        try expectEqual(s.perModel.count, 2, "two models")
-        try expectEqual(s.perModel[0].model, "claude-opus-4-8", "opus first (most tokens)")
-        try expectEqual(s.perModel[0].messages, 1, "opus msg count")
     })
 
     results.append(check("responseUsageSummaries collapses consecutive turnUsage per response") {

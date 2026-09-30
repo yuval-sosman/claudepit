@@ -72,6 +72,25 @@ func sessionTranscriptChecks() -> [Bool] {
         try expectEqual(txt, "hi 🎉", "emoji intact across chunk boundary")
     })
 
+    results.append(check("SessionTranscript: one turnUsage per API call, not per line") {
+        // Claude Code writes one line per content block, each repeating the call's usage;
+        // earlier lines carry partial output counts.
+        func line(_ block: String, output: Int) -> String {
+            #"{"type":"assistant","requestId":"r1","message":{"id":"m1","model":"claude-opus-5-5","content":[\#(block)],"usage":{"input_tokens":3,"output_tokens":\#(output),"cache_read_input_tokens":900,"cache_creation_input_tokens":40}},"timestamp":"2026-07-28T10:00:01.000Z"}"#
+        }
+        let jsonl = [line(#"{"type":"text","text":"on it"}"#, output: 2),
+                     line(#"{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"ls"}}"#, output: 57)]
+            .joined(separator: "\n") + "\n"
+        var t = SessionTranscript()
+        let e = t.parse(data: Data(jsonl.utf8))
+        let usages = e.compactMap { if case .turnUsage(let u) = $0 { return u } else { return nil } }
+        try expectEqual(usages.count, 1, "one call")
+        try expectEqual(usages.first?.outputTokens, 57, "complete output count")
+        let stats = sessionStats(e)
+        try expectEqual(stats.cacheRead, 900, "cache read not doubled")
+        try expectEqual(stats.assistantMessages, 1, "one assistant message")
+    })
+
     results.append(check("SessionTranscript emits turnUsage from assistant usage, skips synthetic") {
         let jsonl = """
         {"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":12,"output_tokens":1388,"cache_read_input_tokens":82247,"cache_creation_input_tokens":12642}},"timestamp":"t"}
