@@ -86,6 +86,31 @@ func hookScriptsChecks() -> [Bool] {
         try expect(p.contains("No memory pass means no log entry"), "log section covers the skip case")
     })
 
+    results.append(check("the summary hook injects per-turn state only; the rules live in the rules file") {
+        let hook = HookScripts.summaryHook
+        guard let start = hook.range(of: "INSTRUCTION=\""),
+              let end = hook.range(of: "</claudepit_summary_instruction>\"") else {
+            throw CheckFailure(message: "instruction block not found")
+        }
+        let block = String(hook[start.upperBound..<end.lowerBound])
+        try expect(block.contains("${CURRENT_BULLETS}") && block.contains("${SUMMARY_FILE_PATH}")
+                   && block.contains("${NOW}"), "bullets, path and timestamp stay per turn")
+        try expect(block.contains("\\\"bullets\\\""), "the JSON shape stays per turn — SummaryStore parses it")
+        try expect(block.contains("Session Summary rules"), "points at the rules file")
+        try expect(!block.contains("Max 15"), "no static rule re-injected per prompt")
+        try expect(block.count < 400, "per-turn block stays small (\(block.count) chars)")
+    })
+
+    results.append(check("the rules file and the on-demand summary share one copy of the bullet rules") {
+        try expect(HookScripts.summaryRulesPrompt.contains(HookScripts.summaryBulletRules), "rules file")
+        try expect(HookScripts.onDemandSummaryPrompt(transcriptText: "x").contains(HookScripts.summaryBulletRules),
+                   "on-demand prompt")
+        try expect(HookScripts.summaryRulesPrompt.contains("<claudepit_summary_instruction>"),
+                   "names the block it pairs with")
+        try expect(HookScripts.summaryBulletRules.contains("If the session has made no code"),
+                   "one-bullet rule is session-scoped")
+    })
+
     results.append(check("task command bodies are non-empty and carry their front matter") {
         for cmd in HookScripts.taskCommands {
             try expect(cmd.body.hasPrefix("---\ndescription:"), "\(cmd.filename) has front matter")
@@ -96,7 +121,7 @@ func hookScriptsChecks() -> [Bool] {
 
     results.append(check("the fix command keeps the guardrails a findings fix depends on") {
         let b = HookScripts.taskCommandFix
-        try expect(b.contains("NEVER commit or stage"), "no-commit rule")
+        try expect(b.contains("Don't stage or commit"), "no-commit rule")
         try expect(b.contains("never create another worktree"), "worktree rule")
         try expect(b.contains("Scope is the finding list, and nothing else"), "scope rule")
         try expect(b.contains("Unrequested changes are a defect"), "no drive-by changes")
@@ -109,7 +134,7 @@ func hookScriptsChecks() -> [Bool] {
     results.append(check("the review command specifies the structured findings block") {
         let b = HookScripts.taskCommandReview
         // Written INTO review.md, not just printed: the app parses the file, because scrollback is
-        // a 400-line window that a long review overruns.
+        // a fixed-length window that a long review overruns.
         try expect(b.contains("out of the file"), "says the block is read from the file")
         try expect(b.contains("must be written\ninto `reviewPath` — not only printed"), "says write, not just print")
         for field in ["`ruleId`", "`severity`", "`category`", "`title`", "`locations`",

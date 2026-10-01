@@ -24,17 +24,15 @@ task produces is read against the finding list and nothing else.
 You are already inside the task's git worktree: never create another worktree or branch, never
 run git worktree commands, and never dispatch a subagent in worktree isolation.
 
-**NEVER commit or stage. This is a HARD rule, no exceptions:**
-- Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
-  `git add -A && git commit -m ...`). These commands are DENIED and will fail.
-- Leave EVERY change unstaged in the working tree. The user reviews and commits from Claudepit's
-  Review Changes (Source Control) sheet — that is the ONLY place commits happen.
-- `git status`, `git diff`, and reads are fine; anything that stages or commits is not.
+**Don't stage or commit.** `git add`, `git commit`, `git stage` and `git push` — alone or combined —
+are denied in this worktree and will fail. Leave every change unstaged: the user reviews and
+commits from Claudepit's Review Changes (Source Control) sheet, the only place commits happen.
+`git status`, `git diff` and reads are fine.
 
 ## How to execute
 
 Create one todo per finding and work them in the order given (high severity first). These are
-small, related fixes in code you can see, so do them yourself — reserve the Task tool for a
+small, related fixes in code you can see, so do them yourself — reserve the Agent tool for a
 finding that turns out to be a genuine piece of work, and then brief that subagent with the
 finding's full text, the hard rules above, and a DONE/BLOCKED report contract. Never dispatch two
 implementers in parallel: they share this worktree and will conflict.
@@ -53,8 +51,7 @@ product behavior, or one that implies a scope change.
 
 ## Close-out — evidence before claims
 
-The iron law: NO COMPLETION CLAIM WITHOUT FRESH EVIDENCE. If you did not run the command in this
-session and read its output, you cannot claim it passes.
+Claim only what you verified: a check passes when you ran it in this session and read its output.
 1. **Reality check** — `git status --porcelain` and `git diff --stat`: the diff contains the
    fixes and nothing else.
 2. **Build** — run the project's full build; evidence is exit 0.

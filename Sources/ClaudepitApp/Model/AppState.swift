@@ -478,6 +478,9 @@ final class AppState: ObservableObject {
     }
 
     func reload() {
+        // Before the store rescans, so the Rules page lists the restored file. This is what makes
+        // a direct edit to an installed rules file revert at once: the watcher below fires reload().
+        if let base = activePath { ManagedInstaller(appConfig: appConfig, base: base).syncRuleFiles() }
         store.reload(activePath: activePath)
         reloadSessions()
         reloadMemory()
@@ -1044,6 +1047,29 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Memory files Claude stops reading partway through, root first — what the Memory page
+    /// flags and what the fix agent is asked to split.
+    var oversizedMemoryFiles: [MemoryNode] {
+        memoryGraph.nodes.filter(\.exceedsReadLimit)
+            .sorted { a, b in a.isRoot != b.isRoot ? a.isRoot : a.id < b.id }
+    }
+
+    /// Open a Claude agent in herdr briefed to split and trim the oversized memory files.
+    /// `done` reports whether it started, so a missing herdr surfaces as a message.
+    func openMemoryFixAgent(done: @MainActor @escaping (Bool) -> Void = { _ in }) {
+        let files = oversizedMemoryFiles.compactMap { node in
+            node.size.map { MemoryReadLimit.Oversized(filename: node.id, size: $0) }
+        }
+        guard let base = activePath, !files.isEmpty else { done(false); return }
+        let prompt = MemoryReadLimit.fixPrompt(
+            memoryDir: Paths.memoryDir(projectSlug: Paths.slug(for: base)), files: files)
+        Task {
+            let ok = await TaskRunner.shared.openMemoryFixAgent(projectRoot: base, prompt: prompt)
+            if ok { activateHerdrHost() }
+            done(ok)
+        }
+    }
+
     func openTaskInHerdr(_ task: ProjectTask, phase: TaskPhase) {
         guard let base = activePath else { return }
         let slug = Paths.slug(for: base)
@@ -1194,6 +1220,10 @@ final class AppState: ObservableObject {
         var paths = [Paths.globalSettings, Paths.globalLocalSettings, Paths.pluginsRoot, Paths.stateFile, Paths.projectsRoot, Paths.plansRoot, Paths.globalCommands]
         if let base = activePath {
             paths.append(Paths.projectClaude(base))
+            // The rules folder and the managed rules files themselves: a folder only reports
+            // entries added or removed, so an in-place edit to a file needs the file watched too.
+            paths.append(Paths.projectClaude(base).appending(path: "rules"))
+            paths += ManagedConfig.catalog.compactMap { ManagedArtifacts.ruleFile(for: $0.id, base: base) }
             let memDir = Paths.memoryDir(projectSlug: Paths.slug(for: base))
             if FileManager.default.fileExists(atPath: memDir.path) {
                 paths.append(memDir)

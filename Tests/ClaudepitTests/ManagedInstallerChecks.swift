@@ -135,19 +135,113 @@ func managedInstallerChecks() -> [Bool] {
 
     // MARK: Settings keys
 
-    results.append(check("systemPrompt.append and cleanupPeriodDays install then remove") {
+    results.append(check("memory rules file and cleanupPeriodDays install then remove") {
         let (g, base) = try freshRoots()
         let inst = installer(g, base)
         inst.sync()
+        let rule = Paths.memoryRuleFile(base)
+        let installed = try String(contentsOf: rule, encoding: .utf8)
+        try expectEqual(installed, store.content(base, ManagedConfig.byID("memory-system-prompt")!),
+                        "rules file holds the editable copy")
         var obj = try JSONFile.readObject(Paths.projectSettings(base))
-        try expect((obj["systemPrompt.append"] as? String)?.isEmpty == false, "prompt installed")
+        try expect(obj["systemPrompt.append"] == nil, "no dead settings key written")
         try expectEqual(obj["cleanupPeriodDays"] as? Int, 3650, "days installed")
 
         for c in ManagedConfig.catalog { store.setEnabled(base, c.id, false) }
         inst.sync()
+        try expect(!FileManager.default.fileExists(atPath: rule.path), "rules file removed")
         obj = try JSONFile.readObject(Paths.projectSettings(base))
-        try expect(obj["systemPrompt.append"] == nil, "prompt removed")
         try expect(obj["cleanupPeriodDays"] == nil, "days removed")
+    })
+
+    results.append(check("the dead systemPrompt.append key an older build wrote is stripped") {
+        let (g, base) = try freshRoots()
+        try FileManager.default.createDirectory(at: Paths.projectClaude(base), withIntermediateDirectories: true)
+        try JSONFile.writeObject(["systemPrompt.append": "old", "model": "theirs"], to: Paths.projectSettings(base))
+        installer(g, base).sync()
+        let obj = try JSONFile.readObject(Paths.projectSettings(base))
+        try expect(obj["systemPrompt.append"] == nil, "dead key stripped")
+        try expectEqual(obj["model"] as? String, "theirs", "foreign key kept")
+    })
+
+    results.append(check("the memory rules file is excluded from git once, and only in a git checkout") {
+        let (g, base) = try freshRoots()
+        installer(g, base).sync()
+        let exclude = base.appending(path: ".git/info/exclude")
+        try expect(!FileManager.default.fileExists(atPath: exclude.path), "no .git → nothing created")
+
+        try FileManager.default.createDirectory(at: base.appending(path: ".git/info"),
+                                                withIntermediateDirectories: true)
+        try "*.log".write(to: exclude, atomically: true, encoding: .utf8)
+        installer(g, base).sync()
+        installer(g, base).sync()
+        let lines = try String(contentsOf: exclude, encoding: .utf8).split(separator: "\n")
+        try expectEqual(lines, ["*.log", ".claude/rules/claudepit-summary.md", ".claude/rules/claudepit-memory.md"],
+                        "each rules file appended once, existing kept")
+    })
+
+    results.append(check("the summary rules file is installed only while the summary hook is on") {
+        let (g, base) = try freshRoots()
+        let inst = installer(g, base)
+        let rule = Paths.summaryRuleFile(base)
+        inst.sync()
+        try expectEqual(try String(contentsOf: rule, encoding: .utf8), HookScripts.summaryRulesPrompt,
+                        "installed from the editable copy")
+        store.setEnabled(base, "summary-hook", false)
+        inst.sync()
+        try expect(!FileManager.default.fileExists(atPath: rule.path), "hook off → rules removed")
+        store.setEnabled(base, "summary-hook", true)
+        store.setEnabled(base, "summary-rules", false)
+        inst.sync()
+        try expect(!FileManager.default.fileExists(atPath: rule.path), "rules off → removed")
+        store.setEnabled(base, "summary-rules", true)
+        inst.sync()
+        try expect(FileManager.default.fileExists(atPath: rule.path), "both on → back")
+    })
+
+    results.append(check("an in-place edit to a watched rules file fires the watcher and is reverted") {
+        // The app's path: FileWatcher on the rules folder + file → reload() → syncRuleFiles().
+        // A folder vnode reports only entries added or removed, so this edit (same inode, no
+        // rename) is seen only because the file itself is watched.
+        let (g, base) = try freshRoots()
+        let inst = installer(g, base)
+        inst.sync()
+        let rule = Paths.memoryRuleFile(base)
+        let expected = store.content(base, ManagedConfig.byID("memory-system-prompt")!)
+        let done = DispatchSemaphore(value: 0)
+        let watcher = FileWatcher(paths: [rule.deletingLastPathComponent(), rule]) {
+            inst.syncRuleFiles()
+            done.signal()
+        }
+        watcher.start()
+        defer { watcher.stop() }
+        let handle = try FileHandle(forWritingTo: rule)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("\nhand edit".utf8))
+        try handle.close()
+        try expect(done.wait(timeout: .now() + 3) == .success, "watcher fired on the in-place edit")
+        try expectEqual(try String(contentsOf: rule, encoding: .utf8), expected, "edit reverted")
+    })
+
+    results.append(check("syncRuleFiles overwrites a direct edit while on and keeps the file gone while off") {
+        let (g, base) = try freshRoots()
+        let inst = installer(g, base)
+        inst.sync()
+        let rule = Paths.memoryRuleFile(base)
+        let expected = store.content(base, ManagedConfig.byID("memory-system-prompt")!)
+        try "hand edit".write(to: rule, atomically: true, encoding: .utf8)
+        inst.syncRuleFiles()
+        try expectEqual(try String(contentsOf: rule, encoding: .utf8), expected, "edit overwritten")
+        try FileManager.default.removeItem(at: rule)
+        inst.syncRuleFiles()
+        try expect(FileManager.default.fileExists(atPath: rule.path), "deleted file restored")
+
+        store.setEnabled(base, "memory-system-prompt", false)
+        inst.syncRuleFiles()
+        try expect(!FileManager.default.fileExists(atPath: rule.path), "toggled off → removed")
+        try "hand made".write(to: rule, atomically: true, encoding: .utf8)
+        inst.syncRuleFiles()
+        try expect(!FileManager.default.fileExists(atPath: rule.path), "off stays off")
     })
 
     results.append(check("toggle-off prunes our entry and drops the emptied event key") {

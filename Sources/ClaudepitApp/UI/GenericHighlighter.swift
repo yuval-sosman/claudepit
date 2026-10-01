@@ -50,7 +50,7 @@ enum GenericHighlighter {
         guard let ns = engine?.highlight(code, as: lang, fastRender: true) else {
             return AttributedString(code)
         }
-        var attr = AttributedString(ns)
+        var attr = AttributedString(withoutFont(ns))
         attr.backgroundColor = nil
         return attr
     }

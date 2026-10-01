@@ -15,6 +15,7 @@ public enum ManagedArtifacts {
         case editableCopy       // <project>/.claude/claudepit-config/<filename> — what we install from
         case installedScript    // ~/.claude/claudepit-*.sh
         case installedCommand   // <project>/.claude/commands/<filename>
+        case installedRule      // <project>/.claude/rules/claudepit-{memory,summary}.md
         case settings           // a key or hook event inside <project>/.claude/settings.json
     }
 
@@ -34,7 +35,6 @@ public enum ManagedArtifacts {
     /// Top-level `settings.json` keys the entry writes into the active project's layer.
     public static func settingsKeys(for id: String) -> [String] {
         switch id {
-        case "memory-system-prompt": return ["systemPrompt.append"]
         case "cleanup-period":       return ["cleanupPeriodDays"]
         default:                     return []
         }
@@ -55,6 +55,23 @@ public enum ManagedArtifacts {
         case "summary-hook": return Paths.summaryHookScriptName
         case "memory-hook":  return Paths.memoryHookScriptName
         default:             return nil
+        }
+    }
+
+    /// The project rules file the entry installs, if any.
+    public static func ruleFile(for id: String, base: URL) -> URL? {
+        switch id {
+        case "memory-system-prompt": return Paths.memoryRuleFile(base)
+        case "summary-rules":        return Paths.summaryRuleFile(base)
+        default:                     return nil
+        }
+    }
+
+    /// The entry that installed a rules file, or nil when the file isn't ours. Matched by path in
+    /// the active project only, like settings keys.
+    public static func owner(ofRuleFile url: URL, base: URL) -> ManagedConfig? {
+        ManagedConfig.catalog.first { c in
+            ruleFile(for: c.id, base: base)?.standardizedFileURL.path == url.standardizedFileURL.path
         }
     }
 
@@ -91,6 +108,9 @@ public enum ManagedArtifacts {
             out.append(WrittenFile(
                 url: Paths.projectClaude(base).appending(path: "commands").appending(path: c.filename),
                 role: .installedCommand))
+        }
+        if let rule = ruleFile(for: c.id, base: base) {
+            out.append(WrittenFile(url: rule, role: .installedRule))
         }
         for event in hookEvents(for: c.id) {
             out.append(WrittenFile(url: Paths.projectSettings(base), role: .settings,

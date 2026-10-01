@@ -20,14 +20,23 @@ func taskDraftChecks() -> [Bool] {
             try expect(prompt.contains("- a1b2c3d4 — Add print layout (Export)"), "missing candidate with topic")
             try expect(prompt.contains("- e5f6a7b8 — Set up CI\n"), "missing topicless candidate")
             try expect(!prompt.contains("Set up CI ("), "topicless candidate should have no parens")
-            try expect(prompt.contains("Return ONLY a valid JSON object"), "missing JSON-only contract")
-            try expect(prompt.contains("\"priority\":\"low|normal|high|urgent\""), "missing shape line")
+            try expect(prompt.contains("Fill in the draft:"), "missing field guide")
+            try expect(!prompt.contains("Return ONLY"), "the JSON contract lives in --json-schema, not the prompt")
         },
         check("buildPrompt_emptyTopicsAndCandidates") {
             let prompt = TaskDraftRunner.buildPrompt(idea: "Idea", topics: [], candidates: [])
             try expect(prompt.contains("(none yet"), "missing empty-topics fallback")
             try expect(!prompt.contains("Existing tasks"), "candidates section should be omitted")
-            try expect(prompt.contains("Return ONLY a valid JSON object"), "missing JSON-only contract")
+            try expect(prompt.contains("Fill in the draft:"), "missing field guide")
+        },
+        check("schema_isValidAndRequiresEveryField") {
+            let obj = try JSONSerialization.jsonObject(with: Data(TaskDraftRunner.schema.utf8)) as? [String: Any]
+            let required = obj?["required"] as? [String] ?? []
+            try expectEqual(Set(required),
+                            ["name", "topic", "description", "requirements", "priority", "tags", "dependsOn"],
+                            "every RawDraft key is required")
+            try expect(TaskDraftRunner.schema.contains(#""enum":["low","normal","high","urgent"]"#),
+                       "priority is constrained to the Priority cases")
         },
         check("decode_happyPath") {
             let v = try TaskDraftRunner.decode(fullJSON, validTaskIDs: ["real1"])
@@ -38,12 +47,6 @@ func taskDraftChecks() -> [Bool] {
             try expect(v.priority == .high, "priority")
             try expect(v.tags == ["ui", "theme"], "tags")
             try expect(v.dependsOn == ["real1"], "dependsOn")
-        },
-        check("decode_fencedJSON") {
-            let fenced = "```json\n\(fullJSON)\n```"
-            let v = try TaskDraftRunner.decode(fenced, validTaskIDs: ["real1"])
-            try expect(v.name == "Add dark mode", "name through fences")
-            try expect(v.priority == .high, "priority through fences")
         },
         check("decode_missingKeysDefault") {
             let v = try TaskDraftRunner.decode(#"{"name":"X"}"#, validTaskIDs: [])
@@ -73,10 +76,6 @@ func taskDraftChecks() -> [Bool] {
             try expect(v.requirements == ["a"], "requirements trimmed and empties dropped")
             try expect(v.tags == ["b"], "tags trimmed and empties dropped")
         },
-        check("decode_preambleSalvage") {
-            let v = try TaskDraftRunner.decode("Here is the draft: \(fullJSON)", validTaskIDs: ["real1"])
-            try expect(v.name == "Add dark mode", "salvage via first-{ last-}")
-        },
         check("decode_garbageThrows") {
             do {
                 _ = try TaskDraftRunner.decode("I could not produce a draft.", validTaskIDs: [])
@@ -95,10 +94,12 @@ func taskDraftChecks() -> [Bool] {
                 try expect(false, "object without name/description should have thrown")
             } catch TaskDraftError.invalidJSON {}
         },
-        check("decode_singleElementArraySalvages") {
-            // The first-{/last-} salvage unwraps a one-object array — tolerance, not an error.
-            let v = try TaskDraftRunner.decode(#"[{"name":"X"}]"#, validTaskIDs: [])
-            try expect(v.name == "X", "array-wrapped object should salvage")
+        check("decode_arrayThrows") {
+            // structured_output is the schema's object; anything else is the wrong answer.
+            do {
+                _ = try TaskDraftRunner.decode(#"[{"name":"X"}]"#, validTaskIDs: [])
+                try expect(false, "an array should have thrown")
+            } catch TaskDraftError.invalidJSON {}
         },
     ]
 }

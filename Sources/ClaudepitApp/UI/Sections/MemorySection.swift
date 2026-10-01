@@ -49,6 +49,15 @@ struct MemorySection: View {
                                     .font(.system(size: 12))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                if node.exceedsReadLimit, let size = node.size {
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "scissors")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.orange)
+                                        .help("Claude stops reading partway — \(size.label), "
+                                            + "limit \(MemoryReadLimit.maxLines) lines or "
+                                            + "\(MemoryReadLimit.maxBytes / 1000) KB")
+                                }
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 7)
@@ -84,6 +93,28 @@ struct MemorySection: View {
                 }
             }
         }
+    }
+
+    /// Shown while any file runs past what Claude reads: how many, and the one-click fix.
+    private var oversizeBanner: some View {
+        let count = app.oversizedMemoryFiles.count
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "scissors")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange)
+                Text("\(count) \(count == 1 ? "file runs" : "files run") past what Claude reads "
+                     + "(\(MemoryReadLimit.maxLines) lines or \(MemoryReadLimit.maxBytes / 1000) KB)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            MemoryFixButton(app: app)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.06))
     }
 
     /// Thin grip that drags the file-list / LOG split. Clamped to 0.15…0.7.
@@ -167,6 +198,11 @@ struct MemorySection: View {
                 .padding(.bottom, 8)
 
                 Divider().opacity(0.2)
+
+                if !app.oversizedMemoryFiles.isEmpty {
+                    oversizeBanner
+                    Divider().opacity(0.2)
+                }
 
                 if graph.nodes.isEmpty {
                     Text("No memory files yet")
@@ -394,9 +430,11 @@ struct MemorySection: View {
                                             .foregroundStyle(.orange)
                                         Rectangle().fill(Color.orange.opacity(0.5)).frame(height: 1)
                                     }
-                                    Text("Claude stops reading here — file exceeds 200 lines or 25 KB")
+                                    Text("Claude stops reading here — file exceeds "
+                                         + "\(MemoryReadLimit.maxLines) lines or \(MemoryReadLimit.maxBytes / 1000) KB")
                                         .font(.system(size: 11))
                                         .foregroundStyle(.orange.opacity(0.8))
+                                    MemoryFixButton(app: app)
                                 }
                                 .padding(.top, 8)
 
@@ -420,27 +458,61 @@ struct MemorySection: View {
         let raw = (try? String(contentsOf: node.url, encoding: .utf8)) ?? "_Could not read file._"
         let (fm, body) = MemoryFrontmatter.parse(from: raw)
         frontmatter = node.isRoot ? nil : fm
-        let maxBytes = 25_000
-        let maxLines = 200
-        let lines = body.components(separatedBy: "\n")
-        if body.utf8.count <= maxBytes && lines.count <= maxLines {
+        if let cut = MemoryReadLimit.split(body) {
+            fileContent = cut.kept
+            truncatedRemainder = cut.remainder
+            fileTruncated = true
+        } else {
             fileContent = body
             truncatedRemainder = ""
             fileTruncated = false
-        } else {
-            var byteCount = 0
-            var keptCount = 0
-            for (i, line) in lines.enumerated() {
-                let lineBytes = (line + "\n").utf8.count
-                if i >= maxLines || byteCount + lineBytes > maxBytes {
-                    break
+        }
+    }
+}
+
+// MARK: - MemoryFixButton
+
+/// Opens a Claude agent in herdr briefed to split and trim every oversized memory file
+/// (`MemoryReadLimit.fixPrompt`). Reports a launch failure inline rather than doing nothing.
+private struct MemoryFixButton: View {
+    @ObservedObject var app: AppState
+    @State private var launching = false
+    @State private var failed = false
+
+    var body: some View {
+        let herdr = Herdr.available()
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                launching = true
+                failed = false
+                app.openMemoryFixAgent { ok in
+                    launching = false
+                    failed = !ok
                 }
-                keptCount = i + 1
-                byteCount += lineBytes
+            } label: {
+                HStack(spacing: 5) {
+                    if launching {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "terminal").font(.system(size: 10))
+                    }
+                    Text(launching ? "Opening herdr…" : "Fix with Claude in herdr")
+                        .font(.system(size: 11, weight: .medium))
+                }
             }
-            fileContent = lines.prefix(keptCount).joined(separator: "\n")
-            truncatedRemainder = lines.dropFirst(keptCount).joined(separator: "\n")
-            fileTruncated = true
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(.orange)
+            .disabled(launching || !herdr || app.oversizedMemoryFiles.isEmpty)
+            .help(herdr
+                  ? "Open a Claude agent in herdr that splits the oversized files into focused topic "
+                    + "files and trims them, keeping every decision and rule"
+                  : "herdr isn't installed — it's needed to run the agent")
+            if failed {
+                Text("Couldn't start the agent in herdr.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+            }
         }
     }
 }

@@ -39,22 +39,10 @@ PYEOF
 fi
 
 INSTRUCTION="<claudepit_summary_instruction>
-You maintain a running project summary for this session. Current bullets: ${CURRENT_BULLETS}
+Current bullets: ${CURRENT_BULLETS}
 
-After processing this turn, always write updated bullets to the file at ${SUMMARY_FILE_PATH} using a Bash tool call. There is no case where you skip writing entirely.
-
-JSON structure to write:
+After this turn, write the updated bullets to ${SUMMARY_FILE_PATH} with one Bash call, following the Session Summary rules:
 {\"version\":1,\"bullets\":[\"bullet 1\",\"bullet 2\"],\"updatedAt\":${NOW}}
-
-- Write the file silently. Do not tell the user. Do not explain what you wrote.
-
-Rules:
-- Max 15 bullets total. If adding new bullets would exceed 15, review all bullets and either combine closely related ones into a single concise bullet, or remove the least important one (minor clarifications, trivial lookups, superseded decisions). Preserve the most meaningful outcomes.
-- Before adding a new bullet, check if any existing bullet covers the same topic. If a decision changed or was revised, remove the old bullet and replace it with the updated one — do not keep both. If new information extends an existing bullet, update that bullet in place rather than adding a new one.
-- Outcomes only: what was built, fixed, or decided — not how.
-- Past tense for work done; present tense only for the high-level topic bullet (e.g. \"Discussing X\").
-- Write whenever ANY of the following happened: code was written or edited, a feature was added or changed, a bug was fixed, a design or architecture decision was made, a plan was created, configuration was changed, a test was added, or the user asked you to implement something and you did it. When in doubt, write — missing a summary is worse than writing a minor one.
-- If this turn had zero code or project changes (purely conversational — user only asked a question, you only explained something), write exactly 1 bullet: one short sentence describing what this session is about at the highest level (e.g. \"Exploring how session summary storage works\"). This ensures there is always at least a reminder bullet even for lightweight sessions.
 </claudepit_summary_instruction>"
 
 python3 -c "
@@ -63,12 +51,29 @@ print(json.dumps({'continue': True, 'hookSpecificOutput': {'hookEventName': 'Use
 " "$INSTRUCTION"
 """#
 
-    static let summaryRules = """
+    /// The bullet rules, shared by the installed rules file and the on-demand summary so the two
+    /// can never drift apart again (they once disagreed on "this turn" vs "this session").
+    static let summaryBulletRules = """
         - Max 15 bullets total. If adding new bullets would exceed 15, review all bullets and either combine closely related ones into a single concise bullet, or remove the least important one (minor clarifications, trivial lookups, superseded decisions). Preserve the most meaningful outcomes.
         - Before adding a new bullet, check if any existing bullet covers the same topic. If a decision changed or was revised, remove the old bullet and replace it with the updated one — do not keep both. If new information extends an existing bullet, update that bullet in place rather than adding a new one.
         - Outcomes only: what was built, fixed, or decided — not how.
         - Past tense for work done; present tense only for the high-level topic bullet (e.g. "Discussing X").
-        - If this appears to be a purely conversational session with no code or project changes, write exactly 1 bullet describing what the session is about at the highest level.
+        - If the session has made no code or project changes (purely conversational — questions asked, code explained), keep exactly 1 bullet: one short sentence describing what the session is about at the highest level (e.g. "Exploring how session summary storage works"), so even a lightweight session has a reminder bullet.
+        """
+
+    /// Installed as `.claude/rules/claudepit-summary.md` and loaded once per session, so the hook's
+    /// per-prompt block carries only what changes each turn: the bullets, the path, the timestamp.
+    public static let summaryRulesPrompt = """
+        ## Session Summary
+
+        Claudepit keeps a running bullet summary of each session for its Sessions page. Every prompt
+        carries a `<claudepit_summary_instruction>` block with this session's current bullets and the
+        file to write. When you finish the turn, write the updated bullets to that file with one Bash
+        call, as JSON in the shape the block shows — on every turn, conversational ones included. Do
+        it silently: the summary is bookkeeping for the app, so don't mention it to the user.
+
+        Bullet rules:
+        \(summaryBulletRules)
         """
 
     /// Prompt for on-demand summary generation from a session transcript.
@@ -79,7 +84,7 @@ print(json.dumps({'continue': True, 'hookSpecificOutput': {'hookEventName': 'Use
         Given the session transcript below, produce a concise bullet summary.
 
         Rules:
-        \(summaryRules)
+        \(summaryBulletRules)
         - Output ONLY the bullet list, one bullet per line, no leading dashes, no numbering, no extra commentary.
 
         <session_transcript>
@@ -93,6 +98,9 @@ print(json.dumps({'continue': True, 'hookSpecificOutput': {'hookEventName': 'Use
 
 You maintain a persistent feature-oriented memory for this project at:
   ~/.claude/projects/<project-slug>/memory/
+
+This strategy replaces Claude Code's default auto-memory format (one fact per file, `[[name]]`
+links): where the two disagree, follow this one.
 
 ### What to save
 Save a memory entry for every feature or meaningful change, or a decision made about a feature — including small ones.
@@ -122,16 +130,12 @@ nothing, skip.
 - Key design decisions
 
 ### Session ID tracking (frontmatter)
-Every topic file must carry a `sessions` array in its frontmatter. **This is mandatory — never write or update a topic file without also updating its `sessions` field.**
+Every topic file carries a `sessions` array in its frontmatter, updated on every write:
 
 - **New file**: `sessions: [<current-session-id>]`
 - **Existing file**: read the current `sessions` array, append the current session ID if not already present, write the updated array back. Never remove old IDs.
 
 The current session ID is in the `session_id` field of the hook input JSON, or available in the conversation context. If uncertain, use the session ID from the summary hook context injected at the start of the conversation.
-
-**Checklist — before finishing any memory write:**
-1. Did I include/update the `sessions` array in this file's frontmatter? ✓
-2. Does the array contain the current session ID? ✓
 
 ### Writing rules
 - Recall before writing, but only what you are about to touch: read MEMORY.md, then read in full only the topic pages covering the areas this session changed. Never rely on the index summary alone for a page you are editing, and never read the whole memory/ directory to write one page.
@@ -174,7 +178,7 @@ The Stop hook first checks whether this session touched a file at all; if it did
 nothing and no memory work happens. Otherwise it reads log.json and counts write entries since the
 last dream entry.
 When the count reaches 10, it injects the full 11-step dreaming consolidation prompt instead of the normal memory reminder.
-That prompt runs the 11 steps in a subagent (Task tool, latest Sonnet model) rather than inline, so consolidation doesn't burn the session's own context.
+That prompt runs the 11 steps in a Sonnet subagent rather than inline, so consolidation doesn't burn the session's own context.
 The count resets after each dream — the next dream triggers after 10 more writes.
 """
 
@@ -189,8 +193,8 @@ DREAMING CYCLE — your memory log has reached {{COUNT}} writes since last conso
 Before this session ends, run the full 11-step memory consolidation. Do NOT run it inline in this
 session — dispatch it to a subagent so consolidation doesn't burn this session's own context.
 
-Use the Task tool to launch one general-purpose subagent on the latest Sonnet model
-(claude-sonnet-5). Give it this checklist verbatim as its prompt, including the session ID
+Use the Agent tool to launch one general-purpose subagent with model "sonnet" (the alias tracks
+the current Sonnet). Give it this checklist verbatim as its prompt, including the session ID
 {{SESSION_ID}} for step 11, and wait for it to finish before the session ends:
 
 1. Inventory — read MEMORY.md, list memory/ recursively, find orphans
@@ -368,7 +372,7 @@ that a spec could be written from it without further product decisions.
 
 Ground yourself in reality BEFORE the first question: read the files and subsystems the task
 touches, skim docs and recent commits. If the surface is wide, dispatch 1-2 read-only subagents
-in parallel (Task tool — Explore type if available, else general-purpose), each with one precise
+in parallel (Agent tool — Explore type if available, else general-purpose), each with one precise
 question ("which views render X and where does its state live? Return file:line references"),
 and read the key files yourself while they run. Never brainstorm from assumptions: a question
 grounded in the actual code ("SystemPromptCard already has an actionSlot — mount the button
@@ -401,22 +405,20 @@ each option is an approach, its description is the trade-off summary, your recom
 YAGNI ruthlessly — strip unnecessary features from every approach. All of your thinking, options,
 and pros/cons live in THIS CONVERSATION — never in the file.
 
-## Step 5 — The deliverable (STRICT contract)
+## Step 5 — The deliverable
 
-CRITICAL — the file at `brainstormPath=` is NOT a brainstorm document and it is NOT a scratchpad.
-It is a machine-parsed list of atomic suggestions the app shows the user one-by-one to Accept or
-Reject. Rules — follow EXACTLY:
+The file at `brainstormPath=` is not a brainstorm document or a scratchpad: the app parses it into
+atomic suggestions and shows them to the user one by one to Accept or Reject.
 
-1. Do NOT create, touch, or write `brainstormPath` until the brainstorm is DONE and you have real
-   suggestions to emit. Write it EXACTLY ONCE, at the very end, in a single pass. Never write partial
-   drafts, questions, notes, recommendations, or "work in progress" to it — if the file appears with
-   anything other than the final `suggestions:` list, the feature shows garbage or nothing.
-2. The file MUST contain ONLY a top-level `suggestions:` list. No `options:`, no `recommendation:`,
-   no `implementation_sketch:`, no prose, no other top-level keys.
+1. Write it once, at the very end, when the brainstorm is done and you have the final suggestions.
+   The app treats the file's appearance as the phase finishing, so a partial draft, questions,
+   notes, or a recommendation written there shows up as garbage or as nothing.
+2. The file holds only a top-level `suggestions:` list — no `options:`, `recommendation:`,
+   `implementation_sketch:`, prose, or other top-level keys.
 3. Each list item is a single atomic change to the task, typed as exactly one `kind`:
-   - `requirement` — one concrete requirement to ADD to the task's requirements list (one per item;
-     do NOT bundle several requirements into one value).
-   - `description`  — a sharper FULL replacement description for the task (usually at most one item).
+   - `requirement` — one concrete requirement to add to the task's requirements list (one per item;
+     don't bundle several requirements into one value).
+   - `description`  — a sharper full replacement description for the task (usually at most one item).
    - `tag`          — a single tag to add.
 4. `value` is the literal text that gets applied (the requirement line / the new description / the tag).
    `rationale` is one short sentence on why. Keep values self-contained — the user sees them out of context.
@@ -428,7 +430,7 @@ the real code you explored in Step 1:
 - GOOD: "Add an Analyze Prompt button to SystemPromptCard's actionSlot, visible only when isDraft is true"
 - BAD:  "Add the button in a sensible place" (not testable, no anchor in the code)
 
-Write the file with EXACTLY this schema and nothing else (this is a filled example — replace the
+Write the file in exactly this shape and nothing else (this is a filled example — replace the
 content, keep the shape):
 
 suggestions:
@@ -470,7 +472,7 @@ implement, review) — ambiguity here becomes rework there.
 ## Step 1 — Explore the codebase first
 
 Read every file the task plausibly touches; follow the existing patterns you find. When the
-surface is wide, dispatch 2-3 read-only subagents IN PARALLEL (one message, multiple Task tool
+surface is wide, dispatch 2-3 read-only subagents IN PARALLEL (one message, multiple Agent tool
 calls — Explore type if available, else general-purpose), each with one precise question and
 told to return a compact summary with file:line references. Never design against imagined code.
 You are already inside the task's dedicated git worktree — never create another worktree or
@@ -512,7 +514,7 @@ Re-read the spec with fresh eyes and fix inline:
 3. Scope — one implementation plan's worth; if it needs decomposition, say so to the user.
 4. Ambiguity — any requirement readable two ways gets pinned to one reading.
 
-Then dispatch ONE reviewer subagent (Task tool, general-purpose) with this brief:
+Then dispatch ONE reviewer subagent (Agent tool, general-purpose) with this brief:
 
 > Review the spec at <absolute specPath>. Check: Completeness (TODOs, placeholders, missing
 > sections), Consistency (internal contradictions), Clarity (requirements ambiguous enough that
@@ -609,7 +611,7 @@ patterns.
 2. Placeholder scan: search the plan for the patterns above; fix them.
 3. Type consistency: names and signatures used in later tasks match earlier definitions exactly.
 
-For plans of 3+ tasks, also dispatch ONE reviewer subagent (Task tool, general-purpose):
+For plans of 3+ tasks, also dispatch ONE reviewer subagent (Agent tool, general-purpose):
 
 > Review the plan at <plan path> against the spec at <absolute specPath>. Check: Completeness
 > (placeholders, missing steps), Spec alignment (every requirement covered, no scope creep),
@@ -645,16 +647,14 @@ page will surface it. Read the plan ONCE in full, read the spec it names (the sp
 binding authority; the plan is its argument), create one todo per plan task, then execute them
 ALL in order without pausing to check in between tasks.
 
-**NEVER commit or stage. This is a HARD rule, no exceptions:**
-- Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
-  `git add -A && git commit -m …`). These commands are DENIED and will fail.
-- Leave EVERY change unstaged in the working tree. The user reviews and commits from Claudepit's
-  Review Changes (Source Control) sheet — that is the ONLY place commits happen.
-- `git status`, `git diff`, and reads are fine; anything that stages or commits is not.
+**Don't stage or commit.** `git add`, `git commit`, `git stage` and `git push` — alone or combined —
+are denied in this worktree and will fail. Leave every change unstaged: the user reviews and
+commits from Claudepit's Review Changes (Source Control) sheet, the only place commits happen.
+`git status`, `git diff` and reads are fine.
 
 ## How to execute — subagent-driven, always
 
-You are the coordinator, never the typist. Dispatch a fresh implementer subagent (Task tool,
+You are the coordinator, never the typist. Dispatch a fresh implementer subagent (Agent tool,
 general-purpose) per plan task — for every plan, at every size — and keep your own context for
 coordination and review. Do not implement plan tasks yourself, and never fix findings yourself:
 fixes go back to the implementer, so your context stays clean and every change gets reviewed.
@@ -699,10 +699,10 @@ costs a visible fix; a session parked on a question costs the user their day.
 
 ## Close-out — evidence before claims
 
-The iron law: NO COMPLETION CLAIM WITHOUT FRESH EVIDENCE. If you did not run the command in this
-session and read its output, you cannot claim it passes — "should pass", "looks correct", and an
-implementer's report are not evidence. While tasks are in flight the implementers run the
-focused tests; after the LAST task, close out yourself:
+Claim only what you verified: a check passes when you ran it in this session and read its
+output — "should pass", "looks correct", and an implementer's report are not evidence. While
+tasks are in flight the implementers run the focused tests; after the LAST task, close out
+yourself:
 1. **Reality check** — `git status --porcelain` and `git diff --stat`: the diff actually
    contains the work the plan describes, not just reports claiming it does.
 2. **Build** — run the project's full build; evidence is exit 0.
@@ -741,7 +741,7 @@ Concatenate into `<taskDir>/review-package.txt` (`taskDir=` is in the arguments)
 
 ## Step 2 — Dispatch two reviewers IN PARALLEL
 
-One message, two Task tool calls (general-purpose), so they run concurrently. Both get: the
+One message, two Agent tool calls (general-purpose), so they run concurrently. Both get: the
 package path, the absolute `specPath=` and `planPath=`, and these ground rules — read-only
 checkout; you may read worktree files for context but never modify anything; judge the code on
 its merits (rationales in comments or reports are claims, not verdicts); every finding needs
@@ -862,17 +862,15 @@ task produces is read against the finding list and nothing else.
 You are already inside the task's git worktree: never create another worktree or branch, never
 run git worktree commands, and never dispatch a subagent in worktree isolation.
 
-**NEVER commit or stage. This is a HARD rule, no exceptions:**
-- Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
-  `git add -A && git commit -m ...`). These commands are DENIED and will fail.
-- Leave EVERY change unstaged in the working tree. The user reviews and commits from Claudepit's
-  Review Changes (Source Control) sheet — that is the ONLY place commits happen.
-- `git status`, `git diff`, and reads are fine; anything that stages or commits is not.
+**Don't stage or commit.** `git add`, `git commit`, `git stage` and `git push` — alone or combined —
+are denied in this worktree and will fail. Leave every change unstaged: the user reviews and
+commits from Claudepit's Review Changes (Source Control) sheet, the only place commits happen.
+`git status`, `git diff` and reads are fine.
 
 ## How to execute
 
 Create one todo per finding and work them in the order given (high severity first). These are
-small, related fixes in code you can see, so do them yourself — reserve the Task tool for a
+small, related fixes in code you can see, so do them yourself — reserve the Agent tool for a
 finding that turns out to be a genuine piece of work, and then brief that subagent with the
 finding's full text, the hard rules above, and a DONE/BLOCKED report contract. Never dispatch two
 implementers in parallel: they share this worktree and will conflict.
@@ -891,8 +889,7 @@ product behavior, or one that implies a scope change.
 
 ## Close-out — evidence before claims
 
-The iron law: NO COMPLETION CLAIM WITHOUT FRESH EVIDENCE. If you did not run the command in this
-session and read its output, you cannot claim it passes.
+Claim only what you verified: a check passes when you ran it in this session and read its output.
 1. **Reality check** — `git status --porcelain` and `git diff --stat`: the diff contains the
    fixes and nothing else.
 2. **Build** — run the project's full build; evidence is exit 0.
@@ -948,13 +945,13 @@ never run `git worktree` commands, and never dispatch a subagent in worktree iso
    `SplashImageGen`, which fails on the CLI toolchain (no CoreGraphics). Run `swift test` as well
    when the merge touched anything under `Sources/`.
 
-## NEVER commit or stage. This is a HARD rule, no exceptions
+## Don't stage or commit
 
-- Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
-  `git add -A && git commit -m ...`). These commands are DENIED and will fail.
-- This includes the merge commit. A conflicted merge stays conflicted-but-resolved in the working
-  tree; the user finishes it from Claudepit's Review Changes (Source Control) sheet, which is the
-  ONLY place commits happen.
+- `git add`, `git commit`, `git stage` and `git push` — alone or combined — are denied in this
+  worktree and will fail.
+- That includes the merge commit. A conflicted merge stays conflicted-but-resolved in the working
+  tree; the user finishes it from Claudepit's Review Changes (Source Control) sheet, the only
+  place commits happen.
 - `git status`, `git diff`, `git log`, `git fetch`, `git merge`, `git stash` and reads are all
   fine. Anything that stages or commits is not.
 - If a conflict proves unresolvable, run `git merge --abort`, restore the stash, and say so. Do

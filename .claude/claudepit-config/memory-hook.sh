@@ -107,8 +107,8 @@ DREAMING CYCLE — your memory log has reached ${WRITES_SINCE_DREAM} writes sinc
 Before this session ends, run the full 11-step memory consolidation. Do NOT run it inline in this
 session — dispatch it to a subagent so consolidation doesn't burn this session's own context.
 
-Use the Task tool to launch one general-purpose subagent on the latest Sonnet model
-(claude-sonnet-5). Give it this checklist verbatim as its prompt, including the session ID
+Use the Agent tool to launch one general-purpose subagent with model \"sonnet\" (the alias tracks
+the current Sonnet). Give it this checklist verbatim as its prompt, including the session ID
 ${SESSION_ID} for step 11, and wait for it to finish before the session ends:
 
 1. Inventory — read MEMORY.md, list memory/ recursively, find orphans

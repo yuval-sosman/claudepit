@@ -56,20 +56,24 @@ public struct TaskDraftRunner {
         }
 
         parts.append("""
-        Return ONLY a valid JSON object, no prose, no markdown fences:
-        {"name":"<short imperative summary>","topic":"<topic or empty string>","description":"<markdown, 1-3 paragraphs>","requirements":["<one concrete, verifiable requirement per item>"],"priority":"low|normal|high|urgent","tags":["<0-3 short labels>"],"dependsOn":["<ids from the existing-tasks list, usually empty>"]}
-
-        Rules:
-        - name is required: one short imperative sentence, no trailing period.
-        - Include only requirements that follow from the idea; do not pad the list.
-        - priority is "normal" unless the idea clearly signals urgency or low importance.
+        Fill in the draft:
+        - name: one short imperative sentence, no trailing period.
+        - topic: reuse a known topic when one fits; otherwise a concise new one, or empty.
+        - description: markdown, 1-3 paragraphs.
+        - requirements: one concrete, verifiable requirement per item — only those that follow
+          from the idea; do not pad the list.
+        - priority: "normal" unless the idea clearly signals urgency or low importance.
+        - tags: 0-3 short labels.
         - dependsOn: only ids that appear in the existing-tasks list, and only when the idea
-          genuinely depends on that task. When unsure, leave it empty.
-        - topic: reuse a known topic when one fits.
+          genuinely depends on that task. Usually empty; when unsure, leave it empty.
         """)
 
         return parts.joined(separator: "\n\n")
     }
+
+    /// What `--json-schema` holds the answer to. Every key required, so the model always fills
+    /// the whole form; `decode` still tolerates a missing key rather than trusting that.
+    static let schema = #"{"type":"object","properties":{"name":{"type":"string"},"topic":{"type":"string"},"description":{"type":"string"},"requirements":{"type":"array","items":{"type":"string"}},"priority":{"type":"string","enum":["low","normal","high","urgent"]},"tags":{"type":"array","items":{"type":"string"}},"dependsOn":{"type":"array","items":{"type":"string"}}},"required":["name","topic","description","requirements","priority","tags","dependsOn"],"additionalProperties":false}"#
 
     /// Every field Optional: the model's JSON has none of TaskVersion's id/label/createdAt
     /// and may drop keys, so a direct TaskVersion decode would throw on any omission.
@@ -83,34 +87,12 @@ public struct TaskDraftRunner {
         let dependsOn: [String]?
     }
 
-    public static func decode(_ raw: String, validTaskIDs: Set<String>) throws -> TaskVersion {
-        // Strip any accidental markdown fences (same line-based algorithm as DiscoverRunner)
-        var text = raw
-        if text.contains("```") {
-            let lines = text.components(separatedBy: "\n")
-            if let firstFence = lines.firstIndex(where: { $0.hasPrefix("```") }),
-               let lastFence = lines.lastIndex(where: { $0.hasPrefix("```") }),
-               firstFence != lastFence {
-                text = lines[(firstFence+1)..<lastFence].joined(separator: "\n")
-            }
-        }
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        func rawDraft(from s: String) -> RawDraft? {
-            guard let data = s.data(using: .utf8) else { return nil }
-            return try? JSONDecoder().decode(RawDraft.self, from: data)
-        }
-
-        var draft = rawDraft(from: text)
-        if draft == nil,
-           let first = text.firstIndex(of: "{"),
-           let last = text.lastIndex(of: "}"), first < last {
-            // Salvage a stray preamble ("Here is the JSON: {…}")
-            draft = rawDraft(from: String(text[first...last]))
-        }
+    /// `json` is the object from the result envelope's `structured_output`.
+    public static func decode(_ json: String, validTaskIDs: Set<String>) throws -> TaskVersion {
+        let draft = json.data(using: .utf8).flatMap { try? JSONDecoder().decode(RawDraft.self, from: $0) }
         // Tolerate missing keys, but not the wrong object entirely ({} or {"error": …}).
         guard let d = draft, d.name != nil || d.description != nil else {
-            throw TaskDraftError.invalidJSON(raw)
+            throw TaskDraftError.invalidJSON(json)
         }
 
         let cleanList: ([String]?) -> [String] = { items in
@@ -132,12 +114,17 @@ public struct TaskDraftRunner {
         let prompt = buildPrompt(idea: idea, topics: topics, candidates: candidates)
         let raw: String
         do {
-            raw = try await PlanQARunner.ask(prompt, cwd: cwd)
+            raw = try await PlanQARunner.ask(prompt, cwd: cwd,
+                                             output: ClaudeCLI.structuredArgs(schema: schema))
         } catch PlanQAError.claudeNotFound {
             throw TaskDraftError.claudeNotFound
         } catch let PlanQAError.processFailed(code, message) {
             throw TaskDraftError.processFailed(code, message)
         }
-        return try decode(raw, validTaskIDs: validTaskIDs)
+        guard let data = ClaudeCLI.structuredOutput(fromEnvelope: raw),
+              let json = String(data: data, encoding: .utf8) else {
+            throw TaskDraftError.invalidJSON(raw)
+        }
+        return try decode(json, validTaskIDs: validTaskIDs)
     }
 }

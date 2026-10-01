@@ -1,5 +1,5 @@
 ---
-description: Open the Commands card in Claude Cockpit
+description: Open the Commands card in Claudepit
 ---
 
 ```bash

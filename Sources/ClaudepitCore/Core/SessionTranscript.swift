@@ -257,14 +257,14 @@ public struct SessionTranscript: @unchecked Sendable {
     }
 
     /// Insert an event mid-list, shifting every index the parser holds past it.
-    private mutating func insert(_ e: SessionEvent, at at: Int) {
-        func shift(_ i: Int) -> Int { i >= at ? i + 1 : i }
+    private mutating func insert(_ e: SessionEvent, at index: Int) {
+        func shift(_ i: Int) -> Int { i >= index ? i + 1 : i }
         toolIndexByID = toolIndexByID.mapValues(shift)
         hookIndexByID = hookIndexByID.mapValues(shift)
         usageIndexByCall = usageIndexByCall.mapValues(shift)
         lastSnapshotIndex = lastSnapshotIndex.map(shift)
         openCommandIndex = nil
-        events.insert(e, at: at)
+        events.insert(e, at: index)
     }
 
     /// Output of the command still open, if there is one. Returns false when it should be a row.

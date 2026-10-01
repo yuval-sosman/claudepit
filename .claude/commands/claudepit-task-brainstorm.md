@@ -16,7 +16,7 @@ that a spec could be written from it without further product decisions.
 
 Ground yourself in reality BEFORE the first question: read the files and subsystems the task
 touches, skim docs and recent commits. If the surface is wide, dispatch 1-2 read-only subagents
-in parallel (Task tool — Explore type if available, else general-purpose), each with one precise
+in parallel (Agent tool — Explore type if available, else general-purpose), each with one precise
 question ("which views render X and where does its state live? Return file:line references"),
 and read the key files yourself while they run. Never brainstorm from assumptions: a question
 grounded in the actual code ("SystemPromptCard already has an actionSlot — mount the button
@@ -49,22 +49,20 @@ each option is an approach, its description is the trade-off summary, your recom
 YAGNI ruthlessly — strip unnecessary features from every approach. All of your thinking, options,
 and pros/cons live in THIS CONVERSATION — never in the file.
 
-## Step 5 — The deliverable (STRICT contract)
+## Step 5 — The deliverable
 
-CRITICAL — the file at `brainstormPath=` is NOT a brainstorm document and it is NOT a scratchpad.
-It is a machine-parsed list of atomic suggestions the app shows the user one-by-one to Accept or
-Reject. Rules — follow EXACTLY:
+The file at `brainstormPath=` is not a brainstorm document or a scratchpad: the app parses it into
+atomic suggestions and shows them to the user one by one to Accept or Reject.
 
-1. Do NOT create, touch, or write `brainstormPath` until the brainstorm is DONE and you have real
-   suggestions to emit. Write it EXACTLY ONCE, at the very end, in a single pass. Never write partial
-   drafts, questions, notes, recommendations, or "work in progress" to it — if the file appears with
-   anything other than the final `suggestions:` list, the feature shows garbage or nothing.
-2. The file MUST contain ONLY a top-level `suggestions:` list. No `options:`, no `recommendation:`,
-   no `implementation_sketch:`, no prose, no other top-level keys.
+1. Write it once, at the very end, when the brainstorm is done and you have the final suggestions.
+   The app treats the file's appearance as the phase finishing, so a partial draft, questions,
+   notes, or a recommendation written there shows up as garbage or as nothing.
+2. The file holds only a top-level `suggestions:` list — no `options:`, `recommendation:`,
+   `implementation_sketch:`, prose, or other top-level keys.
 3. Each list item is a single atomic change to the task, typed as exactly one `kind`:
-   - `requirement` — one concrete requirement to ADD to the task's requirements list (one per item;
-     do NOT bundle several requirements into one value).
-   - `description`  — a sharper FULL replacement description for the task (usually at most one item).
+   - `requirement` — one concrete requirement to add to the task's requirements list (one per item;
+     don't bundle several requirements into one value).
+   - `description`  — a sharper full replacement description for the task (usually at most one item).
    - `tag`          — a single tag to add.
 4. `value` is the literal text that gets applied (the requirement line / the new description / the tag).
    `rationale` is one short sentence on why. Keep values self-contained — the user sees them out of context.
@@ -76,7 +74,7 @@ the real code you explored in Step 1:
 - GOOD: "Add an Analyze Prompt button to SystemPromptCard's actionSlot, visible only when isDraft is true"
 - BAD:  "Add the button in a sensible place" (not testable, no anchor in the code)
 
-Write the file with EXACTLY this schema and nothing else (this is a filled example — replace the
+Write the file in exactly this shape and nothing else (this is a filled example — replace the
 content, keep the shape):
 
 suggestions:

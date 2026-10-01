@@ -115,6 +115,7 @@ struct AppConfigSection: View {
         case .editableCopy:     return "Editable copy"
         case .installedScript:  return "Script"
         case .installedCommand: return "Command"
+        case .installedRule:    return "Rules file"
         case .settings:         return f.detail
         }
     }

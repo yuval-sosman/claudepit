@@ -30,9 +30,17 @@ enum SwiftHighlighter {
 
     /// Highlight a Swift snippet/line. Strips background so diff row tint shows through.
     static func attributed(_ code: String) -> AttributedString {
-        let ns = highlighter.highlight(code)
-        var attr = AttributedString(ns)
+        var attr = AttributedString(withoutFont(highlighter.highlight(code)))
         attr.backgroundColor = nil
         return attr
     }
+}
+
+/// Both highlighters stamp their theme's font on every run, which beats the view's monospaced
+/// `.font` — Splash's is proportional. Strip it on the AppKit side: clearing `appKit.font` on the
+/// converted `AttributedString` goes through a `Sendable`-constrained accessor NSFont fails.
+func withoutFont(_ ns: NSAttributedString) -> NSAttributedString {
+    let out = NSMutableAttributedString(attributedString: ns)
+    out.removeAttribute(.font, range: NSRange(location: 0, length: out.length))
+    return out
 }

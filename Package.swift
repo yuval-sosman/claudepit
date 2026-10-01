@@ -32,7 +32,9 @@ let package = Package(
         .executableTarget(
             name: "ClaudepitTests",
             dependencies: ["ClaudepitCore"],
-            path: "Tests/ClaudepitTests"
+            path: "Tests/ClaudepitTests",
+            // Read from the source tree via #filePath (CheckHarness.copyFixture), not a bundle.
+            exclude: ["Fixtures"]
         ),
     ]
 )

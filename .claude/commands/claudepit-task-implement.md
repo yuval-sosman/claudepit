@@ -12,16 +12,14 @@ page will surface it. Read the plan ONCE in full, read the spec it names (the sp
 binding authority; the plan is its argument), create one todo per plan task, then execute them
 ALL in order without pausing to check in between tasks.
 
-**NEVER commit or stage. This is a HARD rule, no exceptions:**
-- Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
-  `git add -A && git commit -m …`). These commands are DENIED and will fail.
-- Leave EVERY change unstaged in the working tree. The user reviews and commits from Claudepit's
-  Review Changes (Source Control) sheet — that is the ONLY place commits happen.
-- `git status`, `git diff`, and reads are fine; anything that stages or commits is not.
+**Don't stage or commit.** `git add`, `git commit`, `git stage` and `git push` — alone or combined —
+are denied in this worktree and will fail. Leave every change unstaged: the user reviews and
+commits from Claudepit's Review Changes (Source Control) sheet, the only place commits happen.
+`git status`, `git diff` and reads are fine.
 
 ## How to execute — subagent-driven, always
 
-You are the coordinator, never the typist. Dispatch a fresh implementer subagent (Task tool,
+You are the coordinator, never the typist. Dispatch a fresh implementer subagent (Agent tool,
 general-purpose) per plan task — for every plan, at every size — and keep your own context for
 coordination and review. Do not implement plan tasks yourself, and never fix findings yourself:
 fixes go back to the implementer, so your context stays clean and every change gets reviewed.
@@ -66,10 +64,10 @@ costs a visible fix; a session parked on a question costs the user their day.
 
 ## Close-out — evidence before claims
 
-The iron law: NO COMPLETION CLAIM WITHOUT FRESH EVIDENCE. If you did not run the command in this
-session and read its output, you cannot claim it passes — "should pass", "looks correct", and an
-implementer's report are not evidence. While tasks are in flight the implementers run the
-focused tests; after the LAST task, close out yourself:
+Claim only what you verified: a check passes when you ran it in this session and read its
+output — "should pass", "looks correct", and an implementer's report are not evidence. While
+tasks are in flight the implementers run the focused tests; after the LAST task, close out
+yourself:
 1. **Reality check** — `git status --porcelain` and `git diff --stat`: the diff actually
    contains the work the plan describes, not just reports claiming it does.
 2. **Build** — run the project's full build; evidence is exit 0.

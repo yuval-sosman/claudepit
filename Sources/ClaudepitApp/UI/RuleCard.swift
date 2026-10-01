@@ -7,6 +7,10 @@ struct RuleCard: View {
     @ObservedObject var app: AppState
     @State private var expanded = false
 
+    private var managedOwner: ManagedConfig? {
+        app.activePath.flatMap { ManagedArtifacts.owner(ofRuleFile: rule.sourcePath, base: $0) }
+    }
+
     private var extraKeys: [String] {
         rule.meta.keys.filter { $0 != "paths" }.sorted()
     }
@@ -24,6 +28,7 @@ struct RuleCard: View {
                         .strikethrough(rule.isOverridden)
                         .foregroundStyle(rule.isOverridden ? .secondary : .primary)
                     ProvenanceBadge(scope: rule.scope, origin: rule.origin)
+                    if let managedOwner { ManagedBadge(owner: managedOwner, app: app) }
                 }
                 if !expanded && !rule.paths.isEmpty {
                     Text(rule.paths.joined(separator: ", "))
@@ -31,7 +36,9 @@ struct RuleCard: View {
                 }
             }
             Spacer()
-            OpenInEditorButton(url: rule.sourcePath, onDelete: rule.origin.pluginID == nil ? {
+            // A managed rule would be reinstalled on the next launch, so it offers no Delete;
+            // the badge leads to its App Settings card instead.
+            OpenInEditorButton(url: rule.sourcePath, onDelete: rule.origin.pluginID == nil && managedOwner == nil ? {
                 try? FileManager.default.trashItem(at: rule.sourcePath, resultingItemURL: nil)
                 app.store.reload(activePath: app.activePath)
             } : nil)

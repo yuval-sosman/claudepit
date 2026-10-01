@@ -41,7 +41,7 @@ func managedArtifactsChecks() -> [Bool] {
                                    sourceURL: Paths.globalSettings, base: base) == nil,
             "NOT claimed in the global layer")
         try expect(
-            ManagedArtifacts.owner(ofSettingsKey: "systemPrompt.append",
+            ManagedArtifacts.owner(ofSettingsKey: "cleanupPeriodDays",
                                    sourceURL: Paths.projectSettings(URL(filePath: "/tmp/other-project")),
                                    base: base) == nil,
             "NOT claimed in another project's layer")
@@ -56,7 +56,7 @@ func managedArtifactsChecks() -> [Bool] {
     // MARK: Index tables
 
     results.append(check("settingsKeys / hookEvents / scriptName cover exactly the right entries") {
-        try expectEqual(ManagedArtifacts.settingsKeys(for: "memory-system-prompt"), ["systemPrompt.append"], "prompt key")
+        try expectEqual(ManagedArtifacts.settingsKeys(for: "memory-system-prompt"), [], "prompt is a rules file, not a key")
         try expectEqual(ManagedArtifacts.settingsKeys(for: "cleanup-period"), ["cleanupPeriodDays"], "cleanup key")
         try expectEqual(ManagedArtifacts.settingsKeys(for: "summary-hook"), [], "hooks have no settings key")
         try expectEqual(ManagedArtifacts.hookEvents(for: "summary-hook"), ["UserPromptSubmit"], "summary events")
@@ -68,6 +68,21 @@ func managedArtifactsChecks() -> [Bool] {
     })
 
     // MARK: writtenFiles
+
+    results.append(check("the memory rules file is owned in the active project only") {
+        try expectEqual(ManagedArtifacts.owner(ofRuleFile: Paths.memoryRuleFile(base), base: base)?.id,
+                        "memory-system-prompt", "claimed in this project")
+        try expect(ManagedArtifacts.owner(ofRuleFile: Paths.memoryRuleFile(URL(filePath: "/tmp/other-project")),
+                                          base: base) == nil, "NOT claimed in another project")
+        try expect(ManagedArtifacts.owner(
+            ofRuleFile: Paths.projectClaude(base).appending(path: "rules/their-rule.md"), base: base) == nil,
+                   "a user's own rule is never claimed")
+        try expectEqual(ManagedArtifacts.owner(ofRuleFile: Paths.summaryRuleFile(base), base: base)?.id,
+                        "summary-rules", "the summary rules file too")
+        let files = ManagedArtifacts.writtenFiles(for: ManagedConfig.byID("memory-system-prompt")!, base: base)
+        try expectEqual(files.map(\.role), [.editableCopy, .installedRule], "copy, then the rules file")
+        try expectEqual(files[1].url, Paths.memoryRuleFile(base), "rules file path")
+    })
 
     results.append(check("writtenFiles matches the Paths derivations") {
         let c = ManagedConfig.byID("summary-hook")!

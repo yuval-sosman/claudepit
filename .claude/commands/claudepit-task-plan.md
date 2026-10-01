@@ -79,7 +79,7 @@ patterns.
 2. Placeholder scan: search the plan for the patterns above; fix them.
 3. Type consistency: names and signatures used in later tasks match earlier definitions exactly.
 
-For plans of 3+ tasks, also dispatch ONE reviewer subagent (Task tool, general-purpose):
+For plans of 3+ tasks, also dispatch ONE reviewer subagent (Agent tool, general-purpose):
 
 > Review the plan at <plan path> against the spec at <absolute specPath>. Check: Completeness
 > (placeholders, missing steps), Spec alignment (every requirement covered, no scope creep),

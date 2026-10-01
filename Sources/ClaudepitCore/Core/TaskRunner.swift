@@ -402,10 +402,40 @@ public actor TaskRunner {
             return true
         }
         await releaseAgentName(name)
-        let cwd = URL(filePath: worktreePath)
-        // Its OWN tab. Never `openPhaseTab`: that closes the task's stored tab and overwrites
-        // `worktree.paneID`/`tabID`, which is the bookkeeping every phase focus depends on.
-        guard let fresh = await Herdr.tabCreate(cwd: cwd, label: "merge-\(branch)") else { return false }
+        let prompt = Self.mergePrompt(worktreePath: worktreePath, branch: branch,
+                                      baseRef: baseRef, baseBranch: baseBranch,
+                                      conflicted: conflicted)
+        return await launchHandoffAgent(name: name, cwd: URL(filePath: worktreePath),
+                                        tabLabel: "merge-\(branch)", prompt: prompt)
+    }
+
+    /// Open an interactive Claude agent in herdr that splits and trims the project's oversized
+    /// memory files (`MemoryReadLimit.fixPrompt`). A hand-off like the merge agent: it belongs to
+    /// no task, nothing observes it, and a second click focuses the live agent instead of
+    /// re-prompting it. Runs in the project root so the agent loads the project's memory rules.
+    @discardableResult
+    public func openMemoryFixAgent(projectRoot: URL, prompt: String) async -> Bool {
+        let name = MemoryReadLimit.fixAgentName(projectPath: projectRoot)
+        guard !launching.contains(name) else { return false }
+        launching.insert(name)
+        defer { launching.remove(name) }
+        if await agentReady(name) {
+            await HerdrFocus.focus(agentName: name, tabID: nil, cwd: projectRoot)
+            return true
+        }
+        await releaseAgentName(name)
+        return await launchHandoffAgent(name: name, cwd: projectRoot, tabLabel: "memory-fix",
+                                        prompt: prompt)
+    }
+
+    /// Start `name` in a fresh, focused tab and hand it `prompt`. The shared tail of every
+    /// one-off agent (merge, memory fix); the caller holds `launching` and has already released
+    /// any stale agent by that name.
+    ///
+    /// Its OWN tab. Never `openPhaseTab`: that closes the task's stored tab and overwrites
+    /// `worktree.paneID`/`tabID`, which is the bookkeeping every phase focus depends on.
+    private func launchHandoffAgent(name: String, cwd: URL, tabLabel: String, prompt: String) async -> Bool {
+        guard let fresh = await Herdr.tabCreate(cwd: cwd, label: tabLabel) else { return false }
         // User-initiated, so focus it (unlike an armed auto-run, which must not steal focus).
         await herdr(["tab", "focus", fresh.tabID], cwd: nil)
         let pane = fresh.paneID
@@ -419,9 +449,6 @@ public actor TaskRunner {
             if attempt < 4 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
         }
         guard await agentReady(name) else { return false }
-        let prompt = Self.mergePrompt(worktreePath: worktreePath, branch: branch,
-                                      baseRef: baseRef, baseBranch: baseBranch,
-                                      conflicted: conflicted)
         await herdr(["agent", "prompt", name, prompt], cwd: cwd)
         return true
     }
@@ -789,7 +816,7 @@ public actor TaskRunner {
         case .codeReview:
             task.links.reviewPath = marked ?? expected ?? task.links.reviewPath
             // The FILE first, scrollback only as a fallback. The block is written into review.md,
-            // so the file is complete; scrollback is a 400-line window that a long review overruns
+            // so the file is complete; scrollback is a fixed-length window that a long review overruns
             // and that is gone entirely once herdr restarts or the pane closes.
             let fileText = task.links.reviewPath
                 .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? ""

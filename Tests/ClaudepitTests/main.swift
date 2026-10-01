@@ -38,6 +38,7 @@ let groups: [(String, () -> [Bool])] = [
     ("StatsSnapshot", statsSnapshotChecks),
     ("ProjectUsage", projectUsageChecks),
     ("MemoryLog", memoryLogChecks),
+    ("MemoryReadLimit", memoryReadLimitChecks),
     ("AppConfigStore", appConfigStoreChecks),
     ("HookRegistration", hookRegistrationChecks),
     ("HerdrPath", herdrPathChecks),
