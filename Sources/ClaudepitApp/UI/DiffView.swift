@@ -16,8 +16,16 @@ struct DiffView: View {
     /// Rendered markdown's type scale: a document's own headings elsewhere, the transcript's
     /// tighter ones inside a tool call.
     var markdownScale: MarkdownScale = .document
-    @State private var rendered = true
+    /// Shown in the toolbar instead of the file label — Source Control's "Lines 12–40" per block.
+    var title: String? = nil
+    /// Controls placed in the toolbar before Copy — Source Control's Stage / Discard Block.
+    var accessory: AnyView? = nil
+    /// Markdown opens rendered unless this is false. A review wants the raw +/− lines: rendered,
+    /// a markdown diff shows only the added text and hides what was removed.
+    var startsRendered: Bool = true
+    @State private var renderFlipped = false
     @State private var showAll = false
+    private var rendered: Bool { startsRendered != renderFlipped }
     @Environment(\.textHighlight) private var highlight
 
     private var hasNumbers: Bool { lines.contains { $0.oldLine != nil || $0.newLine != nil } }
@@ -30,7 +38,13 @@ struct DiffView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Toolbar: file name (first .file line) + action buttons
             HStack(spacing: 8) {
-                if let fileLabel = lines.first(where: { $0.kind == .file })?.text {
+                if let title {
+                    Text(title)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else if let fileLabel = lines.first(where: { $0.kind == .file })?.text {
                     Text(TranscriptFormat.path(fileLabel))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -56,8 +70,9 @@ struct DiffView: View {
                     Text("−\(stat.removed)").font(TranscriptStyle.meta).foregroundStyle(TranscriptStyle.removed)
                 }
                 Spacer()
+                if let accessory { accessory }
                 if isMarkdown {
-                    Button { rendered.toggle() } label: {
+                    Button { renderFlipped.toggle() } label: {
                         Image(systemName: rendered ? "chevron.left.forwardslash.chevron.right" : "text.viewfinder")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }

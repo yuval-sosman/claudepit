@@ -29,5 +29,17 @@ func planQARunnerChecks() -> [Bool] {
             try expect(prompt.contains("Assistant: First answer"), "missing assistant turn")
             try expect(prompt.contains("Question: Second question"), "missing final question")
         },
+        check("buildPrompt_rewritesOnlyWhereOffered") {
+            let plan = PlanQARunner.buildPrompt(planContent: "x", history: [], question: "q")
+            try expect(plan.contains("[[SUGGEST_IMPROVEMENT]]"), "a plan is offered rewrites, as before")
+            let spec = PlanQARunner.buildPrompt(planContent: "x", history: [], question: "q", contentLabel: "spec")
+            try expect(!spec.contains("[[SUGGEST_IMPROVEMENT]]"), "other content isn't, unless asked")
+            let loop = PlanQARunner.buildPrompt(planContent: "x", history: [], question: "q", contentLabel: "loop.md",
+                                                about: "It is what a bare /loop runs.", suggestsImprovements: true)
+            try expect(loop.contains("would improve the loop.md"), "names its own content: \(loop)")
+            try expect(loop.contains("It is what a bare /loop runs."), "says what the content is")
+            let rewrite = PlanQARunner.buildImprovementPrompt(planContent: "x", suggestion: "y", subject: "loop.md")
+            try expect(rewrite.hasPrefix("You are rewriting a loop.md"), "names the subject: \(rewrite)")
+        },
     ]
 }

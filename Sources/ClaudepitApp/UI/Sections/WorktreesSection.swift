@@ -4,553 +4,288 @@ import ClaudepitCore
 import AppKit
 #endif
 
+/// What the Worktrees page remembers between visits: the worktree you were looking at and your search.
+struct WorktreesPageMemory {
+    var selection: String?
+    var query = ""
+}
+
+/// The Worktrees page — the active project's git worktrees as a list card (`WorktreeListView`) and
+/// the selected one in a detail card (`WorktreeDetailView`), the Sessions/Plans/Memory shape. This
+/// view only wires them to `AppState`: the deep links (`focusWorktreeName`,
+/// `autoOpenReviewWorktree`), the Source Control sheet, the remove confirmation, herdr, and a
+/// rescan every 10 s while the page shows — an agent editing in a worktree writes nothing the
+/// FileWatcher sees, so without it the counts and the changes list went stale.
 struct WorktreesSection: View {
     @ObservedObject var app: AppState
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Worktrees").font(.title2).bold()
-                Spacer()
-                Button { app.reloadWorktrees(forceFetch: true) } label: {
-                    Image(systemName: Icon.refresh).foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Refresh worktrees and fetch the base branch")
-            }
-
-            if app.worktrees.isEmpty {
-                emptyState
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 6) {
-                            ForEach(app.worktrees) { wt in
-                                WorktreeCard(app: app, wt: wt,
-                                             focused: app.focusWorktreeName == wt.name)
-                                    .id(wt.name)
-                            }
-                        }
-                    }
-                    .onAppear {
-                        applyFocus(proxy: proxy)
-                    }
-                    .onChange(of: app.focusWorktreeName) { _, _ in applyFocus(proxy: proxy) }
-                }
-            }
-        }
-        .onAppear { app.reloadWorktrees() }
-    }
-
-    private func applyFocus(proxy: ScrollViewProxy) {
-        guard let name = app.focusWorktreeName else { return }
-        DispatchQueue.main.async {
-            withAnimation { proxy.scrollTo(name, anchor: .top) }
-            app.focusWorktreeName = nil
-        }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.largeTitle).foregroundStyle(.secondary)
-            Text("No worktrees").font(.body).foregroundStyle(.secondary)
-            Text("Start one with `claude --worktree <name>`.")
-                .font(.caption).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 40)
-    }
-}
-
-private struct WorktreeCard: View {
-    @ObservedObject var app: AppState
-    let wt: WorktreeInfo
-    var focused: Bool = false
-    @State private var expanded = false
-
-    // Lazily-loaded inspector data (fetched on expand).
-    @State private var changedFiles: [ChangedFile] = []
-    @State private var changesLimit = 5
-    @State private var recentCommits: [RecentCommit] = []
-    @State private var recentExpanded = false
-    @State private var recentLimit = 5
-    @State private var remoteWebURL: String?
-    @State private var commitInfo: CommitInfo?
-    @State private var expandedDiffPath: String?
-    @State private var diffText: [String: String] = [:]
-    @State private var showReviewChanges = false
-    @State private var showChangeLegend = false
-    @State private var cleanupBusy = false
-    @State private var cleanupError: String?
-    @State private var confirmRemove = false
+    @State private var selection: String?
+    @State private var query = ""
+    @State private var reveal: String?
+    /// The worktree whose Source Control sheet is up.
+    @State private var reviewTarget: WorktreeInfo?
     // ponytail: captured once on tap — keyWindow resolves to the sheet after it opens, causing shrink
-    @State private var capturedSheetSize: CGSize = CGSize(width: 900, height: 560)
+    @State private var sheetSize = CGSize(width: 900, height: 560)
+    @State private var pendingRemoval: WorktreeInfo?
+    /// Worktree paths with an unlock/remove in flight, and the last such call's failure per path.
+    @State private var busy: Set<String> = []
+    @State private var errors: [String: String] = [:]
+    @State private var clock = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
-    private func openReviewChanges() {
+    private var worktrees: [WorktreeInfo] { app.worktrees }
+    private var selected: WorktreeInfo? { selection.flatMap { p in worktrees.first { $0.path == p } } }
+
+    private var context: WorktreePageContext {
+        var c = WorktreePageContext()
+        for wt in worktrees {
+            let refs = WorktreeListing.tasks(in: wt.path, from: app.tasks).map(WorktreeTaskRef.init)
+            if !refs.isEmpty { c.tasks[wt.path] = refs }
+            if let agent = app.worktreeAgentName(path: wt.path) { c.liveAgents[wt.path] = agent }
+        }
+        c.colorSlots = app.worktreeColorSlots
+        c.herdrAvailable = WorktreeResumer.available()
+        c.hasProject = app.activePath != nil
+        return c
+    }
+
+    var body: some View {
+        let context = context
+        MasterDetailLayout(listWidth: 300) {
+            GlassCard {
+                WorktreeListView(worktrees: worktrees, context: context, selection: $selection, query: $query,
+                                 revealRequest: $reveal, actions: actions(context))
+            }
+        } detail: {
+            detailCard(context)
+        }
+        .onAppear {
+            selection = app.worktreesPageMemory.selection
+            query = app.worktreesPageMemory.query
+            app.reloadWorktrees()
+            applyFocus()
+            ensureSelection()
+            publishTitle()
+        }
+        .onDisappear {
+            app.worktreesPageMemory = WorktreesPageMemory(selection: selection, query: query)
+            // A deep link whose worktree never turned up must not fire on some later visit.
+            app.focusWorktreeName = nil
+            app.autoOpenReviewWorktree = nil
+        }
+        .onChange(of: app.focusWorktreeName) { applyFocus() }
+        .onChange(of: app.autoOpenReviewWorktree) { applyFocus() }
+        .onChange(of: worktrees.map(\.path)) { applyFocus(); ensureSelection() }
+        .onChange(of: app.activePath) { selection = nil; query = ""; ensureSelection() }
+        // The path bar's last crumb. On the worktree list changing too: a task renamed, or the
+        // selected worktree removed, changes what it should say.
+        .onChange(of: selection) { publishTitle() }
+        .onChange(of: worktrees) { publishTitle() }
+        .onReceive(clock) { _ in
+            app.refreshSessionLiveness()
+            app.reloadWorktrees()
+        }
+        .sheet(item: $reviewTarget) { wt in
+            ReviewChangesSheet(source: GitChangeSource(worktreePath: wt.path, title: context.title(wt))) {
+                committed(in: wt)
+            }
+            .frame(width: sheetSize.width, height: sheetSize.height)
+        }
+        .alert(removalTitle, isPresented: removalBinding, presenting: pendingRemoval) { wt in
+            Button("Cancel", role: .cancel) {}
+            Button(wt.isClean ? "Remove" : "Remove and Discard", role: .destructive) { remove(wt) }
+        } message: { wt in
+            Text(removalMessage(wt))
+        }
+    }
+
+    // MARK: Detail
+
+    @ViewBuilder private func detailCard(_ context: WorktreePageContext) -> some View {
+        if let wt = selected {
+            WorktreeDetailView(wt: wt, context: context, session: session(of: wt),
+                               lastCommit: app.worktreeLastCommit[wt.path],
+                               isBusy: busy.contains(wt.path), cleanupError: errors[wt.path],
+                               actions: actions(context),
+                               onDirtyAgain: { app.worktreeLastCommit.removeValue(forKey: wt.path) }) {
+                // `wt` is re-read from `app.worktrees` on every render — the freshness the
+                // control's merge-state block requires.
+                // The SAME live-agent guard the board pill and the task detail panel apply (§4.9):
+                // merging under a working agent rewrites files it is holding in context. `lockState`
+                // rather than `isActive` alone — a task agent carries no `agent_session`, so
+                // `ownerSessionID` may only ever arrive via the cwd fallback, and an unlocked-but-
+                // active worktree is caught by `isActive`.
+                UpdateFromBaseControl(app: app, wt: wt,
+                                      externallyDisabled: busy.contains(wt.path),
+                                      disabledReason: (wt.isActive || wt.lockState.isLockedLive)
+                                        ? UpdateFromBaseControl.liveAgentReason : nil,
+                                      taskID: context.tasks[wt.path]?.first?.id)
+            }
+            // A different worktree is a different page: diffs, limits and folds start over.
+            .id(wt.path)
+        } else {
+            GlassCard {
+                PageListEmptyState(icon: "arrow.triangle.branch",
+                                   title: worktrees.isEmpty ? "No worktrees" : "Select a worktree",
+                                   detail: worktrees.isEmpty
+                                       ? "A task's worktree, or one started with claude --worktree <name>, shows here."
+                                       : "Pick one on the left, or move through the list with ↑ and ↓.")
+            }
+        }
+    }
+
+    /// The owning session's title and stored bullets — the same data the Sessions page shows
+    /// (stamped onto `app.sessions` by SessionScanner).
+    private func session(of wt: WorktreeInfo) -> WorktreeSessionBrief? {
+        guard let sid = wt.ownerSessionID, let s = app.sessions.first(where: { $0.id == sid }) else { return nil }
+        return WorktreeSessionBrief(title: s.title, bullets: s.bulletSummary?.bullets ?? [],
+                                    hasHerdrPane: app.herdrSessions[sid] != nil)
+    }
+
+    // MARK: Actions
+
+    private func actions(_ context: WorktreePageContext) -> WorktreeActions {
+        var a = WorktreeActions()
+        a.refresh = { app.reloadWorktrees(forceFetch: true) }
+        if let base = app.activePath {
+            a.openFolder = {
+                let dir = base.appending(path: ".claude/worktrees")
+                NSWorkspace.shared.open(FileManager.default.fileExists(atPath: dir.path) ? dir : base)
+            }
+        }
+        a.sourceControl = { wt in openSourceControl(wt) }
+        a.openSession = { wt in
+            guard let sid = wt.ownerSessionID else { return }
+            app.focusSessionID = wt.ownerSubagentID.map { "\(sid)/\($0)" } ?? sid
+            app.selected = .sessions
+        }
+        if context.herdrAvailable {
+            a.resumeSession = { wt in
+                guard let sid = wt.ownerSessionID else { return }
+                let pane = app.herdrSessions[sid]?.paneID
+                Task {
+                    await WorktreeResumer.resume(sessionID: sid, cwd: wt.path, label: wt.name, existingPaneID: pane)
+                    // herdr is a TUI — selecting its tab changes nothing visible until its window is raised.
+                    app.activateHerdrHost()
+                }
+            }
+            a.openInHerdr = { wt in
+                Task {
+                    await WorktreeResumer.checkout(branch: wt.branch, cwd: wt.path)
+                    app.activateHerdrHost()
+                }
+            }
+        }
+        a.openTask = { id in
+            app.focusTaskID = id
+            app.selected = .tasks
+        }
+        a.unlock = { wt in runCleanup(wt) { await WorktreeStager.unlock(worktreePath: wt.path) } }
+        a.remove = { wt in pendingRemoval = wt }
+        return a
+    }
+
+    private func openSourceControl(_ wt: WorktreeInfo) {
         #if canImport(AppKit)
         if let win = NSApp.keyWindow ?? NSApp.mainWindow {
             let f = win.frame
-            capturedSheetSize = CGSize(width: max(900, f.width * 0.92), height: max(560, f.height * 0.92))
+            sheetSize = CGSize(width: max(900, f.width * 0.92), height: max(560, f.height * 0.92))
         }
         #endif
-        showReviewChanges = true
+        reviewTarget = wt
     }
 
-    // Owning-session bullet summary (shown in an expandable section, like Recent Commits).
-    @State private var summaryExpanded = false
-
-    var body: some View {
-        ExpandableCard(expanded: $expanded) {
-            HStack(spacing: 10) {
-                // State dot: green = running now, gray ring = idle/unbound.
-                Circle()
-                    .fill(wt.bindingState == .active ? Color.green : Color.secondary.opacity(0.35))
-                    .frame(width: 9, height: 9)
-                HStack(spacing: 6) {
-                    Text(wt.name).font(.headline)
-                    Text(statusPhrase).font(.caption).foregroundStyle(statusColor)
-                    if wt.isLocked {
-                        Image(systemName: "lock.fill")
-                            .font(.caption2).foregroundStyle(.secondary)
-                            .help("Locked")
-                    }
-                }
-                Spacer()
-                // Actions — visible even when the card is collapsed.
-                HStack(spacing: 12) {
-                    if !wt.isClean {
-                        Button { openReviewChanges() } label: {
-                            Label("Source Control", systemImage: "rectangle.split.2x1")
-                        }
-                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.caption)
-                        .help("Open Source Control")
-                    }
-                    if !wt.branch.isEmpty, WorktreeResumer.available() {
-                        Button { Task { await WorktreeResumer.checkout(branch: wt.branch, cwd: wt.path) } } label: {
-                            Label("Checkout", systemImage: "arrow.triangle.branch")
-                        }
-                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.caption)
-                        .help("git checkout \(wt.branch) in a new tab")
-                    }
-                    if let sid = wt.ownerSessionID {
-                        let focusID = wt.ownerSubagentID.map { "\(sid)/\($0)" } ?? sid
-                        Button { app.focusSessionID = focusID; app.selected = .sessions } label: {
-                            Label("Navigate to Session", systemImage: Icon.jump)
-                        }
-                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.caption)
-                        .help("Navigate to Session")
-                    }
-                    if let sid = wt.ownerSessionID, WorktreeResumer.available() {
-                        Button { Task { await WorktreeResumer.resume(sessionID: sid, cwd: wt.path, label: wt.name, existingPaneID: app.herdrSessions[sid]?.paneID) } } label: {
-                            Label("Resume Session", systemImage: "play.circle")
-                        }
-                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.caption)
-                        .help(app.herdrSessions[sid] != nil ? "Focus existing herdr pane" : "Resume Session")
-                    }
-                }
-                // Quiet trailing metadata — only what's actionable. Each renders only when its
-                // own count is non-zero; both are 0 when no base is resolvable.
-                if wt.aheadCount > 0 {
-                    Label("\(wt.aheadCount) ahead", systemImage: "arrow.up")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .help("\(wt.aheadCount) commit\(wt.aheadCount == 1 ? "" : "s") ahead of \(wt.baseBranch)")
-                }
-                if wt.behindCount > 0 {
-                    // Orange: behind is actionable (there is a button for it). Ahead is not.
-                    Label("\(wt.behindCount) behind", systemImage: "arrow.down")
-                        .font(.caption).foregroundStyle(.orange)
-                        .help("\(wt.behindCount) commit\(wt.behindCount == 1 ? "" : "s") on \(wt.baseRef) not in this worktree")
-                }
+    /// Source Control committed: remember what it made, so the Changes section can say so once the
+    /// tree is clean, and rescan for the new counts.
+    private func committed(in wt: WorktreeInfo) {
+        Task {
+            let files = await WorktreeInspector.changedFiles(at: wt.path)
+            if files.isEmpty, let info = await WorktreeInspector.commitInfo(at: wt.path) {
+                app.worktreeLastCommit[wt.path] = (info.shortHash, info.subject)
             }
-        } detail: {
-            VStack(alignment: .leading, spacing: 10) {
-                // Owning session's bullet summary — collapsed by default like Recent Commits.
-                if let bullets = owningSessionBullets, !bullets.isEmpty {
-                    DisclosureGroup(isExpanded: $summaryExpanded) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(Array(bullets.enumerated()), id: \.offset) { _, b in
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text("•").foregroundStyle(.tertiary)
-                                    Text(b).font(.caption).foregroundStyle(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                            }
-                        }
-                        .padding(.top, 2)
-                    } label: {
-                        SectionHeaderLabel("Session Summary", icon: "text.alignleft")
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    SectionHeaderLabel("Path", icon: "folder")
-                    HStack(spacing: 6) {
-                        FilePathLabel(url: URL(filePath: wt.path))
-                        Button { copyToPasteboard(wt.path) } label: {
-                            Image(systemName: Icon.copyPath).font(.caption)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Copy path")
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    SectionHeaderLabel("Branch", icon: "arrow.triangle.branch")
-                    Text(wt.branch.isEmpty ? "detached" : wt.branch)
-                        .font(.caption.monospaced()).foregroundStyle(.secondary)
-                }
-
-                // Changed files (only when dirty) — tap a row to expand its diff.
-                if let c = app.worktreeLastCommit[wt.path], changedFiles.isEmpty {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.seal.fill").foregroundStyle(.green).font(.caption)
-                        Text("COMMITTED").font(.caption2).fontWeight(.bold).foregroundStyle(.secondary).tracking(0.6)
-                        Text(c.hash).font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                        Spacer()
-                    }
-                    Text(c.subject).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-                if !changedFiles.isEmpty {
-                    HStack(spacing: 6) {
-                        Image(systemName: "pencil.circle")
-                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-                        Text("CHANGES")
-                            .font(.caption).fontWeight(.bold).foregroundStyle(.secondary)
-                            .textCase(.uppercase).tracking(0.6)
-                        Button { showChangeLegend.toggle() } label: {
-                            Image(systemName: "info.circle.fill")
-                                .font(.caption).foregroundStyle(Color.accentColor)
-                        }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $showChangeLegend, arrowEdge: .bottom) { ChangeLegendPopover() }
-                        Spacer()
-                        Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
-                    }
-                    ForEach(changedFiles.prefix(changesLimit)) { f in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Button { toggleDiff(f) } label: {
-                                HStack(spacing: 6) {
-                                    Text(badge(f.change)).font(.caption2.monospaced().bold())
-                                        .foregroundStyle(badgeColor(f.change)).frame(width: 14)
-                                    Text(f.path).font(.caption.monospaced()).foregroundStyle(.secondary)
-                                        .lineLimit(1).truncationMode(.middle)
-                                    Spacer()
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            if expandedDiffPath == f.path, let raw = diffText[f.path] {
-                                DiffView(lines: diffLinesFromUnified(raw, path: f.path),
-                                         isSwift: f.path.hasSuffix(".swift"),
-                                         isMarkdown: f.path.hasSuffix(".md"),
-                                         language: GenericHighlighter.language(forExtension: (f.path as NSString).pathExtension))
-                            }
-                        }
-                    }
-                    if changedFiles.count > changesLimit {
-                        Button { changesLimit += 10 } label: {
-                            Label("More", systemImage: "ellipsis").font(.caption)
-                        }
-                        .buttonStyle(.plain).foregroundStyle(Color.accentColor)
-                    }
-                }
-
-                // HEAD COMMIT — same row format as Recent Commits rows.
-                SectionHeaderLabel("Head Commit", icon: "point.topleft.down.to.point.bottomright.curvepath")
-                if let c = commitInfo {
-                    let url = remoteWebURL.map { "\($0)/commit/\(c.shortHash)" }
-                    Button {
-                        if let url, let u = URL(string: url) {
-                            #if canImport(AppKit)
-                            NSWorkspace.shared.open(u)
-                            #endif
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(c.shortHash).font(.caption2.monospaced())
-                                .foregroundStyle(url != nil ? Color.accentColor : Color.secondary.opacity(0.6))
-                            Text(c.subject).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            Spacer()
-                            Text(c.relativeDate).font(.caption2).foregroundStyle(.tertiary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(url == nil)
-                    .help(url == nil ? "No remote to open" : "Open commit in browser")
-                } else {
-                    Text("No commit info").font(.caption).foregroundStyle(.tertiary)
-                }
-
-                // Recent commits (read-only history) — collapsed by default.
-                if !recentCommits.isEmpty {
-                    DisclosureGroup(isExpanded: $recentExpanded) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(recentCommits) { c in
-                                commitRow(c)
-                            }
-                            if recentCommits.count >= recentLimit {
-                                Button {
-                                    recentLimit += 10
-                                    Task { recentCommits = await WorktreeInspector.recentCommits(at: wt.path, limit: recentLimit) }
-                                } label: {
-                                    Label("More", systemImage: "ellipsis").font(.caption)
-                                }
-                                .buttonStyle(.plain).foregroundStyle(Color.accentColor)
-                            }
-                        }
-                        .padding(.top, 2)
-                    } label: {
-                        SectionHeaderLabel("Recent Commits", icon: "clock")
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    Image(systemName: "info.circle").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                    Text("WORKTREE STATE").font(.caption).fontWeight(.bold).foregroundStyle(.secondary)
-                        .tracking(0.6)
-                    Image(systemName: wt.isLocked ? "lock.fill" : "lock.open")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(wt.isLocked ? .orange : .secondary)
-                        .help(wt.isLocked ? "Locked" : "Unlocked")
-                    Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
-                }
-                cleanupSection
-            }
-            .task(id: expanded) {
-                guard expanded else { return }
-                // Resolve the remote first so commit rows are clickable on first render.
-                remoteWebURL = await WorktreeInspector.remoteWebURL(at: wt.path)
-                changedFiles = await WorktreeInspector.changedFiles(at: wt.path)
-                if !changedFiles.isEmpty { app.worktreeLastCommit.removeValue(forKey: wt.path) }
-                recentCommits = await WorktreeInspector.recentCommits(at: wt.path, limit: recentLimit)
-                commitInfo = await WorktreeInspector.commitInfo(at: wt.path)
-            }
-        }
-        // Card text/icons run small (all .caption tiers); nudge everything up one
-        // step in a single place instead of touching ~30 font call sites.
-        .dynamicTypeSize(.xLarge)
-        // Sheet + alert must live on the always-present card root, not the detail VStack
-        // (which isn't in the tree when collapsed), so they work even when card is closed.
-        .sheet(isPresented: $showReviewChanges) {
-            ReviewChangesSheet(source: GitChangeSource(worktreePath: wt.path, title: wt.name)) {
-                Task {
-                    changedFiles = await WorktreeInspector.changedFiles(at: wt.path)
-                    commitInfo = await WorktreeInspector.commitInfo(at: wt.path)
-                    recentCommits = await WorktreeInspector.recentCommits(at: wt.path, limit: recentLimit)
-                    if changedFiles.isEmpty, let info = commitInfo {
-                        app.worktreeLastCommit[wt.path] = (info.shortHash, info.subject)
-                    }
-                }
-            }
-            .frame(width: capturedSheetSize.width, height: capturedSheetSize.height)
-        }
-        .alert("Remove this worktree?", isPresented: $confirmRemove) {
-            Button("Cancel", role: .cancel) {}
-            Button("Remove", role: .destructive) {
-                runCleanup { await WorktreeStager.remove(worktreePath: wt.path, force: !wt.isClean) }
-            }
-        } message: {
-            Text(wt.isClean
-                 ? "Runs `git worktree remove` on \(wt.name). The working directory is deleted; the branch is kept."
-                 : "Force-removes \(wt.name) with \(wt.dirtyCount) uncommitted file\(wt.dirtyCount == 1 ? "" : "s"). The working directory and its uncommitted changes are permanently deleted; the branch is kept.")
-        }
-        .onAppear { if focused { expanded = true }; autoOpenReviewIfTargeted() }
-        .onChange(of: focused) { _, isFocused in if isFocused { expanded = true } }
-        .onChange(of: app.autoOpenReviewWorktree) { _, _ in autoOpenReviewIfTargeted() }
-    }
-
-    /// One-shot: when this card is the auto-open target, expand it and present the
-    /// Source Control sheet (deep-link from a task's "Review changes" button). Clears
-    /// the flag on the next tick so it fires once — mirrors WorktreesSection.applyFocus.
-    private func autoOpenReviewIfTargeted() {
-        guard app.autoOpenReviewWorktree == wt.name else { return }
-        expanded = true
-        openReviewChanges()
-        DispatchQueue.main.async { app.autoOpenReviewWorktree = nil }
-    }
-
-    /// Someone is working in this worktree right now. `lockState` is a `kill(pid, 0)` syscall,
-    /// not a subprocess, so reading it from a view body is safe (and the body above already does).
-    private var agentIsLive: Bool { wt.isActive || wt.lockState.isLockedLive }
-
-    /// Worktree-state verdict + lock-aware action, on one line. Locked & in use →
-    /// no action. Locked & stale (idle + dead pid) → Unlock. Unlocked+clean → Remove.
-    /// Below it, the base-sync control: both worktree-level operations read as one group.
-    @ViewBuilder private var cleanupSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                switch wt.lockState {
-                case .lockedLive(let pid):
-                    stateText(wt.isActive
-                                ? "Locked and in use by an active session"
-                                : "Locked by a running process (pid \(pid))")
-                case .lockedStale(let pid):
-                    pillButton("Unlock", icon: "lock.open.fill") {
-                        runCleanup { await WorktreeStager.unlock(worktreePath: wt.path) }
-                    }
-                    stateText("Locked, but the owning process is gone" + (pid.map { " (pid \($0))" } ?? "") + " and no session is active")
-                case .unlocked:
-                    if wt.isClean {
-                        pillButton("Remove Worktree", icon: Icon.delete) { confirmRemove = true }
-                        stateText("Safe to remove — no uncommitted work")
-                    } else {
-                        pillButton("Remove Worktree", icon: Icon.delete) { confirmRemove = true }
-                        stateText("This worktree is unlocked but has uncommitted files. Removing it will permanently discard that work.", color: .orange)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            if let err = cleanupError {
-                Text(err).font(.caption2).foregroundStyle(.red)
-            }
-            // `wt` here is the ForEach element, re-read on every scan — the freshness the
-            // control's merge-state block requires.
-            // The SAME live-agent guard the board pill and the task detail panel apply (§4.9):
-            // merging under a working agent rewrites files it is holding in context. `lockState`
-            // rather than `isActive` alone — a task agent carries no `agent_session`, so
-            // `ownerSessionID` may only ever arrive via the cwd fallback, and an unlocked-but-
-            // active worktree is caught by `isActive`.
-            UpdateFromBaseControl(app: app, wt: wt,
-                                  externallyDisabled: cleanupBusy,
-                                  disabledReason: agentIsLive
-                                    ? UpdateFromBaseControl.liveAgentReason : nil)
+            app.reloadWorktrees()
         }
     }
 
-    private func stateText(_ s: String, color: Color = .primary) -> some View {
-        Text(s).font(.caption).foregroundStyle(color).fixedSize(horizontal: false, vertical: true)
+    private var removalBinding: Binding<Bool> {
+        Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } })
     }
 
-    /// App pill button (matches PluginsSection "Reload Plugins"): leading icon + text,
-    /// tinted translucent background. Icon lives in the button, not the label text.
-    private func pillButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 10, weight: .medium))
-                Text(title).font(.caption).fontWeight(.medium)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 7))
-            .foregroundStyle(.blue)
+    private var removalTitle: String {
+        guard let wt = pendingRemoval else { return "Remove this worktree?" }
+        return "Remove “\(wt.name)”?"
+    }
+
+    private func removalMessage(_ wt: WorktreeInfo) -> String {
+        var parts: [String] = []
+        parts.append(wt.isClean
+            ? "Runs `git worktree remove`. The working directory is deleted; the branch \(wt.branch.isEmpty ? "" : "“\(wt.branch)” ")is kept."
+            : "Force-removes it with \(wt.dirtyCount) uncommitted file\(wt.dirtyCount == 1 ? "" : "s"). The working directory and its uncommitted changes are permanently deleted; the branch \(wt.branch.isEmpty ? "" : "“\(wt.branch)” ")is kept.")
+        let tasks = WorktreeListing.tasks(in: wt.path, from: app.tasks)
+        if !tasks.isEmpty {
+            let names = tasks.map { "“\($0.name)”" }.joined(separator: ", ")
+            parts.append("\(tasks.count == 1 ? "Task" : "Tasks") \(names) work\(tasks.count == 1 ? "s" : "") here and will lose \(tasks.count == 1 ? "its" : "their") checkout.")
         }
-        .buttonStyle(.plain)
-        .disabled(cleanupBusy)
+        return parts.joined(separator: "\n\n")
     }
 
-    /// Run a git mutation, then refresh the worktree list (state may have changed:
-    /// unlock flips lockState; remove drops the card).
-    private func runCleanup(_ op: @escaping () async -> (ok: Bool, message: String)) {
-        cleanupBusy = true; cleanupError = nil
+    private func remove(_ wt: WorktreeInfo) {
+        let order = WorktreeListing.sections(worktrees, query: query, taskNames: context.taskNames,
+                                             liveAgents: context.liveAgents)
+            .flatMap { $0.items.map(\.path) }
+        runCleanup(wt) {
+            let r = await WorktreeStager.remove(worktreePath: wt.path, force: !wt.isClean)
+            // Stay in the list: the neighbour takes the removed worktree's place.
+            if r.ok, selection == wt.path { selection = WorktreeListing.neighbour(of: wt.path, in: order) }
+            return r
+        }
+    }
+
+    /// Run a git mutation, then rescan (unlock flips the lock state; remove drops the row).
+    private func runCleanup(_ wt: WorktreeInfo, _ op: @escaping () async -> (ok: Bool, message: String)) {
+        busy.insert(wt.path)
+        errors[wt.path] = nil
         Task {
             let r = await op()
-            cleanupBusy = false
+            busy.remove(wt.path)
             if r.ok { app.reloadWorktrees() }
-            else { cleanupError = r.message.isEmpty ? "git command failed" : r.message }
+            else { errors[wt.path] = r.message.isEmpty ? "git command failed" : r.message }
         }
     }
 
-    @ViewBuilder private func commitRow(_ c: RecentCommit) -> some View {
-        let url = remoteWebURL.map { "\($0)/commit/\(c.fullHash)" }
-        Button {
-            if let url, let u = URL(string: url) {
-                #if canImport(AppKit)
-                NSWorkspace.shared.open(u)
-                #endif
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Text(c.shortHash).font(.caption2.monospaced())
-                    .foregroundStyle(url != nil ? Color.accentColor : Color.secondary.opacity(0.6))
-                Text(c.subject).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Spacer()
-                Text(c.relativeDate).font(.caption2).foregroundStyle(.tertiary)
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(url == nil)
-        .help(url == nil ? "No remote to open" : "Open commit in browser")
+    // MARK: Selection and deep links
+
+    private func publishTitle() {
+        let title = selected.map { context.title($0) }
+        if app.selectedWorktreeTitle != title { app.selectedWorktreeTitle = title }
     }
 
-    private func toggleDiff(_ f: ChangedFile) {
-        let path = f.path
-        if expandedDiffPath == path {
-            expandedDiffPath = nil
-        } else {
-            expandedDiffPath = path
-            if diffText[path] == nil {
-                Task { diffText[path] = await WorktreeInspector.diff(at: wt.path, path: path, untracked: f.change == .untracked) }
-            }
+    /// Keeps a worktree on screen: the remembered one if it still exists, else the first listed.
+    private func ensureSelection() {
+        guard selected == nil else { return }
+        let order = WorktreeListing.sections(worktrees, query: query, taskNames: context.taskNames,
+                                             liveAgents: context.liveAgents)
+            .flatMap { $0.items.map(\.path) }
+        selection = order.first ?? worktrees.first?.path
+    }
+
+    /// One-shot deep links, by worktree name: select it (clearing a search that hides it), scroll
+    /// it into view, and — for `autoOpenReviewWorktree`, a task's "Review changes" — present Source
+    /// Control. Held until the worktree is in the scan, which may still be running on arrival.
+    private func applyFocus() {
+        if let name = app.focusWorktreeName, let wt = worktrees.first(where: { $0.name == name }) {
+            select(wt)
+            DispatchQueue.main.async { app.focusWorktreeName = nil }
+        }
+        if let name = app.autoOpenReviewWorktree, let wt = worktrees.first(where: { $0.name == name }) {
+            select(wt)
+            openSourceControl(wt)
+            DispatchQueue.main.async { app.autoOpenReviewWorktree = nil }
         }
     }
 
-    private func badge(_ c: ChangedFile.Change) -> String {
-        switch c {
-        case .modified: return "M"
-        case .added: return "A"
-        case .deleted: return "D"
-        case .renamed: return "R"
-        case .untracked: return "?"
-        }
-    }
-
-    private func badgeColor(_ c: ChangedFile.Change) -> Color {
-        switch c {
-        case .added, .untracked: return .green
-        case .deleted: return .red
-        case .renamed: return .blue
-        case .modified: return .orange
-        }
-    }
-
-    /// The owning session's stored bullet summary — same data the Sessions page
-    /// shows (already stamped onto `app.sessions` by SessionScanner).
-    private var owningSessionBullets: [String]? {
-        guard let sid = wt.ownerSessionID else { return nil }
-        return app.sessions.first { $0.id == sid }?.bulletSummary?.bullets
-    }
-
-    // The dot encodes live-vs-not; the branch lives on the detail HEAD line.
-    // So the collapsed caption carries only the word the gray dot can't disambiguate.
-    private var statusPhrase: String {
-        switch wt.bindingState {
-        case .active:  return "Running now"
-        case .idle:    return "Idle"
-        case .unbound: return "Unbound"
-        }
-    }
-
-    private var statusColor: Color {
-        wt.bindingState == .active ? .green : .secondary
-    }
-
-    private func copyToPasteboard(_ s: String) {
-        #if canImport(AppKit)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(s, forType: .string)
-        #endif
-    }
-}
-
-private struct ChangeLegendPopover: View {
-    private let items: [(String, String, Color)] = [
-        ("M", "modified",       .orange),
-        ("A", "added (staged)", .green),
-        ("D", "deleted",        .red),
-        ("R", "renamed",        .blue),
-        ("?", "untracked",      .green),
-    ]
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(items, id: \.0) { badge, label, color in
-                HStack(spacing: 8) {
-                    Text(badge).font(.caption2.monospaced().bold())
-                        .foregroundStyle(color).frame(width: 14)
-                    Text(label).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(12)
+    private func select(_ wt: WorktreeInfo) {
+        if !WorktreeListing.matches(wt, query: query, taskName: context.taskNames[wt.path]) { query = "" }
+        selection = wt.path
+        reveal = wt.path
     }
 }

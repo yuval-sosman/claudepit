@@ -32,11 +32,13 @@ import ClaudepitCore
 enum DevSnapshot {
     /// Links render only when an action exists for them; these stand in for the app's, so plan
     /// and subagent links draw as they would in a window.
-    static let actions = TranscriptActions(openPlan: { print("openPlan \($0)") })
+    static let actions = TranscriptActions(openPlan: { print("openPlan \($0)") },
+                                           openLoop: { print("openLoop \($0)") })
 
     static func runIfRequested() -> Bool {
         if DevSessionsSnapshot.runIfRequested() { return true }
         if DevPagesSnapshot.runIfRequested() { return true }
+        if DevSourceControl.runIfRequested() { return true }
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--snapshot-transcript"), i + 1 < args.count else { return false }
         func value(_ flag: String) -> String? {

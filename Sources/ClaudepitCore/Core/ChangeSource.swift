@@ -19,11 +19,102 @@ public protocol ChangeSource: Sendable {
     func discardFile(path: String, untracked: Bool) async -> (ok: Bool, message: String)
     func applyHunk(patch: String, reverse: Bool, cached: Bool) async -> (ok: Bool, message: String)
     func commit(message: String) async -> (ok: Bool, message: String)
+
+    // Everything below has a default built on the calls above (the brainstorm source uses them);
+    // the git source overrides each with the real thing.
+
+    /// Branch and merge state for the header and the commit bar.
+    func context() async -> ChangeContext
+    /// One side of a file's diff, knowing what the row knows (a rename's old path, a conflict).
+    func diff(file: StagedFile, staged: Bool) async -> String
+    /// Several files at once; a failure is reported, never swallowed.
+    func stage(_ files: [StagedFile]) async -> (ok: Bool, message: String)
+    func unstage(_ files: [StagedFile]) async -> (ok: Bool, message: String)
+    /// `staged == false`: the unstaged changes only. `true`: everything, back to HEAD.
+    func discard(_ files: [StagedFile], staged: Bool) async -> (ok: Bool, message: String)
+    /// Where a listed file is on disk, for Open / Reveal / conflict editing; nil when it isn't a file.
+    func fileURL(path: String) -> URL?
+    /// The commit that `commit` just made.
+    func headCommit() async -> CommitInfo?
+    /// A stored version of a file (in a temp file) — the "before" of an image.
+    func storedCopy(_ file: StagedFile, _ version: StoredVersion) async -> URL?
+    func markResolved(_ files: [StagedFile]) async -> (ok: Bool, message: String)
+    func takeSide(_ file: StagedFile, _ side: ConflictSide) async -> (ok: Bool, message: String)
+    func deleteConflicted(_ file: StagedFile) async -> (ok: Bool, message: String)
+    func abortMerge() async -> (ok: Bool, message: String)
+    /// Keys the unsent commit message, so closing the sheet doesn't lose it; nil keeps none.
+    var draftKey: String? { get }
 }
 
 public extension ChangeSource {
     var commitVerb: String { "Commit" }
     var needsCommitMessage: Bool { true }
+
+    func context() async -> ChangeContext { ChangeContext() }
+    func diff(file: StagedFile, staged: Bool) async -> String {
+        await diff(path: file.path, staged: staged, untracked: file.untracked)
+    }
+    func stage(_ files: [StagedFile]) async -> (ok: Bool, message: String) {
+        await Self.each(files) { await stageFile(path: $0.path) }
+    }
+    func unstage(_ files: [StagedFile]) async -> (ok: Bool, message: String) {
+        await Self.each(files) { await unstageFile(path: $0.path) }
+    }
+    func discard(_ files: [StagedFile], staged: Bool) async -> (ok: Bool, message: String) {
+        await Self.each(files) { await discardFile(path: $0.path, untracked: $0.untracked) }
+    }
+    func fileURL(path: String) -> URL? { nil }
+    func headCommit() async -> CommitInfo? { nil }
+    func storedCopy(_ file: StagedFile, _ version: StoredVersion) async -> URL? { nil }
+    func markResolved(_ files: [StagedFile]) async -> (ok: Bool, message: String) { await stage(files) }
+    func takeSide(_ file: StagedFile, _ side: ConflictSide) async -> (ok: Bool, message: String) { (false, "Not supported here") }
+    func deleteConflicted(_ file: StagedFile) async -> (ok: Bool, message: String) { (false, "Not supported here") }
+    func abortMerge() async -> (ok: Bool, message: String) { (false, "Not supported here") }
+    var draftKey: String? { nil }
+
+    /// Run `op` on every file, keeping every failure. The sheet's old loops dropped them all
+    /// ("Stage All") or all but the last ("Discard All").
+    static func each(_ files: [StagedFile], _ op: (StagedFile) async -> (ok: Bool, message: String)) async -> (ok: Bool, message: String) {
+        var failures: [String] = []
+        for f in files {
+            let r = await op(f)
+            if !r.ok { failures.append(r.message.isEmpty ? "\(f.path): failed" : r.message) }
+        }
+        return failures.isEmpty ? (true, "") : (false, failures.joined(separator: "\n"))
+    }
+}
+
+/// The file the Source Control sheet has selected, as one of its lists shows it — a partly
+/// staged file is in both Staged and Changes, so the list is part of the identity.
+public struct ChangeSelection: Equatable, Sendable {
+    public var path: String
+    public var staged: Bool
+    public var untracked: Bool
+    /// In the Merge Conflicts list (then `staged` is false).
+    public var conflicted: Bool
+    public init(path: String, staged: Bool, untracked: Bool, conflicted: Bool = false) {
+        self.path = path; self.staged = staged; self.untracked = untracked; self.conflicted = conflicted
+    }
+
+    /// Where the selection goes after the lists change: it stays on its row if that row still
+    /// exists; a file that moved lists (just staged, unstaged, or marked resolved) is followed into
+    /// the list it is in now — staying put showed "No diff" for a file that had just been staged;
+    /// a file that is gone (committed, discarded) leaves nothing selected.
+    public static func follow(_ selection: ChangeSelection?, staged: [String], unstaged: [String],
+                              conflicted: [String] = []) -> ChangeSelection? {
+        guard var s = selection else { return nil }
+        let own = s.conflicted ? conflicted : (s.staged ? staged : unstaged)
+        if own.contains(s.path) { return s }
+        // Nearest other list first: a staged file just unstaged lands in Changes, a resolved
+        // conflict in Staged.
+        let order: [(list: [String], staged: Bool, conflicted: Bool)] = s.conflicted
+            ? [(staged, true, false), (unstaged, false, false)]
+            : s.staged ? [(unstaged, false, false), (conflicted, false, true)]
+                       : [(staged, true, false), (conflicted, false, true)]
+        guard let hit = order.first(where: { $0.list.contains(s.path) }) else { return nil }
+        s.staged = hit.staged; s.conflicted = hit.conflicted
+        return s
+    }
 }
 
 /// Git backend — a thin adapter binding a worktree path to `WorktreeStager`.
@@ -52,6 +143,40 @@ public struct GitChangeSource: ChangeSource {
     public func commit(message: String) async -> (ok: Bool, message: String) {
         await WorktreeStager.commit(at: worktreePath, message: message)
     }
+
+    public func context() async -> ChangeContext { await WorktreeStager.context(at: worktreePath) }
+    public func diff(file: StagedFile, staged: Bool) async -> String {
+        await WorktreeStager.diff(at: worktreePath, file: file, staged: staged)
+    }
+    public func stage(_ files: [StagedFile]) async -> (ok: Bool, message: String) {
+        await WorktreeStager.stageFiles(at: worktreePath, files)
+    }
+    public func unstage(_ files: [StagedFile]) async -> (ok: Bool, message: String) {
+        await WorktreeStager.unstageFiles(at: worktreePath, files)
+    }
+    public func discard(_ files: [StagedFile], staged: Bool) async -> (ok: Bool, message: String) {
+        guard staged else { return await WorktreeStager.discardFiles(at: worktreePath, files) }
+        return await Self.each(files) { await WorktreeStager.discardAllChanges(at: worktreePath, file: $0) }
+    }
+    public func fileURL(path: String) -> URL? { URL(filePath: worktreePath).appending(path: path) }
+    public func headCommit() async -> CommitInfo? { await WorktreeInspector.commitInfo(at: worktreePath) }
+    public func storedCopy(_ file: StagedFile, _ version: StoredVersion) async -> URL? {
+        // The last commit has a rename under its old name.
+        await WorktreeStager.storedCopy(at: worktreePath, path: version == .head ? (file.origPath ?? file.path) : file.path, version)
+    }
+    public func markResolved(_ files: [StagedFile]) async -> (ok: Bool, message: String) {
+        await WorktreeStager.markResolved(at: worktreePath, files)
+    }
+    public func takeSide(_ file: StagedFile, _ side: ConflictSide) async -> (ok: Bool, message: String) {
+        await WorktreeStager.takeSide(at: worktreePath, path: file.path, side)
+    }
+    public func deleteConflicted(_ file: StagedFile) async -> (ok: Bool, message: String) {
+        await WorktreeStager.deleteConflicted(at: worktreePath, path: file.path)
+    }
+    public func abortMerge() async -> (ok: Bool, message: String) {
+        await WorktreeStager.abortMerge(worktreePath: worktreePath)
+    }
+    public var draftKey: String? { worktreePath }
 }
 
 /// Brainstorm backend — each pending/accepted suggestion is a one-file, one-hunk change.

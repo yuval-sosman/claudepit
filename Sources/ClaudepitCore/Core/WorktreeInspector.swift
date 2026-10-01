@@ -152,20 +152,12 @@ public enum WorktreeInspector {
         return "https://\(host)/\(path)"
     }
 
-    /// Run a read-only git command in `dir`. Returns "" on any failure.
+    /// Run a read-only git command in `dir`. Returns "" on any failure. Through `Subprocess`, so
+    /// stderr is drained while git runs and a stuck call dies at the ceiling — the hand-rolled
+    /// copy this replaced never read stderr at all. Untrimmed, unlike `GitBase.git`: a porcelain
+    /// record can open with a space (" M path") and a diff's trailing newline is content.
     private static func git(_ args: [String], at dir: String) async -> String {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global().async {
-                let p = Process()
-                p.executableURL = URL(filePath: "/usr/bin/env")
-                p.arguments = ["git", "-C", dir] + args
-                let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-                p.standardInput = FileHandle.nullDevice
-                do { try p.run() } catch { cont.resume(returning: ""); return }
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                cont.resume(returning: p.terminationStatus == 0 ? (String(data: data, encoding: .utf8) ?? "") : "")
-            }
-        }
+        guard let r = await Subprocess.run("/usr/bin/env", ["git", "-C", dir] + args), r.ok else { return "" }
+        return r.stdout
     }
 }

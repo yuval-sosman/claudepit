@@ -229,58 +229,142 @@ extension WorktreeScanner {
     /// Peeks at transcripts in the parent repo's Claude project dir to find which
     /// session's cwd matches each worktree path. Used when slug-based binding fails
     /// (Claude Code stores worktree sessions under the main repo slug, not a worktree slug).
+    ///
+    /// Each transcript's mention counts come from `mentions` (a per-file cache): this runs on
+    /// every worktree scan — every FileWatcher tick, and every 10 s while the Worktrees page
+    /// shows — and reading every transcript whole each time cost ~6 s of CPU per scan on a
+    /// 200 MB project, whenever one worktree had no transcript to settle it.
     private static func buildCWDMap(repoRoot: String, worktreePaths: [String]) -> [String: String] {
         guard !worktreePaths.isEmpty else { return [:] }
         let parentSlug = claudeSlug(for: repoRoot)
         let projectDir = Paths.globalClaude.appendingPathComponent("projects/\(parentSlug)")
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
         guard let files = try? FileManager.default.contentsOfDirectory(
-            at: projectDir, includingPropertiesForKeys: [URLResourceKey.contentModificationDateKey],
-            options: .skipsHiddenFiles)
+            at: projectDir, includingPropertiesForKeys: keys, options: .skipsHiddenFiles)
         else { return [:] }
 
+        // A fresh listing, so these prefetched values are current (it is a URL kept across
+        // listings that goes on answering with stale ones).
         let transcripts = files
             .filter { $0.pathExtension == "jsonl" }
-            .sorted { (a, b) -> Bool in
-                let key = URLResourceKey.contentModificationDateKey
-                let da = (try? a.resourceValues(forKeys: [key]))?.contentModificationDate ?? .distantPast
-                let db = (try? b.resourceValues(forKeys: [key]))?.contentModificationDate ?? .distantPast
-                return da > db  // newest first — most likely to be the right session
+            .map { url -> (url: URL, modified: Date, size: Int) in
+                let v = try? url.resourceValues(forKeys: Set(keys))
+                return (url, v?.contentModificationDate ?? .distantPast, v?.fileSize ?? 0)
             }
+            .sorted { $0.modified > $1.modified }   // newest first — most likely to be the right session
 
         let wtSet = Set(worktreePaths)
-        // Prefix all worktrees share — used to skip unrelated cwd lines fast.
+        // Prefix all worktrees share — used to skip unrelated text fast.
         let wtPrefix = repoRoot + "/.claude/worktrees/"
         var result: [String: String] = [:]
-        for transcript in transcripts {
-            let sid = transcript.deletingPathExtension().lastPathComponent
-            guard let cwd = Self.dominantWorktreeCWD(transcript: transcript, prefix: wtPrefix, candidates: wtSet)
-            else { continue }
+        for t in transcripts {
+            let counts = mentions.counts(in: t.url, size: t.size, modified: t.modified, prefix: wtPrefix)
+            guard let cwd = dominant(counts, among: wtSet) else { continue }
+            let sid = t.url.deletingPathExtension().lastPathComponent
             if result[cwd] == nil { result[cwd] = sid }
             if result.count == worktreePaths.count { break }
         }
+        mentions.prune(inFolder: projectDir.path, keeping: Set(transcripts.map(\.url.path)))
         return result
     }
 
-    /// Reads the full transcript and returns the most-mentioned candidate worktree path,
-    /// counting both explicit `"cwd"` fields and raw path string occurrences in tool calls.
-    /// Sessions that never record the worktree as cwd (e.g. cwd stays at main repo throughout)
-    /// still reference the worktree path heavily in bash commands and file reads.
-    private static func dominantWorktreeCWD(transcript: URL, prefix: String, candidates: Set<String>) -> String? {
-        guard let text = try? String(contentsOf: transcript, encoding: .utf8) else { return nil }
-        var counts: [String: Int] = [:]
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            // Fast path: skip lines that can't reference any candidate path
-            guard line.contains(prefix) else { continue }
-            for candidate in candidates {
-                // Count every occurrence of the worktree path in the raw line text —
-                // covers both "cwd" fields and tool call command/path strings.
-                var searchFrom = line.startIndex
-                while let r = line.range(of: candidate, range: searchFrom..<line.endIndex) {
-                    counts[candidate, default: 0] += 1
-                    searchFrom = r.upperBound
+    /// The most-mentioned candidate worktree path, counting both explicit `"cwd"` fields and raw
+    /// path occurrences in tool calls — sessions whose cwd stays at the main repo still reference
+    /// the worktree heavily in bash commands and file reads. A tie names no one: a session that
+    /// mentions several worktrees equally (a review across them) owns none of them — and picking
+    /// one by dictionary order, as this once did, could change the owner from launch to launch.
+    static func dominant(_ counts: [String: Int], among candidates: Set<String>) -> String? {
+        let ranked = counts.filter { candidates.contains($0.key) && $0.value > 0 }
+            .sorted { $0.value > $1.value }
+        guard let top = ranked.first else { return nil }
+        if ranked.count > 1, ranked[1].value == top.value { return nil }
+        return top.key
+    }
+
+    static let mentions = MentionCache()
+
+    /// Per transcript: how often each worktree path (`<prefix><name>`) is mentioned, with how far
+    /// the file has been read. An unchanged file costs nothing; a grown one — a live session's —
+    /// is read only from where the last count stopped; a shorter one is recounted from the start.
+    final class MentionCache: @unchecked Sendable {
+        struct Entry {
+            var prefix: String
+            /// Bytes counted so far: always just past a newline, so a half-written line is
+            /// counted once it is whole, never twice.
+            var offset: Int
+            var size: Int
+            var modified: Date
+            var counts: [String: Int]
+        }
+        private var map: [String: Entry] = [:]
+        private let lock = NSLock()
+
+        func counts(in file: URL, size: Int, modified: Date, prefix: String) -> [String: Int] {
+            lock.lock()
+            let cached = map[file.path]
+            lock.unlock()
+            if let cached, cached.prefix == prefix, cached.size == size, cached.modified == modified {
+                return cached.counts
+            }
+            var entry = cached ?? Entry(prefix: prefix, offset: 0, size: 0, modified: .distantPast, counts: [:])
+            if entry.prefix != prefix || size < entry.offset {
+                entry = Entry(prefix: prefix, offset: 0, size: 0, modified: .distantPast, counts: [:])
+            }
+            if let handle = try? FileHandle(forReadingFrom: file) {
+                defer { try? handle.close() }
+                if (try? handle.seek(toOffset: UInt64(entry.offset))) != nil,
+                   let tail = try? handle.readToEnd(), !tail.isEmpty {
+                    let whole = tail.lastIndex(of: UInt8(ascii: "\n")).map { tail.distance(from: tail.startIndex, to: $0) + 1 } ?? 0
+                    if whole > 0 {
+                        MentionCache.count(tail.prefix(whole), prefix: prefix, into: &entry.counts)
+                        entry.offset += whole
+                    }
+                }
+            }
+            entry.size = size
+            entry.modified = modified
+            lock.lock()
+            map[file.path] = entry
+            lock.unlock()
+            return entry.counts
+        }
+
+        /// Forget transcripts that are gone from `folder`, so the cache can't grow without bound.
+        func prune(inFolder folder: String, keeping live: Set<String>) {
+            lock.lock(); defer { lock.unlock() }
+            map = map.filter { path, _ in !path.hasPrefix(folder + "/") || live.contains(path) }
+        }
+
+        /// Adds one to `counts["<prefix><name>"]` for every `<prefix><name>` in `bytes`, where the
+        /// name is the next path component. Byte search (`memmem`): a transcript runs to tens of MB.
+        static func count(_ bytes: Data, prefix: String, into counts: inout [String: Int]) {
+            let needle = Array(prefix.utf8)
+            guard !needle.isEmpty else { return }
+            bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else { return }
+                let end = base + raw.count
+                var cursor = base
+                while cursor < end,
+                      let hit = memmem(cursor, end - cursor, needle, needle.count) {
+                    var p = hit + needle.count
+                    let nameStart = p
+                    while p < end, isNameByte(p.load(as: UInt8.self)) { p += 1 }
+                    var nameEnd = p
+                    // "…/worktrees/foo." at the end of a sentence names foo.
+                    while nameEnd > nameStart, (nameEnd - 1).load(as: UInt8.self) == UInt8(ascii: ".") { nameEnd -= 1 }
+                    if nameEnd > nameStart {
+                        let name = String(decoding: UnsafeRawBufferPointer(start: nameStart, count: nameEnd - nameStart), as: UTF8.self)
+                        counts[prefix + name, default: 0] += 1
+                    }
+                    cursor = max(p, hit + 1)
                 }
             }
         }
-        return counts.max(by: { $0.value < $1.value })?.key
+
+        private static func isNameByte(_ b: UInt8) -> Bool {
+            (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+                || b == UInt8(ascii: "-") || b == UInt8(ascii: "_") || b == UInt8(ascii: ".") || b == UInt8(ascii: "+")
+                || b >= 0x80   // UTF-8 continuation of a non-ASCII name
+        }
     }
 }

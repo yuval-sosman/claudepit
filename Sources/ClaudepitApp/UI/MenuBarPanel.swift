@@ -186,6 +186,7 @@ struct MenuBarPanel: View {
         case .task(let id):       focus { app.focusTaskID = id;        app.selected = .tasks }
         case .worktree(let name): focus { app.focusWorktreeName = name; app.selected = .worktrees }
         case .session(let id):    focus { app.focusSessionID = id;      app.selected = .sessions }
+        case .loop(let id):       focus { app.focusLoopID = id;         app.selected = .loops }
         case .none:               break
         }
     }
@@ -206,7 +207,7 @@ struct MenuBarPanel: View {
 
 /// Shared by the panel and the status item's label so both describe the same state.
 @MainActor func menuBarSummary(_ app: AppState) -> MenuBarSummary {
-    let attention = buildAttention(tasks: app.tasks, worktrees: app.worktrees)
+    let attention = buildAttention(tasks: app.tasks, worktrees: app.worktrees, loops: app.loopAttention())
     let agents = buildLiveAgents(agents: app.herdrAgents, tasks: app.tasks)
     return buildMenuBarSummary(
         workstream: buildWorkstream(attention: attention, agents: agents, tasks: app.tasks),

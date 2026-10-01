@@ -24,8 +24,10 @@ let groups: [(String, () -> [Bool])] = [
     ("WorktreeScanner", worktreeScannerChecks),
     ("WorktreeInspector", worktreeInspectorChecks),
     ("DiffHunks", diffHunksChecks),
+    ("ConflictDocument", conflictDocumentChecks),
     ("WorktreeStager", worktreeStagerChecks),
     ("WorktreeResumer", worktreeResumerChecks),
+    ("WorktreeListing", worktreeListingChecks),
     ("HomeAttention", homeAttentionChecks),
     ("HomeLayout", homeLayoutChecks),
     ("HomeAgents", homeAgentsChecks),
@@ -59,6 +61,11 @@ let groups: [(String, () -> [Bool])] = [
     ("ReviewFindingParse", reviewFindingParseChecks),
     ("Subprocess", subprocessChecks),
     ("HerdrFocus", herdrFocusChecks),
+    ("Loops", loopChecks),
+    ("LoopAgents", loopAgentChecks),
+    ("LoopPermissions", loopPermissionChecks),
+    ("LoopDocs", loopDocsChecks),
+    ("LoopWrappedPrompt", loopWrappedPromptChecks),
 ]
 
 var results: [Bool] = []

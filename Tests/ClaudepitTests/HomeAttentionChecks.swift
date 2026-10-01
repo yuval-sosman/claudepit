@@ -45,6 +45,16 @@ func homeAttentionChecks() -> [Bool] {
         try expectEqual(Set(items.map(\.id)), ["task:pend"], "only the one with a pending decision")
     })
 
+    results.append(check("a loop waiting on a prompt is a blocked need, linked to its loop and pane") {
+        let loop = LoopAttention(id: "s1#89115f01", title: "Watch the deploy", reason: "Loop waiting for you: permission prompt",
+                                 paneID: "w3:p1Q", since: Date(timeIntervalSince1970: 100))
+        let items = buildAttention(tasks: [], worktrees: [], loops: [loop])
+        try expectEqual(items.map(\.id), ["loop:s1#89115f01"], "listed")
+        try expectEqual(items.first?.target, .loop("s1#89115f01"), "target")
+        try expectEqual(items.first?.severity, .blocked, "a blocked need")
+        try expectEqual(items.first?.paneID, "w3:p1Q", "carries its pane")
+    })
+
     results.append(check("severity sort: failed > blocked > awaitingReview > dirtyWorktree") {
         let tasks = [task("ar", .awaitingReview), task("f", .failed), task("bl", .blocked)]
         let items = buildAttention(tasks: tasks, worktrees: [wt("d", dirty: 1)])

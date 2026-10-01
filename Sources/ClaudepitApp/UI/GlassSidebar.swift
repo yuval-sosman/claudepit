@@ -14,8 +14,16 @@ private let sidebarGroups: [SidebarGroup] = [
     SidebarGroup(label: "Configuration", sections: [.claudeMd, .plugins, .agents, .skills, .commands, .rules, .mcp, .hooks, .settings]),
 ]
 
+/// A count on a sidebar item — Loops shows how many run, or in red how many need you.
+struct SidebarBadge: Equatable {
+    let text: String
+    let color: Color
+    let help: String
+}
+
 struct GlassSidebar: View {
     @Binding var selected: Section
+    var badges: [Section: SidebarBadge] = [:]
     @State private var expanded = false
 
     var body: some View {
@@ -83,10 +91,14 @@ struct GlassSidebar: View {
                     } else {
                         Image(systemName: section.systemImage)
                             .frame(width: 24)
+                            .overlay(alignment: .topTrailing) {
+                                if !expanded, let badge = badges[section] { badgeView(badge, compact: true) }
+                            }
                     }
                     if expanded {
                         Text(section.title).lineLimit(1)
                         Spacer()
+                        if let badge = badges[section] { badgeView(badge, compact: false) }
                     }
                 }
                 .padding(.vertical, 8)
@@ -99,5 +111,15 @@ struct GlassSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .help(badges[section]?.help ?? "")
+    }
+
+    private func badgeView(_ badge: SidebarBadge, compact: Bool) -> some View {
+        Text(badge.text)
+            .font(.system(size: compact ? 8.5 : 10, weight: .bold).monospacedDigit())
+            .foregroundStyle(.white)
+            .padding(.horizontal, compact ? 3.5 : 5).padding(.vertical, compact ? 0.5 : 1)
+            .background(badge.color.opacity(0.85), in: Capsule())
+            .offset(x: compact ? 7 : 0, y: compact ? -6 : 0)
     }
 }

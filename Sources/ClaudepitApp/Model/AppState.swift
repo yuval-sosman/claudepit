@@ -70,6 +70,11 @@ final class AppState: ObservableObject {
                 selectedPlanName = nil
                 selectedSpecName = nil
                 selectedMemoryTitle = nil
+                selectedWorktreeTitle = nil
+                selectedLoopTitle = nil
+                // Leaving the Loops page hands its 5 s rescans to the 30 s background poll (and
+                // arriving takes them back) — a fire writes nothing the FileWatcher sees.
+                if oldValue == .loops || selected == .loops { syncLoopPolling() }
                 // Clear cross-section crumb when navigating away from plans
                 if oldValue == .plans {
                     breadcrumbSessionCrumb = nil
@@ -176,7 +181,30 @@ final class AppState: ObservableObject {
     var plansPageMemory = DocumentPageMemory()
     var specsPageMemory = DocumentPageMemory()
     var memoryPageMemory = MemoryPageMemory()
-    @Published var loops: [CronEntry] = []
+    var worktreesPageMemory = WorktreesPageMemory()
+    var loopsPageMemory = LoopsPageMemory()
+    /// Every loop the Loops page shows, with the machine's capabilities and live sessions
+    /// (`reloadLoops`). Rebuilt only while that page is up — it reads transcripts.
+    @Published var loopSnapshot: LoopSnapshot = .empty
+    /// Loops just started in a new herdr session, shown as "Starting…" until the session's
+    /// transcript records them.
+    @Published var loopLaunches: [LoopLaunch] = []
+    /// The page's last action, said once ("Sent to …", "Copied", an error).
+    @Published var loopNotice: LoopNotice?
+    /// One-shot: show the loop a transcript's fire belongs to.
+    @Published var focusLoop: LoopFocus?
+    /// One-shot: show a loop by its id (Home's and the menu bar's "needs you" rows).
+    @Published var focusLoopID: String?
+    /// The Loops page's selection, as the path bar's last crumb names it.
+    @Published var selectedLoopTitle: String?
+    /// Owns the per-transcript loop logs, so a rescan reads only what was appended.
+    let loopScanner = LoopScanner()
+    var isScanningLoops = false
+    var loopRescanPending = false
+    /// Keeps the snapshot (and the sidebar's badge) current off the Loops page — a loop that
+    /// stopped on a permission prompt writes nothing anyone watches. Runs only while some loop is
+    /// running or being started (`syncLoopPolling`).
+    var loopPollTimer: Timer?
     @Published var tasks: [ProjectTask] = []
     /// Task specs/plans that exist on disk, stamped with their mtime. Cached here rather than
     /// stat-ed from a view body — Home's activity feed reads it on every render.
@@ -199,6 +227,8 @@ final class AppState: ObservableObject {
     @Published var selectedPlanName: String?
     @Published var selectedSpecName: String?
     @Published var selectedMemoryTitle: String?
+    /// The Worktrees page's selection, as the path bar's last crumb names it.
+    @Published var selectedWorktreeTitle: String?
     @Published var focusMemoryFileID: String?
     @Published var breadcrumbSessionCrumb: String?   // set when navigating to Plans from a session
     @Published var breadcrumbSessionID: String?      // session ID to restore when tapping back
@@ -523,6 +553,12 @@ final class AppState: ObservableObject {
                 // Only Home shows project usage, and new transcript activity is what just
                 // triggered this reload — elsewhere, Home's onAppear catches up.
                 if self.selected == .home { self.reloadProjectUsage() }
+                // The Loops page rescans on its own clock; elsewhere the sidebar's badge wants one
+                // first scan, then a rescan whenever something might be running.
+                if self.selected == .loops || self.loopSnapshot.scannedAt == nil
+                    || self.loopSnapshot.activeCount > 0 || !self.loopLaunches.isEmpty {
+                    self.reloadLoops()
+                }
             }
         }
         refreshHerdrAgents()
@@ -562,31 +598,23 @@ final class AppState: ObservableObject {
             // to `DispatchQueue.global()` itself. Nothing blocks the main actor, and — unlike the
             // `Task.detached` this replaced — nothing occupies a cooperative-pool thread either.
             let raw = await WorktreeScanner().scanRaw(activePath: path, fetchBase: fetch)
-            guard let self, let raw else { self?.worktrees = []; return }
-            self.worktrees = WorktreeScanner.merge(
+            guard let self else { return }
+            guard let raw else { if !self.worktrees.isEmpty { self.worktrees = [] }; return }
+            let merged = WorktreeScanner.merge(
                 parsed: raw.parsed, dirty: raw.dirty, trackedDirty: raw.trackedDirty,
                 ahead: raw.ahead, behind: raw.behind,
                 merging: raw.mergeInProgress, conflicted: raw.conflicted,
                 baseBranch: raw.baseBranch, baseRef: raw.baseRef,
                 sessions: self.sessions, cwdMap: raw.cwdMap)
-            let activePaths = Set(self.worktrees.map { $0.path })
-            self.worktreeLastCommit = self.worktreeLastCommit.filter { activePaths.contains($0.key) }
+            // Publish only a change: every view observing `AppState` re-renders on each set, and
+            // this runs on every watcher tick plus every 10 s while the Worktrees page shows.
+            if merged != self.worktrees { self.worktrees = merged }
+            let activePaths = Set(merged.map { $0.path })
+            if self.worktreeLastCommit.keys.contains(where: { !activePaths.contains($0) }) {
+                self.worktreeLastCommit = self.worktreeLastCommit.filter { activePaths.contains($0.key) }
+            }
             self.updateWorktreeColors()
         }
-    }
-
-    func reloadLoops() {
-        loops = CronStore.load(activePath: activePath)
-    }
-
-    func addLoop(interval: String, prompt: String) throws {
-        _ = try CronRunner.create(interval: interval, prompt: prompt, cwd: activePath)
-        reloadLoops()
-    }
-
-    func deleteLoop(_ entry: CronEntry) {
-        try? CronStore.delete(id: entry.id, sourcePath: entry.sourcePath)
-        reloadLoops()
     }
 
     func reloadMemory() {

@@ -14,6 +14,30 @@ To change the hook's behavior, edit the source:
 
 The hook fires on `UserPromptSubmit`, reads `session_id` and `cwd` from stdin JSON, looks up existing bullets from `~/.claude/projects/<project-slug>/summary/<session-id>.json`, and injects a summary instruction into Claude's context via `additionalContext`.
 
+**It skips a loop's scheduled fires — and the reports of the work they start.** A `/loop` or cron
+fire also triggers `UserPromptSubmit`, and the hook input has no field saying so (a recorded hook got
+`hook_event_name`, `permission_mode`, `prompt`, `prompt_id`, `scratchpad_dir`, `session_title` and the
+usual ids — nothing more). Three checks, in order:
+- **A report on loop work.** A fire that hands its task to a subagent ends its turn at the launch;
+  the agent's report arrives as a turn of its own (`prompt` starts with `<task-notification>`),
+  unattended, once per fire. It counts when the call it names (`<tool-use-id>`) ran in a fire's
+  turn, a `/loop`'s first run (or a turn that armed one with CronCreate), or a turn that was itself
+  such a report. A report on an agent a person asked for still gets the instruction.
+- **A scheduled prompt.** The prompt is one this session gave CronCreate or ScheduleWakeup. This is
+  the race-free check: those calls are written when the loop is set up, while a fire's own
+  `scheduled_task_fire` record can land *after* the hook runs (a recorded hook at a fire saw only the
+  previous turn's records). The whole transcript is searched — `bytes.find`, ~30 ms on 67 MB.
+- **The fire record**, for the `<<…>>` loop.md/built-in markers, whose fired text is expanded and so
+  never equals what was scheduled: the newest fire record no prompt record has followed yet, compared
+  the way the record keeps the prompt (squashed, cut at 200); a CLI that writes the prompt record
+  first is handled too. A typed prompt that jumped ahead of a queued fire still gets the instruction.
+
+Without this, every fire — and every report a delegating loop gets — asked for a Bash write of the
+summary: a tool call each, and (real `/loop 1m` runs) a heredoc Claude Code flagged as "expansion
+obfuscation", which stopped the unattended loop at a permission prompt. Those runs were on Haiku,
+where `--permission-mode auto` quietly falls back to the ask mode (see Loops Page → Agents); whether
+Auto would have let the write through is untested.
+
 **Per prompt it injects only what changes** — the current bullets, the file to write, and the JSON
 shape with a fresh `updatedAt` (~430 chars). The rules for *how* to write them (silently, ≤15
 bullets, merge rather than duplicate, outcomes, tense, the one-bullet rule for a conversational
@@ -379,11 +403,269 @@ instead of being emitted as a bare `key=`, which the agent would resolve against
 
 **Versions** — a task keeps a **main version** (its top-level `name`/`topic`/`description`/`requirements`/`priority`/`tags`/`dependsOn` fields — TaskRunner and all views read these directly) plus optional **suggestion versions** in `ProjectTask.suggestions: [TaskVersion]?` (both `topic` and `suggestions` are Optional for Codable back-compat — missing keys decode to `nil`). Suggestions are alternate proposals compared against main. Pure mutations live on `ProjectTask`: `applyField(_:from:)` (per-field Accept) and `promote(_:now:)` (Make main — keeps old main as a suggestion). **Suggestion** editing is **backlog-only**: once `status != .backlog` the versions UI and the New Draft button are locked (`TaskVersionsSheet` shows its lock banner, and the five suggestion mutators on `AppState` guard on `status == .backlog`). The **Edit** button — which edits main in place, writing straight through `TaskStore.update` with no `AppState` guard — is wider: `ProjectTask.allowsMainEdit` keeps it available in the **Backlog** and **Brainstorm** columns (`phase == nil || phase == .brainstorm`, excluding `.done`), minus `.running`/`.blocked`, because brainstorm is the phase whose job *is* refining the request, but a live herdr agent already holds the old description in its prompt and would never see the edit. UI: `NewTaskSheet` doubles as the create/edit/draft form (`editing`/`taskID`/`draftMode` params); `TaskVersionsSheet` is the two-pane compare/edit/accept/promote view (reuses `planDiffLines`/`PlanDiffView`). Per-project free-text **topics** persist in `TopicStore` at `~/.claude/claudepit-task-topics/<slug>.json` (seeds the New Task Topic combo box).
 
+## Worktrees Page
+
+`UI/Sections/WorktreesSection.swift` + `UI/Sections/Worktrees/` — the Sessions/Plans/Memory shape:
+`WorktreeListView` (left card) and `WorktreeDetailView` (right card) take plain data
+(`WorktreePageContext`: task refs by path, live herdr agents, colour slots) and one
+`WorktreeActions` of closures, never `AppState`; `WorktreesSection` only wires them. What the list
+shows is decided in Core and tested (`WorktreeListing`, `WorktreeListingChecks`):
+
+- **Groups:** *Needs attention* (a merge in progress, or a stale lock) → *Live* (`WorktreeActivity`:
+  its session wrote recently, a herdr agent's cwd is the checkout, or a live pid holds the lock) →
+  *Idle*. Uncommitted changes alone are not attention — an agent's worktree is dirty most of its life.
+  A lock with no pid in its reason is `.lockedLive(-1)` (unprovably stale) but makes nothing live.
+- **Names:** a task worktree is titled by its creating task (`WorktreeListing.tasks(in:from:)` puts
+  the creator before its fix tasks, which share the checkout); the folder name stays in search, the
+  tooltip, the `WorktreeTag` capsule (the tag its sessions wear on the Sessions page) and the path.
+- **One action set, three surfaces:** `WorktreeMenuItems` draws the row's "…", its right-click and
+  the detail header's "…"; the header adds Source Control / Session / Resume (Focus when the session
+  has a herdr pane) / Task buttons. Resume and "Check Out <branch> in herdr" (the old Checkout
+  button: a herdr tab in the checkout running `git checkout <branch>`) pair the herdr call with
+  `activateHerdrHost()` — they once selected the tab and left the window buried.
+- **Detail sections:** Base branch (the shared control — a merge's conflicts show here, so it
+  leads), Changes (click a file for its diff; letters explained on hover and in the ⓘ legend;
+  "Committed <hash>" after Source Control commits everything — `worktreeLastCommit`), Session summary,
+  Commits (HEAD row with author and body, links when origin is a web remote), Worktree (path, branch,
+  tasks, lock line, Unlock / Remove). Inspector data reloads whenever the scan's fingerprint for that
+  worktree moves (`scanKey`), so the changes list follows an agent that is editing.
+- **Freshness:** the page rescans every 10 s while shown (`refreshSessionLiveness` + `reloadWorktrees`)
+  — an agent editing in a worktree writes nothing the FileWatcher sees. `reloadWorktrees` publishes
+  only a changed array. The scan's transcript fallback (`buildCWDMap`) used to read every transcript
+  whole on each scan (~7.6 s of CPU per scan, every watcher tick, on a 200 MB project); its
+  `MentionCache` now counts mentions with `memmem`, by file size/date, reading only appended bytes
+  (~0.3 s warm). A **tie** in mentions names no owner — dictionary order once picked one at random,
+  per launch.
+- **Removal** is confirmed, names any task that loses its checkout, force-removes a dirty tree
+  ("Remove and Discard"), and hands the selection to the row's neighbour.
+- **Deep links:** `focusWorktreeName` selects and reveals (clearing a search that hides it);
+  `autoOpenReviewWorktree` also presents Source Control. Both wait for the scan if it hasn't landed,
+  and are dropped when the page goes away.
+- **Source Control sheet** — its own section below.
+- **Debug tools:** `.build/debug/ClaudepitApp --snapshot-pages worktrees --out <dir> [--project p]
+  [--select <folder name>] [--query q] [--source-control] [--time-scan] [--print-cwdmap] [--empty]`
+  renders the page (and the sheet) from a real scan, read only; add `--interaction-test` to drive the
+  list and the detail header with clicks and keys (`DevPagesInteraction.runWorktrees`, padded with
+  made-up worktrees so every group and a scroll exist).
+
+## Source Control Sheet
+
+`ReviewChangesSheet` (`UI/Sections/ReviewChangesSheet.swift`, parts in `UI/Sections/SourceControl/`)
+is one UI over `ChangeSource` (`Core/ChangeSource.swift`): `GitChangeSource` for a worktree,
+`BrainstormChangeSource` for a task's brainstorm suggestions. Every protocol method added for git
+(batch stage/unstage/discard, context, conflicts, stored copies, `draftKey`) has a default built on
+the original per-path calls, so the brainstorm source needed no change. Git work is all in
+`WorktreeStager`; the sheet runs no git itself.
+
+- **Lists:** Merge Conflicts → Staged Changes → Changes, tree or flat (`@AppStorage`). Rows show
+  +/− counts (`git diff --numstat -z`, untracked files counted off disk) that swap for the
+  stage/discard icons on hover or selection; every action is also in the row's right-click menu
+  (plus Open / Reveal / Copy Path). Keys: ↑/↓, Space stages/unstages (marks a conflict resolved),
+  ⌫ discards (`onDeleteCommand`), ⌘↩, ⌘R, Esc. A partly staged file's header switches between its
+  two halves.
+- **Diff:** one `DiffView` per block, numbered from the `@@` header (`DiffHunk.numberedLines`),
+  titled by `DiffHunk.label` ("Lines 12–40 · <git's function context>", or a brainstorm kind), with
+  Stage/Unstage/Discard Block in its toolbar (`DiffView.accessory`). Markdown opens raw
+  (`startsRendered: false`) — rendered, a diff hides what was removed. Binary images show before →
+  after (`WorktreeStager.storedCopy` writes git's blob through `sh`, since `Subprocess` reads stdout
+  as text). Diffs over 1.5 MB wait for "Show Anyway".
+- **Discard is never a silent no-op, and never loses an untracked file.** On a Staged row it
+  restores HEAD (`discardAllChanges`) — `git checkout -- path` restores from the *index*, so it
+  used to do nothing there. A file git has no copy of (untracked, or a staged add) goes to the
+  Trash. Batches report every failure (`ChangeSource.each`); the old loops swallowed them.
+- **Renames carry `origPath`.** Unstaging resets both paths (resetting only the new one left the
+  old path's deletion staged); the staged diff passes both (`-M -- old new`) so it reads as a rename;
+  `buildPatch` rewrites a rename preamble as an edit of the new path, or Unstage Block un-renamed.
+- **Untracked diffs use the relative path.** `git -C <dir> diff --no-index -- /dev/null <path>`
+  works from any cwd (verified). With the absolute path, Stage Block added a phantom index entry at
+  `Users/…/file`.
+- **Conflicts** (`MergeConflictKind`, from `UU`/`AA`/`DU`/…) are in neither list — they used to show
+  as "M" in both. `ConflictDocument` (Core, pure, round-trips the text exactly) splits the file at
+  its markers; each conflict gets Accept Current / Incoming / Both, the file gets Accept All, Use
+  Current/Incoming (`checkout --ours/--theirs`), Delete, and Mark Resolved (asks first if markers
+  remain). `ConflictFileIO.resolve` re-reads the file and refuses if the conflict changed since it
+  was shown. While `MERGE_HEAD` exists a banner offers Abort Merge, the message is prefilled from
+  `MERGE_MSG` (`git rev-parse --git-path`, so a linked worktree's own git dir), the button reads
+  Commit Merge, and it commits with nothing staged. This is where Update From Base's "Review
+  changes" finishes a merge.
+- **Commit:** nothing staged but changes waiting → the button is **Stage All & Commit**. An unsent
+  message survives closing the sheet (`CommitDrafts`, in memory, keyed by `draftKey`). After a
+  commit that leaves changes behind, the sheet stays open with "Committed <hash> — subject";
+  nothing left (or the brainstorm source) closes it as before.
+- **Freshness:** a `.task` loop re-reads status every 4 s (only redrawing when something changed),
+  plus on app activation. Not a `Timer.publish` stored on the view — the host page re-renders on
+  its own clock and would re-create it.
+- **Debug tool:** `.build/debug/ClaudepitApp --snapshot-source-control <repo | demo | demo-merge |
+  brainstorm-demo> --out <dir> [--select staged/<path>,changes/<path>,conflicts/<path>]`
+  (`DevSourceControl.swift`) renders the sheet; `demo` builds a throwaway repo with every kind of
+  change, `demo-merge` one stopped on conflicts. `--snapshot-source-control demo --interaction-test`
+  drives the real sheet on fresh demo repos and checks **git's** state after each click and key —
+  staging, blocks, rename, discard, conflicts, merge commit, abort. It reads the sheet through the
+  DEBUG `sourceControlProbe` environment hook and answers confirmations through
+  `sourceControlAutoConfirm`, since an alert can't be clicked offscreen. It refuses a real repo.
+
+## Loops Page
+
+`UI/Sections/LoopsSection.swift` + `UI/Sections/Loops/` — the Worktrees shape: `LoopListView` (left card:
+an Overview entry, loops being started, then Running / Paused — session closed / Saved in
+scheduled_tasks.json / Desktop app / Ended) and `LoopDetailView` or `LoopOverviewView` (right card), all
+taking plain data (`LoopPageContext`) and one `LoopActions`, never `AppState`. `NewLoopSheet` is the
+creation dialog. Everything they decide is Core and tested (`Tests/ClaudepitTests/LoopChecks.swift`).
+
+**Session loops live in a process, not a file.** `/loop` and CronCreate tasks are in-memory in the
+Claude Code process, fire only while it is open **and idle**, and die with it (`--resume` restores cron
+tasks unless expired; a self-paced loop is not restored). So the page reads them from where the CLI
+leaves traces, not from `.claude/scheduled_tasks.json` (which the old page listed, and which this
+CLI never reads — durable tasks are flag-off for this account):
+- **Transcripts** (`LoopTranscript.swift`): CronCreate/CronDelete/ScheduleWakeup `tool_use` blocks and
+  their `toolUseResult` (CronCreate: `{id, recurring, durable}`; ScheduleWakeup: `{scheduledFor,
+  clampedDelaySeconds, wasClamped}`); each fire as a `system` record (`subtype: scheduled_task_fire`,
+  `taskId`, `cron`, `prompt`, `taskKind`) plus the fired prompt as a meta `user` record
+  (`turnOrigin: "scheduled"`, `scheduledTaskId`); `/loop` as a `<command-name>` record. Three facts the
+  reader is built around (an independent review caught the first two): the fire record's `prompt` is
+  **cut to 200 characters with whitespace squashed** (`V3(prompt, 200)` in the CLI) — the prompt
+  record has the full text and wins (`LoopBuilder.samePrompt` compares the two); a fire that comes due
+  as a turn ends is written **before that turn's last records**, its prompt record after — so a fire
+  is `deliveredAt` its prompt record and its iteration is read from `promptOffset`, never the fire
+  record; and `taskKind: "loop"` marks self-paced wakeups and nothing else (other fires of unknown
+  tasks are ignored). A self-paced wakeup is a pinned one-shot with a **new task id each time**, so a
+  fire joins the chain whose armed wakeup it answers; one that answers none is the CLI's
+  **fallback**, armed 20 minutes after the iteration *ended* (`turn_duration`), at the next whole
+  minute. Any non-fire `turnOrigin` (a command, a task notification, a peer message) is a turn start.
+  `LoopLogCache` reads only appended bytes (MentionCache's shape); cold ≈5 ms/MB, warm rescan ≈3 ms.
+  Markers are few and broad (each is a `memmem` pass): add one only if it pays.
+- **Live sessions**: `~/.claude/sessions/<pid>.json` (`LiveSessions.swift`) — `sessionId` (the process's
+  *current* one), `status` busy/idle/waiting (+ `waitingFor`), `startedAt`, `procStart` (UTC `ps
+  lstart`), checked against `sysctl` so a recycled pid never revives a dead session. A live process
+  that **started after** a loop was armed went through `--resume`: its self-paced wakeups are gone,
+  and only unexpired cron tasks and one-shots still ahead came back (`restartedAfter` in the builder).
+- **The CLI's flags**: `~/.claude.json` `cachedGrowthBookFeatures` — `tengu_kairos_cron`,
+  `tengu_kairos_cron_durable`, `tengu_kairos_loop_dynamic`, `tengu_kairos_loop_prompt`,
+  `tengu_kairos_cron_config` (jitter); plus `CLAUDE_CODE_DISABLE_CRON` in any settings layer's `env`.
+- `loop.md` (project wins over `~/.claude/loop.md`, 25,000-byte cut), `.claude/scheduled_tasks.json` +
+  `.lock`, and Desktop tasks in `~/.claude/scheduled-tasks/<name>/SKILL.md` (read only).
+
+**CLI-exact rules** (`CronSchedule.swift`, each ported from a named CLI function — re-read them when the
+CLI moves), read in `Calendar.cron` (Gregorian, local time zone — the CLI's JS `Date`, whatever the
+person's own calendar) with the minute floored on the instant, not its components (the repeated DST
+hour): the cron grammar (no names/L/W/?, DOW 7 = Sunday, DOM-or-DOW), the next-match walk, the
+English the CLI prints (`humanize`), jitter (a recurring task fires `frac(id) × 0.5 × period` late,
+capped at 30 min — the CronCreate tool's own "10%/15 min" text is out of date; `*/5` instead fires
+**4m 45s after the last fire** to keep the prompt cache warm; a one-shot on :00/:30 up to 90 s early),
+the 7-day expiry (one final fire after it), and `/loop`'s interval table and parse rules (leading token,
+else trailing "every …", else self-paced; unclean intervals like 7m/90m get rounded by Claude).
+
+**Creating a loop is sending a message**, since the loop must live in a session: `LoopDraft.message`
+is exactly what the dialog shows — `/loop <interval> <task>` / `/loop <task>` / bare `/loop`; a cron
+schedule or one-time fire is a precise CronCreate request in words (`/loop` takes no cron); cloud is
+`/schedule <when>: <task>`. A new session is `TaskRunner.openLoopSession` with `claude --session-id
+<uuid> -n <name> --permission-mode … [--model …]`; the herdr agent is named `loop-<first 8 of uuid>`
+(`LoopAgentName`), so the page finds its pane without storing anything. Stop = Esc in an idle
+self-paced loop's pane (the documented stop — Esc mid-turn would interrupt it), else a CronDelete /
+ScheduleWakeup-stop request via `herdr agent prompt`; durable tasks are removed from the file.
+
+**Agents.** A loop can hand each fire to a subagent (an agent file), or run in a session that *is*
+one. Both were checked in real `/loop 1m` runs (CLI 2.1.286):
+- **Agent task** (`LoopDraft.Task.agent`): the message is `Use the <agent> subagent to <task>.`
+  (`AgentDelegation`), which delegated on the first run and on every fire. An `@agent-x` mention is
+  weaker. Claude Code expands it only in a prompt someone sends (fires are queued with
+  `skipAttachments`, so neither the agent nudge nor `@file` contents reach a fire), and even then
+  Claude first tried to message `x` as a session. The dialog warns and offers a one-click switch. In
+  an interactive session the agent runs in the background: the fire's turn ends at the launch and the
+  report is a later `task_notification` turn. So an optional guard (`AgentDelegation.skipClause`)
+  keeps a run that outlasts the interval from getting a second copy, and `LoopIterationReader` follows
+  each launched call (`LoopIteration.delegations`) past the turn's end to its report (status,
+  `<result>`, `<usage><duration_ms>`). Its needle is `<tool-use-id>id<`, not the closing tag, which a
+  JSON writer may escape (`<\/…>`).
+- Claude may hand CronCreate the whole `/loop 1m <prompt>` as the task's prompt (a Haiku run did; each
+  fire then took it as the task and did not re-arm), so `LoopPromptKind` classifies the prompt inside a
+  scheduled `/loop`.
+- **Run as** (`LoopDraft.sessionAgent` → `claude --agent`): the session takes the agent's system
+  prompt, tools and model, and `--model` overrides the agent's model. Its tools are all a fire has:
+  without CronCreate (ScheduleWakeup when self-paced) `/loop` gets "No such tool available" and no
+  loop exists, so the dialog blocks Start. The transcript records it as `{"type":"agent-setting"}`
+  (`LoopLog.agentSetting` → `LoopRecord.sessionAgent`, a marker of its own).
+- `LoopAgent` reads `name`/`tools`/`disallowedTools`/`model` from the agent files
+  (`AppState.loopAgents()`), plus Claude Code's built-ins (`general-purpose`, `Explore`, `Plan`).
+  A subagent can't own a loop: it can't call ScheduleWakeup, and a cron task created inside an agent
+  is deleted at its first fire once that agent has ended.
+
+**Auto mode and Haiku.** `--permission-mode auto` on Haiku starts the session in `default` (ask) mode
+without a word: two real sessions with the same flags differed only in the model. The dialog warns
+when Auto meets Haiku (picked directly, or as a Run-as agent's model). The page shows the mode the
+transcript recorded, never the flag.
+
+**Background sessions** (docs: agent view). `claude --bg` — or `/bg` inside a session — hosts the
+session in the CLI's supervisor: no terminal, `/loop` tasks keep firing after the terminal or the app
+closes and across sleep, shutdown stops them (resume brings cron loops back). New Loop's "A background
+session" runs `LoopDraft.backgroundArguments` (`--bg --name … [--permission-mode/--model/--agent] <message>`)
+through `Subprocess` and reads the short id it prints (`BackgroundSession.jobID`; `--bg` ignores
+`--session-id`, with a warning). The registry entry says `kind: "bg"` and `jobId` (= the session
+id's first 8 characters; `LiveSession.isBackground`/`jobID`), so `LoopLaunch.matches` compares by
+prefix. A background loop has no herdr pane: the page offers **Attach** (a herdr tab running `claude
+attach <id>`) and **Stop Session** (`claude stop <id>`, confirmed — it ends every loop in the
+session; the conversation is kept). `--bg` with Auto needs auto mode opted in once interactively,
+with bypass its disclaimer accepted; a permission prompt waits until someone attaches (the page marks
+it Needs you). `--e2e background` checks the whole path against the real CLI.
+
+**The overview** (`LoopOverviewView`) answers what needs doing, not how loops work (the "sessions
+open", "ways to keep Claude working" and "how a loop fires" sections were removed by request — the
+Docs button covers them): a red callout for loops whose session waits on you (Answer in herdr /
+Attach), the next-hours timeline (dots shrink to fit a frequent loop), tiles (Running, Next fire,
+Fired in 24 h, Expires next — the 7-day expiry), the loop.md card, Recent fires (on time / late /
+fallback) and the capability chips. `LoopSnapshot.nextFire` skips a blocked loop — its overdue time
+read "Next fire: due" for a loop that can't fire until someone answers it.
+
+**loop.md is managed in place** (`LoopFileSection`, on the overview): a Project / User switch, which
+file a bare `/loop` here runs, its text with the CLI's 25,000-byte cut marked, Edit (inline,
+byte counter), Ask (`PlanQAPanel` with `about:`/`suggestsRewrites:` — Claude's rewrite comes back as a
+diff to save, edit or discard), Start Loop (New Loop with a bare `/loop`), Delete (to the Trash,
+confirmed by `LoopsSection`, which says what runs instead), copy to the other scope, reveal, open.
+`LoopFile.text` is the whole file (≤ 1 MB, else `isComplete` false and editing is refused), and every
+write is `LoopFile.save(_:to:base:force:)`: it refuses (`SaveError.changedOnDisk`) when the file no
+longer holds the text the edit began from — a looping agent may be editing it — and the card offers
+Reload or Overwrite. A loop's card links here ("Manage" → `LoopActions.manageLoopFile`, which scrolls
+the overview to the card).
+
+**Skills a fire can't run** (docs): built-ins, MCP prompts, `disable-model-invocation` skills —
+including the bundled `/verify` (`CommandAvailability.bundledManualOnly`) — skills `skillOverrides`
+hides, and skills a `Skill` deny rule blocks (`LoopCapabilities.skillDenyRules`, read from every
+settings layer: bare `Skill`, `Skill(x)`, `Skill(x *)`, `Skill(skill:x)`; an unqualified `x` also
+blocks `ns:x`). `/init` and `/security-review` are built-ins Claude *can* run through the Skill tool,
+and `/review` is the bundled `/code-review` — none of the three is in `CommandAvailability.builtIns`.
+`/schedule` needs a claude.ai subscription login, so the cloud destination is an error when
+`claude auth status` reports another method (`AppState.loopScheduleUnavailable`).
+
+**Outside the page:** a loop whose session waits on a permission prompt or a question (registry
+`status: "waiting"`, `waitingFor`) is state `blocked` — the commonest silent death of an unattended
+loop — so it also shows on the sidebar badge (red; green counts running loops), in Home's Needs
+attention and the menu bar (`buildAttention(…, loops:)` → `.loop(id)`, paired with its herdr agent
+row like a blocked task). `AppState.syncLoopPolling` rescans every 30 s off the page while any loop
+runs; the page itself every 5 s.
+
+**Sharp edges:** `recurring` is written only when true, so an absent key is a one-shot (the old
+`CronStore` read it the other way); an unreadable `scheduled_tasks.json` is refused, never rewritten. An interval ≥ 60 min makes `/loop` ask whether to make a cloud
+routine (AskUserQuestion) — the dialog says so. A fire's `id` includes its time and offset (two
+fires of one task share a task id). `LoopFire.offset < 0` marks a fire not in any transcript (a
+durable task's `lastFiredAt`) and is excluded from counts and iteration reads.
+
+**Debug tools:** `.build/debug/ClaudepitApp --snapshot-pages loops --out <dir> [--project p] [--demo]
+[--select overview|first|<id>] [--new-loop [--draft interval|self|cron|once|durable|cloud|agent|run-as|mention|background]]
+[--loopfile show|edit|ask|review|none|user] [--time-scan]`
+prints what the scan found and renders the page (and the dialog; `--demo` includes a loop.md of each
+scope); `--interaction-test` drives the list, the detail header, the loop.md card and the dialog
+(`DevPagesInteraction.runLoops`); `--e2e` runs a real `/loop 1m` on
+Haiku in a herdr tab, reads it back until it fires twice, stops it and closes the tab (and installs this
+build's summary hook first); `--e2e background` does the same in a `claude --bg` session and stops it
+with `claude stop`, installing nothing; `--e2e agent` runs an Agent-task loop that way (an inline
+`--agents` definition, so no agent file is written) and checks each fire's agent is followed to its report.
+
 ## Updating a Worktree From Its Base
 
 `UpdateFromBaseControl` (`UI/UpdateFromBaseControl.swift`) is the ONE view for this, hosted by both
-`WorktreesSection`'s WORKTREE STATE block and `TaskDetailView`'s Worktree row, so the two can never
-disagree. It offers up to three pills:
+the Worktrees page's "Base branch" section (`WorktreeDetailView`'s `baseSync` slot) and
+`TaskDetailView`'s Worktree row, so the two can never disagree — both pass the owning task's id, so
+a merge agent is named `task-<id>-merge` whichever page started it. It offers up to three pills:
 
 - **Update from `<base>`** — `WorktreeStager.updateFromBase`. Refuses a tracked-dirty tree.
 - **Stash & update** — `WorktreeStager.updateFromBaseStashing`. Shown only when the tree is dirty
@@ -474,8 +756,9 @@ means; it never asks for "only valid JSON", and nothing strips fences or salvage
 ## Every other subprocess: `Subprocess`
 
 `Sources/ClaudepitCore/Core/Subprocess.swift` is the one bounded way to run a child process.
-`Herdr.run` and `TaskRunner.git` go through it; do not hand-roll `Process` + `waitUntilExit()`
-again. Two hangs it exists to prevent, both of which suspend the awaiting Swift task **forever**
+`Herdr.run`, `TaskRunner.git`, `GitBase.git`, `WorktreeInspector` and `WorktreeStager` go through it
+(the stager with a 30-minute ceiling — `commit` runs the repo's hooks); do not hand-roll `Process` +
+`waitUntilExit()` again. Two hangs it exists to prevent, both of which suspend the awaiting Swift task **forever**
 (a `withCheckedContinuation` that never resumes cannot be cancelled from outside):
 
 - **Pipe-buffer deadlock.** A pipe holds ~64KB. Reading *after* `waitUntilExit()` — the shape every

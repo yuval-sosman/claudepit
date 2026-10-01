@@ -163,6 +163,10 @@ struct PathBar: View {
             return app.selectedSpecName.map(truncate)
         case .memory:
             return app.selectedMemoryTitle.map(truncate)
+        case .worktrees:
+            return app.selectedWorktreeTitle.map(truncate)
+        case .loops:
+            return app.selectedLoopTitle.map(truncate)
         default:
             return nil
         }

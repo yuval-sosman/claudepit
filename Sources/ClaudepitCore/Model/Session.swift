@@ -398,6 +398,8 @@ public struct TranscriptNotice {
     public var messageCount: Int?
     public var preTokens: Int?
     public var postTokens: Int?
+    /// `.scheduledWakeup`: the scheduler task that fired — the Loops page finds its loop by it.
+    public var loopTaskID: String?
 
     public init(kind: Kind, time: TimeInterval? = nil, title: String, detail: String? = nil,
                 level: String? = nil) {

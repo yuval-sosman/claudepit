@@ -81,7 +81,7 @@ struct TranscriptRowView: View {
             }
         case .notice(let i):
             if case .notice(let n) = model.events[i] {
-                NoticeRow(notice: n, id: row.id, expansion: expansion)
+                NoticeRow(notice: n, id: row.id, expansion: expansion, actions: actions)
             }
         case .attachment(let i):
             if case .attachment(let a) = model.events[i] {
@@ -1020,6 +1020,7 @@ struct NoticeRow: View {
     let notice: TranscriptNotice
     let id: String
     @ObservedObject var expansion: TranscriptExpansion
+    var actions = TranscriptActions()
 
     var body: some View {
         switch notice.kind {
@@ -1105,6 +1106,11 @@ struct NoticeRow: View {
                 Text(d).font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(2)
             }
             Spacer(minLength: 8)
+            if notice.kind == .scheduledWakeup, let task = notice.loopTaskID, let open = actions.openLoop {
+                Button("Loop") { open(task) }
+                    .buttonStyle(.link).font(.system(size: 11))
+                    .help("Show this loop — its schedule, its other fires and what each did — on the Loops page")
+            }
             if let t = TranscriptFormat.clock(notice.time) { MetaText(t) }
         }
         .padding(.horizontal, 6).padding(.vertical, 4)

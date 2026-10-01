@@ -81,6 +81,18 @@ public enum Herdr {
         await Subprocess.run(path, args, cwd: cwd, timeout: timeout)?.ok ?? false
     }
 
+    /// Submit `text` to a running agent — by name or pane id — as if typed and sent. herdr refuses
+    /// (`agent_blocked`) while the agent is waiting on a question, and says so only on stderr, so
+    /// the exit code is the answer.
+    public static func prompt(agent target: String, text: String) async -> Bool {
+        await succeeds(["agent", "prompt", target, text], cwd: nil)
+    }
+
+    /// Press keys in an agent's terminal (`esc`, `enter`, …).
+    public static func sendKeys(agent target: String, keys: [String]) async -> Bool {
+        await succeeds(["agent", "send-keys", target] + keys, cwd: nil)
+    }
+
     /// Pane id from a `herdr pane split` response: `result.pane.pane_id`.
     public static func paneID(fromJSON obj: [String: Any]) -> String? {
         (obj["result"] as? [String: Any])
@@ -120,11 +132,13 @@ public enum Herdr {
         /// human-readable name herdr has for an unnamed agent.
         public let title: String?
         public let cwd: String?
+        /// Which agent it is (`claude`, `codex`, …) — only a Claude session can be sent `/loop`.
+        public let kind: String?
 
         public init(sessionID: String?, name: String?, paneID: String, status: String,
-                    title: String? = nil, cwd: String? = nil) {
+                    title: String? = nil, cwd: String? = nil, kind: String? = nil) {
             self.sessionID = sessionID; self.name = name; self.paneID = paneID
-            self.status = status; self.title = title; self.cwd = cwd
+            self.status = status; self.title = title; self.cwd = cwd; self.kind = kind
         }
     }
 
@@ -185,7 +199,7 @@ public enum Herdr {
             return AgentEntry(sessionID: (sid?.isEmpty == false) ? sid : nil,
                               name: a["name"] as? String, paneID: pane, status: status,
                               title: (title?.isEmpty == false) ? title : nil,
-                              cwd: a["cwd"] as? String)
+                              cwd: a["cwd"] as? String, kind: a["agent"] as? String)
         }
     }
 

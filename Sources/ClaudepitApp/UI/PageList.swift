@@ -19,6 +19,8 @@ struct PageListRow<Leading: View, Markers: View, MenuItems: View>: View {
     let isFocused: Bool
     let isHovered: Bool
     var help: String = ""
+    /// A colour down the row's leading edge, full height — the Sessions rows' worktree stripe.
+    var edgeColor: Color? = nil
     /// The row's click (selects it).
     var onTap: () -> Void = {}
     @ViewBuilder let leading: () -> Leading
@@ -73,6 +75,14 @@ struct PageListRow<Leading: View, Markers: View, MenuItems: View>: View {
         }
         .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 6)
         .background(PageListRowBackground(isSelected: isSelected, isFocused: isFocused, isHovered: isHovered))
+        .overlay(alignment: .leading) {
+            if let edgeColor {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(edgeColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 5)
+            }
+        }
         .padding(.horizontal, 6)
         .help(help)
         .contextMenu { menuItems() }

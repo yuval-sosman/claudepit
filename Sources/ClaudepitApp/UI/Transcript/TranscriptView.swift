@@ -13,6 +13,8 @@ struct TranscriptActions {
     var openPlan: ((String) -> Void)? = nil
     /// Working directory for inline Q&A about a plan.
     var cwd: URL? = nil
+    /// Show the loop a scheduled fire belongs to on the Loops page, by its scheduler task id.
+    var openLoop: ((String) -> Void)? = nil
 }
 
 /// Which rows are open. One store for the whole transcript — row views are recycled as they

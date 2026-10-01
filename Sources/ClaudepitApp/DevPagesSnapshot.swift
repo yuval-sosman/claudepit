@@ -4,21 +4,26 @@ import AppKit
 import WebKit
 import ClaudepitCore
 
-/// Developer tool, DEBUG builds only: render the Plans or Memory page offscreen to PNG from real
-/// files — no window, no `AppState`, and no writes.
+/// Developer tool, DEBUG builds only: render the Plans, Specs, Memory, Worktrees or Loops page
+/// offscreen to PNG from real files — no window, no `AppState`, and no writes. (Loops' own options
+/// are in `DevLoopsSnapshot`.)
 ///
-///     .build/debug/ClaudepitApp --snapshot-pages plans|specs|memory --out <dir> [options]
+///     .build/debug/ClaudepitApp --snapshot-pages plans|specs|memory|worktrees|loops --out <dir> [options]
 ///
-///   --project path        the project whose memory or specs to show (default: the cwd)
+///   --project path        the project whose memory, specs or worktrees to show (default: the cwd)
 ///   --memory-dir path     read memory from this folder instead (memory)
 ///   --plans-dir path      read plans from here instead of ~/.claude/plans (plans)
 ///   --width N --height N  page size (default 1280 × 820)
 ///   --query text          search the list
-///   --select id           select a plan (slug), spec (task id) or memory file (id, or "graph")
+///   --select id           select a plan (slug), spec (task id), memory file (id, or "graph") or
+///                         worktree (folder name)
 ///   --ask                 open the Ask panel on the detail card
 ///   --empty               render as if there were nothing to list
 ///   --log-open            expand the newest memory log entries (memory)
 ///   --interaction-test    drive the list with synthetic clicks and keys (DevPagesInteraction)
+///   --time-scan           scan the worktrees twice and print both times (worktrees)
+///   --source-control      also render the selected worktree's Source Control sheet (worktrees)
+///   --print-cwdmap        print the transcript-mention fallback owner of each worktree (worktrees)
 @MainActor
 enum DevPagesSnapshot {
     static func runIfRequested() -> Bool {
@@ -75,8 +80,45 @@ enum DevPagesSnapshot {
                 writeGraph(graph, size: CGSize(width: size.width - 372, height: size.height - 150),
                            to: outDir.appending(path: "graph.png"))
             }
+        case "worktrees":
+            let project = URL(filePath: value("--project") ?? FileManager.default.currentDirectoryPath)
+            let t0 = Date()
+            let worktrees = empty ? [] : scanWorktrees(project)
+            print("scanned \(worktrees.count) worktrees in \(Int(Date().timeIntervalSince(t0) * 1000))ms")
+            if args.contains("--time-scan") {
+                let t1 = Date()
+                _ = scanWorktrees(project)
+                print("rescanned (warm caches) in \(Int(Date().timeIntervalSince(t1) * 1000))ms")
+            }
+            let tasks = loadTasks(Paths.tasksRoot(projectSlug: Paths.slug(for: project)))
+            var context = WorktreePageContext(herdrAvailable: true, hasProject: true)
+            for wt in worktrees {
+                let refs = WorktreeListing.tasks(in: wt.path, from: tasks).map(WorktreeTaskRef.init)
+                if !refs.isEmpty { context.tasks[wt.path] = refs }
+            }
+            context.colorSlots = WorktreeColors.assign(live: worktrees.map(\.name), previous: [:],
+                                                       paletteSize: WorktreePalette.colors.count)
+            for wt in worktrees {
+                print("  \(wt.name) [owner \(wt.ownerSessionID ?? "none")\(wt.ownerSubagentID.map { "/\($0)" } ?? "")]: "
+                      + "\(WorktreeListing.group(of: wt).title) · \(context.activity(wt).label) · "
+                      + "\(WorktreeListing.facts(of: wt).joined(separator: ", "))")
+            }
+            if args.contains("--interaction-test") { exit(DevPagesInteraction.runWorktrees(worktrees, context: context) ? 0 : 1) }
+            let selected = value("--select").flatMap { s in worktrees.first { $0.name == s } }
+                ?? worktrees.first { WorktreeListing.matches($0, query: query, taskName: context.taskNames[$0.path]) }
+            let page = WorktreesSnapshotPage(worktrees: worktrees, context: context, selection: selected?.path,
+                                             query: query)
+            write(page, size: size, to: outDir.appending(path: "worktrees.png"), settle: 3.0)
+            if args.contains("--source-control"), let wt = selected {
+                // Read only: the sheet loads status and the first file's diff; nothing is clicked.
+                let sheet = ReviewChangesSheet(source: GitChangeSource(worktreePath: wt.path, title: context.title(wt))) {}
+                write(sheet, size: CGSize(width: size.width * 0.92, height: size.height * 0.92),
+                      to: outDir.appending(path: "source-control.png"), settle: 3.0)
+            }
+        case "loops":
+            DevLoopsSnapshot.run(args: args, outDir: outDir, size: size, query: query)
         default:
-            print("unknown page \(args[i + 1]) — use plans, specs or memory")
+            print("unknown page \(args[i + 1]) — use plans, specs, memory, worktrees or loops")
         }
         exit(0)
     }
@@ -123,6 +165,39 @@ enum DevPagesSnapshot {
         window.orderOut(nil)
     }
 
+    /// The project's worktrees as `AppState.reloadWorktrees` builds them — the same scan and the
+    /// same merge with the session listing — awaited on the main run loop. Read only (no fetch).
+    static func scanWorktrees(_ project: URL) -> [WorktreeInfo] {
+        final class Box: @unchecked Sendable { var raw: WorktreeScanner.RawScan?; var done = false }
+        let box = Box()
+        Task.detached {
+            box.raw = await WorktreeScanner().scanRaw(activePath: project)
+            box.done = true
+        }
+        while !box.done { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        guard let raw = box.raw else { return [] }
+        if CommandLine.arguments.contains("--print-cwdmap") {
+            for (path, sid) in raw.cwdMap.sorted(by: { $0.key < $1.key }) {
+                print("cwdmap \((path as NSString).lastPathComponent) -> \(sid)")
+            }
+        }
+        let sessions = SessionScanner().listing(activePath: project).sessions
+        return WorktreeScanner.merge(parsed: raw.parsed, dirty: raw.dirty, trackedDirty: raw.trackedDirty,
+                                     ahead: raw.ahead, behind: raw.behind,
+                                     merging: raw.mergeInProgress, conflicted: raw.conflicted,
+                                     baseBranch: raw.baseBranch, baseRef: raw.baseRef,
+                                     sessions: sessions, cwdMap: raw.cwdMap)
+    }
+
+    /// Every task, decoded straight from its task.json — no `TaskStore`, which may heal and write back.
+    static func loadTasks(_ tasksRoot: URL) -> [ProjectTask] {
+        let ids = (try? FileManager.default.contentsOfDirectory(atPath: tasksRoot.path)) ?? []
+        return ids.compactMap { id in
+            guard let data = try? Data(contentsOf: tasksRoot.appending(path: id).appending(path: "task.json")) else { return nil }
+            return try? JSONDecoder().decode(ProjectTask.self, from: data)
+        }
+    }
+
     /// Task names by id, read straight from each task.json — no `TaskStore`, which may heal a
     /// record on load and write it back.
     static func taskNames(in tasksRoot: URL) -> [String: String] {
@@ -137,7 +212,7 @@ enum DevPagesSnapshot {
         return out
     }
 
-    static func write<V: View>(_ view: V, size: CGSize, to url: URL) {
+    static func write<V: View>(_ view: V, size: CGSize, to url: URL, settle: Double = 1.5) {
         let root = view
             .padding(24)
             .frame(width: size.width, height: size.height)
@@ -150,7 +225,7 @@ enum DevPagesSnapshot {
         window.contentView = host
         window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
         window.orderFrontRegardless()
-        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.15)); host.layoutSubtreeIfNeeded() }
+        for _ in 0..<max(1, Int(settle / 0.15)) { RunLoop.main.run(until: Date().addingTimeInterval(0.15)); host.layoutSubtreeIfNeeded() }
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
         host.cacheDisplay(in: host.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: url)
@@ -183,6 +258,49 @@ private struct MemorySnapshotPage: View {
                                openSession: { _ in }, initiallyAsking: ask)
             } else {
                 MemoryGraphPanel(graph: graph, cwd: nil, initiallyAsking: ask)
+            }
+        }
+    }
+}
+
+/// The Worktrees page as `WorktreesSection` lays it out. The base-sync control needs `AppState`, so
+/// its slot draws a stand-in with the control's pills and state line.
+private struct WorktreesSnapshotPage: View {
+    let worktrees: [WorktreeInfo]
+    let context: WorktreePageContext
+    @State var selection: String?
+    @State var query: String
+    @State private var reveal: String?
+
+    var body: some View {
+        MasterDetailLayout(listWidth: 300) {
+            GlassCard {
+                WorktreeListView(worktrees: worktrees, context: context, selection: $selection, query: $query,
+                                 revealRequest: $reveal, actions: WorktreeActions(openFolder: {}, resumeSession: { _ in },
+                                                                                   openInHerdr: { _ in }))
+            }
+        } detail: {
+            if let wt = worktrees.first(where: { $0.path == selection }) {
+                WorktreeDetailView(wt: wt, context: context,
+                                   session: WorktreeSessionBrief(title: "Stand-in session",
+                                                                 bullets: ["Stand-in bullet one, as the summary hook writes them.",
+                                                                           "Stand-in bullet two."]),
+                                   actions: WorktreeActions(resumeSession: { _ in }, openInHerdr: { _ in })) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        FlowLayout(spacing: 8) {   // as the real control lays its pills out
+                            PillButton(title: "Update from \(wt.baseBranch)", icon: "arrow.down.circle",
+                                       disabled: !wt.canUpdateFromBase) {}
+                            if wt.trackedDirtyCount > 0 {
+                                PillButton(title: "Stash & update", icon: "archivebox.circle") {}
+                            }
+                            PillButton(title: "Merge with Claude", icon: "sparkles") {}
+                        }
+                        Text(wt.isBehindBase ? "\(wt.behindCount) commits behind \(wt.baseBranch)" : "Up to date with \(wt.baseBranch)")
+                            .font(.caption).foregroundStyle(wt.isBehindBase ? .orange : .secondary)
+                    }
+                }
+            } else {
+                GlassCard { PageListEmptyState(icon: "arrow.triangle.branch", title: "Select a worktree", detail: "") }
             }
         }
     }

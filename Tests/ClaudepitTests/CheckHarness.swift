@@ -12,6 +12,18 @@ func expectEqual<T: Equatable>(_ a: T, _ b: T, _ label: String = "") throws {
     if a != b { throw CheckFailure(message: "\(label): expected \(b), got \(a)") }
 }
 
+/// `body` must throw `expected`, and nothing else.
+func expectThrows<E: Error & Equatable>(_ expected: E, _ label: String, _ body: () throws -> Void) throws {
+    do {
+        try body()
+    } catch let e as E where e == expected {
+        return
+    } catch {
+        throw CheckFailure(message: "\(label): threw \(error), expected \(expected)")
+    }
+    throw CheckFailure(message: "\(label): didn't throw, expected \(expected)")
+}
+
 /// Run a named check, print PASS/FAIL, return true on pass.
 func check(_ name: String, _ body: () throws -> Void) -> Bool {
     do { try body(); print("PASS  \(name)"); return true }
