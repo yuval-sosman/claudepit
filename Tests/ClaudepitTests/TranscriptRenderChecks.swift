@@ -16,8 +16,34 @@ func transcriptRenderChecks() -> [Bool] {
         let blocks = parseMarkdownBlocks(md)
         try expectEqual(blocks[0], .heading(level: 1, text: "Title"), "heading")
         try expectEqual(blocks[1], .paragraph("Some **bold** text."), "paragraph")
-        try expectEqual(blocks[2], .bulletList(["a", "b"]), "bullets")
-        try expectEqual(blocks[3], .orderedList(["one", "two"]), "ordered")
+        try expectEqual(blocks[2], .list([.bullet("a"), .bullet("b")]), "bullets")
+        try expectEqual(blocks[3], .list([.number(1, "one"), .number(2, "two")]), "ordered: a new list")
+    })
+
+    results.append(check("parseMarkdownBlocks: nested lists keep their numbers, tasks, continuations, rules") {
+        let md = """
+        1. **Step one**
+           - detail a
+           - [x] done thing
+        2. Step two
+           continues here
+
+        3. Step three
+        ---
+        after
+        """
+        let b = parseMarkdownBlocks(md)
+        try expectEqual(b[0], .list([
+            .number(1, "**Step one**"),
+            .bullet("detail a", level: 1),
+            MarkdownListItem(level: 1, marker: .task(checked: true), text: "done thing"),
+            .number(2, "Step two\ncontinues here"),
+            .number(3, "Step three"),
+        ]), "one list: sub-bullets nested, numbering kept, a blank line inside the list")
+        try expectEqual(b[1], .rule, "rule")
+        try expectEqual(b[2], .paragraph("after"), "then text")
+        try expectEqual(parseMarkdownBlocks("- - -"), [.rule], "spaced dashes are a rule, not an item")
+        try expectEqual(parseMarkdownBlocks("#hashtag")[0], .paragraph("#hashtag"), "no space → not a heading")
     })
 
     results.append(check("parseMarkdownBlocks: fenced code, incl unterminated") {
@@ -47,7 +73,7 @@ func transcriptRenderChecks() -> [Bool] {
         let b1 = parseMarkdownBlocks(md1)
         try expectEqual(b1.count, 2, "para + ordered = 2 blocks")
         try expectEqual(b1[0], .paragraph("Here is the plan:"), "para not swallowing list")
-        try expectEqual(b1[1], .orderedList(["one", "two"]), "ordered list separated")
+        try expectEqual(b1[1], .list([.number(1, "one"), .number(2, "two")]), "ordered list separated")
 
         let md2 = "Results below.\n| A | B |\n| --- | --- |\n| 1 | 2 |"
         let b2 = parseMarkdownBlocks(md2)
@@ -102,53 +128,19 @@ func transcriptRenderChecks() -> [Bool] {
                    "plain builtin → no link")
     })
 
+    results.append(check("parseTaskListLines: id, status and subject, leniently") {
+        let lines = parseTaskListLines("Tasks:\n#1 [completed] Fix bugs\n  #12. [in progress] Ship it\n#3 Write notes\n\nno id here")
+        try expectEqual(lines, [
+            TaskListLine(id: "1", status: "completed", subject: "Fix bugs"),
+            TaskListLine(id: "12", status: "in_progress", subject: "Ship it"),
+            TaskListLine(id: "3", status: "pending", subject: "Write notes"),
+        ], "three tasks; the heading and the id-less line skipped")
+    })
+
     results.append(check("parseCreatedTaskId extracts numeric id") {
         try expectEqual(parseCreatedTaskId("Task #7 created successfully: Foo"), "7", "id 7")
         try expectEqual(parseCreatedTaskId("Updated task #3 status"), "3", "id 3 from update text")
         try expect(parseCreatedTaskId("no number here") == nil, "no id → nil")
-    })
-
-    results.append(check("taskSpans + subjects from event sequence") {
-        // Build events: create(1), update(1,in_progress), a tool, update(1,completed),
-        // then create(2), update(2,in_progress), a tool  [span 2 stays open to end]
-        func toolEvent(_ name: String, _ input: [String: Any], result: String?) -> SessionEvent {
-            let (cls, sum) = ToolInvocation.classify(name: name, input: input)
-            return .tool(ToolInvocation(id: name + (result ?? ""), name: name, toolClass: cls,
-                                        argSummary: sum, input: input, resultText: result, isError: false))
-        }
-        let events: [SessionEvent] = [
-            .assistantText("intro"),                                                    // 0 ungrouped
-            toolEvent("TaskCreate", ["subject": "Task 1: alpha"], result: "Task #1 created successfully: Task 1: alpha"), // 1
-            toolEvent("TaskUpdate", ["taskId": "1", "status": "in_progress"], result: "Updated task #1 status"),          // 2 span1 start
-            toolEvent("Bash", ["command": "ls"], result: "ok"),                          // 3 in span1
-            toolEvent("TaskUpdate", ["taskId": "1", "status": "completed"], result: "Updated task #1"),                   // 4 span1 end
-            .assistantText("between"),                                                   // 5 ungrouped
-            toolEvent("TaskCreate", ["subject": "Task 2: beta"], result: "Task #2 created successfully: Task 2: beta"),   // 6
-            toolEvent("TaskUpdate", ["taskId": "2", "status": "in_progress"], result: "Updated task #2 status"),          // 7 span2 start
-            toolEvent("Read", ["file_path": "/x"], result: "data"),                      // 8 in span2 (open to end)
-        ]
-
-        let subjects = taskSubjects(events)
-        try expectEqual(subjects["1"], "Task 1: alpha", "subject 1")
-        try expectEqual(subjects["2"], "Task 2: beta", "subject 2")
-
-        let spans = taskSpans(events)
-        try expectEqual(spans.count, 2, "two spans")
-        try expectEqual(spans[0], TaskSpan(taskId: "1", label: "Task 1: alpha", startIndex: 2, endIndex: 4), "span1")
-        try expectEqual(spans[1], TaskSpan(taskId: "2", label: "Task 2: beta", startIndex: 7, endIndex: 8), "span2 open to end")
-    })
-
-    results.append(check("taskSpans: switching in_progress closes previous; fallback label") {
-        func upd(_ id: String, _ st: String) -> SessionEvent {
-            let (c, s) = ToolInvocation.classify(name: "TaskUpdate", input: ["taskId": id, "status": st])
-            return .tool(ToolInvocation(id: id+st, name: "TaskUpdate", toolClass: c, argSummary: s,
-                                        input: ["taskId": id, "status": st], resultText: "Updated task #\(id)", isError: false))
-        }
-        let events: [SessionEvent] = [ upd("1", "in_progress"), .assistantText("a"), upd("2", "in_progress"), .assistantText("b") ]
-        let spans = taskSpans(events)
-        try expectEqual(spans.count, 2, "two spans")
-        try expectEqual(spans[0], TaskSpan(taskId: "1", label: "Task 1", startIndex: 0, endIndex: 1), "span1 ends before task2 in_progress; fallback label")
-        try expectEqual(spans[1], TaskSpan(taskId: "2", label: "Task 2", startIndex: 2, endIndex: 3), "span2 to end")
     })
 
     results.append(check("parseAskQuestions decodes questions/options") {
@@ -179,43 +171,6 @@ func transcriptRenderChecks() -> [Bool] {
         try expectEqual(a2["Q2"], "A2", "multi q2")
 
         try expect(parseAskAnswers("no answers here").isEmpty, "no match → empty")
-    })
-
-    results.append(check("timelineMarkers: only notable events, correct kinds/order/labels") {
-        func tool(_ name: String, _ input: [String: Any], result: String? = nil) -> SessionEvent {
-            let (c, s) = ToolInvocation.classify(name: name, input: input)
-            return .tool(ToolInvocation(id: name, name: name, toolClass: c, argSummary: s,
-                                        input: input, resultText: result, isError: false))
-        }
-        let events: [SessionEvent] = [
-            .userMessage([.text("hello there this is my message")]),          // 0 → .user
-            tool("Bash", ["command": "ls"]),                       // 1 → none
-            tool("TaskCreate", ["subject": "Task 1: alpha"],
-                 result: "Task #1 created successfully: Task 1: alpha"), // 2 → .task
-            .assistantText("working"),                             // 3 → none
-            tool("Agent", ["subagent_type": "Explore", "description": "look"]), // 4 → .subagent
-            tool("Read", ["file_path": "/x"]),                     // 5 → none
-            tool("Skill", ["skill": "code-review"]),               // 6 → .skill
-            tool("AskUserQuestion", ["questions": [["question": "Pick?", "header": "H", "options": []]]]), // 7 → .question
-        ]
-        let m = timelineMarkers(events)
-        try expectEqual(m.count, 5, "only 5 notable markers")
-        try expectEqual(m[0], TimelineMarker(index: 0, kind: .user, label: "hello there this is my message"), "user marker")
-        try expectEqual(m[1], TimelineMarker(index: 2, kind: .task, label: "Task 1: alpha"), "task marker")
-        try expectEqual(m[2].kind, .subagent, "subagent kind")
-        try expectEqual(m[2].index, 4, "subagent index")
-        try expectEqual(m[3].kind, .skill, "skill kind")
-        try expectEqual(m[4].kind, .question, "question kind")
-        try expectEqual(m[4].label, "Pick?", "question label")
-    })
-
-    results.append(check("commandChipLabel: slash command + local wrappers, else nil") {
-        let cmd = "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"
-        try expectEqual(commandChipLabel(cmd), "ran /clear", "slash command chip")
-        let cmdArgs = "<command-name>/loop</command-name><command-args>5m /foo</command-args>"
-        try expectEqual(commandChipLabel(cmdArgs), "ran /loop 5m /foo", "with args")
-        try expectEqual(commandChipLabel("<local-command-caveat>Caveat: ...</local-command-caveat>"), "local command output", "caveat")
-        try expect(commandChipLabel("just a normal message") == nil, "normal text → nil")
     })
 
     results.append(check("rekeyPlugin: basic rekey, alreadyExists, notFound") {
@@ -256,45 +211,35 @@ func transcriptRenderChecks() -> [Bool] {
         try? FileManager.default.removeItem(at: tmp)
     })
 
-    results.append(check("sessionStats totals tokens and counts API calls") {
-        let events: [SessionEvent] = [
-            .userMessage([.text("hello")]),
-            .assistantText("hi"),
-            .turnUsage(TurnUsage(inputTokens: 12, outputTokens: 1388, cacheReadTokens: 82247, cacheWriteTokens: 12642, model: "claude-opus-4-8")),
-            .tool(ToolInvocation(id: "1", name: "Bash", toolClass: .builtin, argSummary: "x", input: [:], resultText: "ok", isError: false)),
-            .userMessage([.text("again")]),
-            .turnUsage(TurnUsage(inputTokens: 211, outputTokens: 22, cacheReadTokens: 0, cacheWriteTokens: 0, model: "claude-4-5-haiku")),
-        ]
-        let s = sessionStats(events)
-        try expectEqual(s.input, 223, "total input")
-        try expectEqual(s.output, 1410, "total output")
-        try expectEqual(s.cacheRead, 82247, "cache read")
-        try expectEqual(s.total, 223 + 1410 + 82247 + 12642, "grand total")
-        try expectEqual(s.assistantMessages, 2, "assistant messages = turnUsage count")
+    results.append(check("relativeLines / splitExitCode: search roots said once, exit codes pulled out") {
+        let r = relativeLines("/a/b/x.swift:3:foo\n/a/b/y.swift:9:bar", to: "/a/b")
+        try expectEqual(r.text, "x.swift:3:foo\ny.swift:9:bar", "relative"); try expectEqual(r.root, "/a/b", "root")
+        let mixed = relativeLines("/a/b/x\n/c/y\n/c/z", to: "/a/b")
+        try expect(mixed.root == nil, "most lines elsewhere → untouched")
+        try expect(relativeLines("x", to: nil).root == nil, "no root → untouched")
+        let e = splitExitCode("Exit code 127\nbash: nope: command not found")
+        try expectEqual(e.code, 127, "code"); try expectEqual(e.output, "bash: nope: command not found", "rest")
+        try expect(splitExitCode("fine").code == nil, "no prefix → nil")
     })
 
-    results.append(check("responseUsageSummaries collapses consecutive turnUsage per response") {
-        let events: [SessionEvent] = [
-            .userMessage([.text("q1")]),
-            .turnUsage(TurnUsage(inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 0, model: "claude-opus-4-8")),
-            .tool(ToolInvocation(id: "1", name: "Bash", toolClass: .builtin, argSummary: "x", input: [:], resultText: "ok", isError: false)),
-            .turnUsage(TurnUsage(inputTokens: 2, outputTokens: 7, cacheReadTokens: 200, cacheWriteTokens: 3, model: "claude-opus-4-8")),
-            .userMessage([.text("q2")]),
-            .turnUsage(TurnUsage(inputTokens: 1, outputTokens: 4, cacheReadTokens: 50, cacheWriteTokens: 0, model: "claude-sonnet-4-6")),
+    results.append(check("diffLines(patch:) numbers lines from the CLI's structured hunks") {
+        let hunks: [[String: Any]] = [
+            ["oldStart": 52, "oldLines": 3, "newStart": 52, "newLines": 3,
+             "lines": [" keep", "-old line", "+new line", " tail"]],
+            ["oldStart": 90, "oldLines": 1, "newStart": 90, "newLines": 2,
+             "lines": [" ctx", "+added", "\\ No newline at end of file"]],
         ]
-        let m = responseUsageSummaries(events)
-        try expectEqual(m.count, 2, "two responses")
-        // response 1 ends at index 3 (second turnUsage), summed
-        let r1 = m[3]
-        try expect(r1 != nil, "summary at index 3")
-        try expectEqual(r1!.inputTokens, 12, "summed input 10+2")
-        try expectEqual(r1!.outputTokens, 12, "summed output 5+7")
-        try expectEqual(r1!.cacheReadTokens, 300, "summed cache read")
-        // response 2 ends at index 5
-        try expect(m[5] != nil, "summary at index 5")
-        try expectEqual(m[5]!.outputTokens, 4, "second response output")
-        // no summary at index 1 (mid-response)
-        try expect(m[1] == nil, "no line mid-response")
+        let lines = diffLines(patch: hunks, path: "/x/File.swift")
+        try expectEqual(lines.first, DiffLine(kind: .file, text: "/x/File.swift"), "file header first")
+        try expectEqual(lines[1], DiffLine(kind: .context, text: "keep", oldLine: 52, newLine: 52), "context carries both numbers")
+        try expectEqual(lines[2], DiffLine(kind: .remove, text: "old line", oldLine: 53), "removal: old number only")
+        try expectEqual(lines[3], DiffLine(kind: .add, text: "new line", newLine: 53), "addition: new number only")
+        try expectEqual(lines[4], DiffLine(kind: .context, text: "tail", oldLine: 54, newLine: 54), "numbers advance")
+        try expectEqual(lines[5].kind, .note, "separator between hunks")
+        try expectEqual(lines[6], DiffLine(kind: .context, text: "ctx", oldLine: 90, newLine: 90), "second hunk restarts numbering")
+        try expectEqual(lines.count, 8, "no-newline marker dropped")
+        let stat = diffStat(lines)
+        try expectEqual(stat.added, 2, "two added"); try expectEqual(stat.removed, 1, "one removed")
     })
 
     return results

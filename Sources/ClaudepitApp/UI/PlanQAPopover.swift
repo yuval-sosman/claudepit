@@ -18,6 +18,11 @@ struct PlanQAPanel: View {
     var onPlanImproved: ((String, URL) -> Void)? = nil
     /// Called with each assistant answer text (stripped of tags).
     var onAnswer: ((String) -> Void)? = nil
+    /// No empty message area before the first question — for a host that sizes the panel to its
+    /// content (`.frame(maxHeight:)`) rather than a fixed height.
+    var growsWithContent: Bool = false
+    /// Put the cursor in the question field as the panel opens.
+    var focusOnAppear: Bool = false
 
     @State private var messages: [QAMessage] = []
     @State private var inputText: String = ""
@@ -26,6 +31,7 @@ struct PlanQAPanel: View {
     @State private var errorMessage: String?
     @State private var improvementIndexes: Set<Int> = []
     @State private var applyingIndex: Int? = nil
+    @FocusState private var inputFocused: Bool
 
     private let maxTurns = 10
 
@@ -61,6 +67,12 @@ struct PlanQAPanel: View {
 
             Divider().opacity(0.25)
 
+            if growsWithContent && messages.isEmpty && !isLoading && errorMessage == nil {
+                Text("Ask anything — Claude answers from the \(contentLabel ?? (showImprovement ? "plan" : "file"))'s text.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+            } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
@@ -88,6 +100,7 @@ struct PlanQAPanel: View {
                     if isLoading { withAnimation { proxy.scrollTo("loading", anchor: .bottom) } }
                 }
             }
+            }
 
             Divider().opacity(0.25)
 
@@ -102,7 +115,9 @@ struct PlanQAPanel: View {
                     TextField("Ask a question…", text: $inputText, axis: .vertical)
                         .lineLimit(1...3)
                         .textFieldStyle(.plain)
+                        .focused($inputFocused)
                         .onSubmit { sendIfReady() }
+                        .onAppear { if focusOnAppear { DispatchQueue.main.async { inputFocused = true } } }
                     Button("Send") { sendIfReady() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)

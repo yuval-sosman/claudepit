@@ -4,6 +4,8 @@ import ClaudepitCore
 struct DiscoverSheet: View {
     @ObservedObject var app: AppState
     let projectSlug: String
+    /// Pre-fills the query — the Sessions list hands over what its plain search didn't find.
+    var initialQuery: String = ""
     @Environment(\.dismiss) private var dismiss
 
     enum Timeframe: String, CaseIterable {
@@ -54,6 +56,7 @@ struct DiscoverSheet: View {
         }
         .frame(minWidth: 520, minHeight: 400)
         .background(.ultraThinMaterial)
+        .onAppear { if query.isEmpty { query = initialQuery } }
     }
 
     // MARK: - Header

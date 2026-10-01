@@ -7,6 +7,8 @@ struct PlansSection: View {
     @State private var selectedPlan: PlanFile?
     @State private var timeFilter: TimeFilter = .all
     @State private var showTimeFilter: Bool = false
+    /// A plan another page linked to: the list scrolls it into view once, then lets go.
+    @State private var revealPlan: URL?
     private var plansDir: URL {
         Paths.plansRoot
     }
@@ -78,13 +80,17 @@ struct PlansSection: View {
                 if filteredPlans.isEmpty {
                     EmptyState("No plans found.")
                 } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(filteredPlans) { plan in
-                                planRow(plan)
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(filteredPlans) { plan in
+                                    planRow(plan).id(plan.id)
+                                }
                             }
+                            .padding(.vertical, 8)
                         }
-                        .padding(.vertical, 8)
+                        .onAppear { reveal(proxy) }
+                        .onChange(of: revealPlan) { reveal(proxy) }
                     }
                 }
             }
@@ -151,7 +157,18 @@ struct PlansSection: View {
         guard let path = app.focusPlanPath else { return }
         reload()
         selectedPlan = plans.first { $0.path.path == path }
+        // A linked plan must show even if the date filter would hide it.
+        if let plan = selectedPlan, !timeFilter.includes(plan.modifiedAt) { timeFilter = .all }
+        revealPlan = selectedPlan?.id
         app.focusPlanPath = nil
+    }
+
+    private func reveal(_ proxy: ScrollViewProxy) {
+        guard let id = revealPlan else { return }
+        DispatchQueue.main.async {
+            proxy.scrollTo(id, anchor: .center)
+            revealPlan = nil
+        }
     }
 
     private func reload() {

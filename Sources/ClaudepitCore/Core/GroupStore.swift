@@ -69,4 +69,55 @@ public struct GroupStore: Sendable {
         pg.groups[idx].color = color
         try save(pg, projectSlug: projectSlug)
     }
+
+    // MARK: - Batch and layout edits (one load + one write each)
+
+    /// Assign every session to `groupID`. Unknown group → no-op, so a stale menu can't create an
+    /// assignment to nothing.
+    public func assign(sessionIDs: [String], groupID: String, projectSlug: String) throws {
+        var pg = load(projectSlug: projectSlug)
+        guard pg.groups.contains(where: { $0.id == groupID }), !sessionIDs.isEmpty else { return }
+        for id in sessionIDs { pg.assignments[id] = groupID }
+        try save(pg, projectSlug: projectSlug)
+    }
+
+    public func unassign(sessionIDs: [String], projectSlug: String) throws {
+        var pg = load(projectSlug: projectSlug)
+        let before = pg.assignments.count
+        for id in sessionIDs { pg.assignments.removeValue(forKey: id) }
+        guard pg.assignments.count != before else { return }
+        try save(pg, projectSlug: projectSlug)
+    }
+
+    /// Create a group and move `sessionIDs` into it, in one write.
+    @discardableResult
+    public func createGroup(name: String, color: GroupColor, assigning sessionIDs: [String],
+                            projectSlug: String) throws -> SessionGroup {
+        var pg = load(projectSlug: projectSlug)
+        let g = SessionGroup(id: UUID().uuidString, name: name, color: color,
+                             createdAt: Date().timeIntervalSince1970)
+        pg.groups.append(g)
+        for id in sessionIDs { pg.assignments[id] = g.id }
+        try save(pg, projectSlug: projectSlug)
+        return g
+    }
+
+    public func setCollapsed(id: String, collapsed: Bool, projectSlug: String) throws {
+        var pg = load(projectSlug: projectSlug)
+        guard let idx = pg.groups.firstIndex(where: { $0.id == id }),
+              pg.groups[idx].isCollapsed != collapsed else { return }
+        pg.groups[idx].collapsed = collapsed
+        try save(pg, projectSlug: projectSlug)
+    }
+
+    /// Move a group `offset` places (−1 up, +1 down), clamped to the list.
+    public func moveGroup(id: String, by offset: Int, projectSlug: String) throws {
+        var pg = load(projectSlug: projectSlug)
+        guard let from = pg.groups.firstIndex(where: { $0.id == id }) else { return }
+        let to = max(0, min(pg.groups.count - 1, from + offset))
+        guard to != from else { return }
+        let g = pg.groups.remove(at: from)
+        pg.groups.insert(g, at: to)
+        try save(pg, projectSlug: projectSlug)
+    }
 }

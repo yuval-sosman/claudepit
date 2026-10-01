@@ -41,6 +41,11 @@ public struct SummaryStore: Sendable {
         return ps
     }
 
+    /// Remove a session's summary (its transcript was trashed). Missing file → no-op.
+    public func delete(projectSlug: String, sessionID: String) {
+        try? FileManager.default.removeItem(at: summaryFile(projectSlug: projectSlug, sessionID: sessionID))
+    }
+
     public func save(_ entry: SessionBulletSummary, projectSlug: String, sessionID: String) throws {
         let dir = summaryDir(projectSlug: projectSlug)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

@@ -106,10 +106,60 @@ drift from what the installer writes and is correct on whatever machine it runs 
 ## Session Groups
 
 Session groups are stored at `~/.claude/claudepit-groups/<project-slug>.json` — one file per project. Each file contains:
-- **`groups`** — array of group objects (id, name, color, createdAt)
+- **`groups`** — array of group objects (id, name, color, createdAt, optional `collapsed`), in display order
 - **`assignments`** — map of `sessionID → groupID`
 
 To change group logic, edit `Sources/ClaudepitCore/Core/GroupStore.swift` and `Sources/ClaudepitCore/Model/SessionGroup.swift`.
+
+**Which file a session's group lives in is `SessionSummary.groupKey`**, stamped by the scanner: with
+a project open it is *that project's* key for every listed session — worktree checkouts
+(`<slug>--claude-worktrees-…`) and subdirectories included; across all projects it is the
+project that owns the session's `cwd`. Keying by the session's own folder (the old rule) gave
+worktree sessions a group file the Groups tab never read. Read and write groups only through
+`groupKey`, never `projectSlug` (that is the transcript folder, which `SummaryStore` uses).
+
+**Groups live in `AppState.sessionGroups`**, loaded with the sessions (`SessionScanner.listing`).
+Every edit goes through `AppState+Sessions` → `GroupStore` → `applyGroups(key:)`, which re-reads
+that one file and re-stamps `groupID` in place. Don't cache groups in a view: the page once kept
+its own copy refreshed only when the session *count* changed, so a group created from a row's
+menu was missing from the Groups tab and the session filed into it was listed nowhere. An
+assignment to a group that no longer exists reads as ungrouped (`ProjectGroups.validGroupID`).
+
+## Sessions List (left card)
+
+`UI/Sections/SessionList/` — `SessionListView` takes `[SessionSummary]` + a plain-data
+`SessionListContext` (groups, herdr states, stats, task names) + `SessionListActions` closures,
+never `AppState`, so it renders offscreen. What it shows is decided in Core and tested in
+`SessionListingChecks`: `SessionListing` (date sections, search, the Groups layout — manual groups,
+then one automatic group per task, then Ungrouped — live status, shift/arrow ranges),
+`SessionOpening`/`SessionTitle` (titles), `ProjectFolders` (which folders are the project's).
+
+- **Listing scope.** `ProjectFolders.folders` is shared with `ProjectUsageScanner`: the project's
+  own folder, its worktree folders, and other `<slug>-…` folders **only if their transcripts' cwd
+  is inside the project** — a bare prefix match listed `~/Dev/app-v2` under `~/Dev/app`, and every
+  project under `~`. Claude Code's slug maps `/ . +` to `-`; both that and `Paths.slug` are tried.
+- **Not listed:** a transcript with no user record (a resume stub), and one that only ran local
+  commands and never got a reply. Titles come from a task phase's task name, then `ai-title`, the
+  first typed prompt, the first slash command with arguments — the UUID only as a last resort.
+- **Scanner cost.** No subprocesses: `TranscriptLines` searches the memory-mapped file, and
+  `SessionScanner.HeadCache` re-reads a transcript only when its size/date changed (and then only
+  the part that can still change). Spawning two `grep`s per transcript cost ~9 s per rescan here.
+- **Liveness.** The FileWatcher watches folders, which don't change on append, so dates and the live
+  dot went stale. The page calls `AppState.refreshSessionLiveness()` every 10 s while visible
+  (re-stat + herdr), moving dates only forward. One status slot per row: herdr's `working` /
+  `blocked` (waiting) / idle (open), else "written in the last minute".
+- **Selection** is `SessionListState` (Set + primary + anchor): click, ⌘-click, ⇧-click, ↑/↓
+  (⇧ extends), ←/→ fold subagents, ⌘A, ⌫ trash, ⌥⌘F search. Clicking never scrolls the list; only
+  keyboard moves (minimal) and deep links (`revealRequest`, centred — it also clears filters and
+  unfolds groups that hide the row) do. Several selected → `SessionSelectionPanel` in the detail
+  card. Selection, expansion, search and date filter survive leaving the page
+  (`AppState.sessionsPageMemory`); view options persist in `@AppStorage("sessionsListPrefs")`.
+- **Trash** (`SessionTrash`) takes the transcript *and* its `<id>/` folder to the Trash and removes
+  the summary and group assignment; it is confirmed, and refused for a live session.
+- **Debug snapshot:** `.build/debug/ClaudepitApp --snapshot-sessions <project path | all> --out <dir>
+  [--tab groups] [--query q] [--demo-groups] [--demo-live] [--select a,b] [--expand id]
+  [--new-group] [--empty] [--time-scan]` (`DevSessionsSnapshot.swift`) — real transcripts, no
+  `AppState`, no writes.
 
 ## Session Summaries
 
@@ -503,9 +553,109 @@ so the transcript view's token line is no longer doubled either.
 - Shared pieces (`StatTile`, `CostBreakdownView`, `StackedBar`, `Money`/`Percent`/`Elapsed`)
   live in `UI/UsageViews.swift`, used by Home and the session report alike.
 
+## Session Transcript View
+
+A session's page (`SessionDetailView`) is a header — title, one fact strip (start, span, models,
+context gauge, tokens in/out, compactions, branch) and the Summary / Report / Context /
+focus-in-sidebar / ⋯ actions — over `TranscriptView` (`UI/Transcript/`). Counts of prompts,
+calls, edits, subagents and errors live on the filter chips only; the header used to repeat them. The goal it is built to: a reader
+understands every step of the session — each prompt, reply, thought, tool call, injected piece of
+context, hook, system prompt and system event, in order, with its time and cost.
+
+**Three layers, each tested or checkable:**
+- **`SessionTranscript`** (Core) parses the JSONL incrementally into `SessionEvent`s. Later records
+  resolve into earlier events *in place* (a `tool_result` into its call, a Stop-hook summary into
+  its hook run, a task notification onto the call that launched it), so an event's index is stable
+  and the view keys rows on it. The one exception is `insert(_:at:)` — print-mode sessions write the
+  reply before the prompt, and the prompt is moved back in front; it shifts every stored index.
+  `TranscriptFileTail` is the live reader (appends, half-written lines, truncation).
+- **`TranscriptModel`** (Core, pure) arranges events into turns and display rows, tags each row with
+  `TranscriptFilter`s, folds runs of ≥4 routine calls (`keyTools` never fold), attaches
+  Pre/PostToolUse hooks to their call (the hook's `toolUseID` *is* the call id), and answers
+  `visibleRows(filters:query:runExpanded:)`. Checks: `TranscriptParseChecks`, `TranscriptModelChecks`.
+- **Views** take a model plus `TranscriptActions` (closures), never `AppState`, so they render
+  anywhere — including the debug snapshot tool below.
+
+**Features the old page had, kept on purpose** — the rebuild dropped them once and the user
+noticed; check them after any rework: the **Plans / Tasks / Questions** filter chips; on every row
+about a plan file (a Write/Edit under `Paths.plansRoot`, ExitPlanMode, plan-mode context)
+always-visible **Ask** (inline `PlanQAPanel`) and **Plans** (`actions.openPlan` → the Plans page,
+which also scrolls its list to the plan) links, or "plan file deleted"; **task spans**
+(`TranscriptModel.taskSpans` — open on `TaskUpdate(in_progress)`, close on that task's
+completion or the next task's start): a coloured bar down the span, a "Started Task N" heading
+with its duration, `TaskCreate` rows showing the task's final status with a `#N` jump to its
+span, and clickable TaskList / TodoWrite lines; the timeline rail's **colour key** (ⓘ); the session's
+token totals; a visible **focus in sidebar** button. Links that land on a row go through
+`TranscriptView.jump(toEvent:)`, which unfolds a run and clears filters that hide the target.
+Row links sit in `DisclosureRow`'s `accessory` slot — *outside* the toggle button, so a click on
+one never opens or folds the row.
+
+**What the CLI records and how it shows** (catalogued from 213 real transcripts, CLI 2.1.236–285):
+thinking blocks are usually *signed and empty* — counted in the turn footer, shown only when they
+carry text; `attachment` records with a `rendered` field are text the model received — shown as
+Context with "exact text the model received"; `prompt_snapshot` is the system prompt and tool list
+(one row per distinct prompt); `total_tokens_reminder`, `deferred_tools_record`, `credential_org`
+and `thinking_drop` are bookkeeping and dropped (`ContextItemBuilder.skipped`); an unknown attachment
+still shows (by its `rendered` text, else raw). Task-notification bodies are **XML-escaped**
+(`-&gt;`) — `TaskNotification.parse` unescapes; command output can carry **ANSI codes** —
+`stripANSI`. A queued message's timestamp is when it was *sent*, its file position when it was
+*delivered*; the view shows it where it was delivered.
+
+**Sharp edges:**
+- Rows are computed for one model and must never be drawn against another. The loader stamps each
+  rebuild with a `generation`; `TranscriptView.currentRows` recomputes inline when `rows` is behind,
+  and `TranscriptRowView` refuses indices the model doesn't have. Without both, a live transcript
+  that was rewritten shorter trapped with "Index out of range" (reproduce:
+  `--snapshot-transcript <big file> --shrink-test`).
+- Transcripts are **trees** (`parentUuid`). Two prompts with one parent are a rewind — the person
+  edited and resent — and every turn on the earlier branch is marked `rewound`, faded, and says
+  which turn replaced it. Read linearly, a dead branch looks like conversation Claude received.
+- Expansion state lives in one `TranscriptExpansion`, not in rows: lazy rows are recycled while
+  scrolling, and per-row `@State` would reset. It holds a `mode`, the toolbar's **Expand: Edits /
+  All** toggle (there is no collapse-all, by request). `.edits` is the default: every row takes
+  its own default, so file edits open on their diffs and everything else, questions and plan
+  approvals included, sits on one line. `.all` opens everything. It also holds the ids the reader
+  flipped by hand, which a mode switch resets, and the open **panels** (plan Q&A) — tools, not
+  content, so "All" never opens them.
+- The toolbar ends where the rows do (`TranscriptView.rowsTrailingInset` = rail + gap + the
+  list's inset), not at the window edge above the rail.
+- The scroll tracker is held in `@State`, *not* `@StateObject`: observing it would re-diff the whole
+  list on every scroll tick. Only the rail and the jump button observe it.
+- **Live follow** moves the list on its own, so it is the first suspect for "it scrolls by itself".
+  It scrolls to the end on a rebuild only while `tracker.following` holds and the reader isn't
+  scrolling. On macOS 15+ (`ScrollIntent`), `following` comes from scroll geometry: reaching the
+  end (12pt slack) sets it, *any* upward move clears it, and content growing below changes the
+  size, not the offset, so it never clears it. Scroll phases mark a gesture in progress. Every
+  programmatic jump away (rail, links, filters, a revealed panel) clears it too. macOS 14 falls
+  back to the end sentinel's appear/disappear. Check: `--follow-test`.
+- The **timeline rail** (`TranscriptRail`) marks *rows*, not turns:
+  `TranscriptModel.landmark(of:)` (Core, tested) gives each notable row a kind. Turn starts are
+  wide marks; edits, plan steps, questions, subagents, skills, task changes, compactions and
+  failures are short ones. Marks are placed by row index. A per-turn rail was nearly empty for the
+  common one-prompt session: two marks for 74 calls.
+- When the row the reader is anchored on folds into a run (a fourth routine call arrived),
+  `recompute()` re-anchors `topRowID` on the run, or the list loses its place.
+- A panel a row's link opens (a plan's Q&A) goes in `DisclosureRow.inset`, under the title line,
+  never below a long body. `expansion.requestReveal` scrolls it into view with a `nil` anchor
+  (only as far as needed), leaving 44pt for the floating End/Latest button. Its field takes focus
+  only on that opening click, not each time the lazy list rebuilds the row.
+- Highlighters stamp their own fonts; `CodeHighlight` strips them (Splash's is proportional).
+- `PathText` parses markdown **once** and lays file links over the result. Splitting the text at
+  each path first broke any bold or code span around it.
+
+**Debug snapshot tool** (DEBUG builds): render a real transcript offscreen to PNG without launching
+the app or creating an `AppState` (whose pollers would drive tasks):
+`.build/debug/ClaudepitApp --snapshot-transcript <file.jsonl> --out <dir> [--width N] [--height N]
+[--list] [--rows A-B | --only id,id] [--open id,id] [--expand-all] [--filter a,b] [--query q]
+[--scroll-to id] [--hover-row id] [--rail-key] [--reveal id] [--markdown] [--shrink-test]
+[--follow-test]`. Plan links draw
+(the tool supplies a stand-in `openPlan`); open a plan's Q&A with `--open <row id>/qa`. `--list` prints row ids to pick
+from (add `--expand-all` to list calls inside folded runs). See `DevSnapshot.swift`. Tall PNGs:
+slice with `CGImage.cropping`, not `sips --cropOffset` (it crops around the centre).
+
 ## Session Report
 
-A session's **Report** button (`SessionDetailView`, top right of the filter row) opens
+A session's **Report** button (`SessionDetailView`, in the header's actions) opens
 `SessionReportView` as a sheet inside the app, styled and sized like the Source Control sheet
 (title bar with refresh and close, Esc closes; 92% of the main window, measured at tap time
 because `keyWindow` becomes the sheet once it opens). The `SessionReportRequest` carries every

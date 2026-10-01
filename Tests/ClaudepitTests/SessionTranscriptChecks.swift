@@ -15,10 +15,12 @@ func sessionTranscriptChecks() -> [Bool] {
         let events = t.parse(data: try Data(contentsOf: url))
 
         // order: userMessage, assistantText, tool(t1), tool(t2)
-        guard case .userMessage(let blocks) = events[0], case .text(let u) = blocks[0] else { throw CheckFailure(message: "e0 not userMessage") }
+        guard case .userMessage(let msg) = events[0], case .text(let u) = msg.blocks[0] else { throw CheckFailure(message: "e0 not userMessage") }
         try expectEqual(u, "do a thing", "user text")
+        try expectEqual(msg.kind, .prompt, "a typed prompt")
+        try expect(msg.time != nil, "prompt carries its timestamp")
         guard case .assistantText(let a) = events[1] else { throw CheckFailure(message: "e1 not assistantText") }
-        try expectEqual(a, "on it", "assistant text")
+        try expectEqual(a.text, "on it", "assistant text")
 
         let tools = toolInvs(events)
         try expectEqual(tools.count, 2, "two tools")
@@ -26,6 +28,7 @@ func sessionTranscriptChecks() -> [Bool] {
         try expectEqual(tools[0].argSummary, "swift build", "bash summary")
         try expectEqual(tools[0].resultText, "Compiling...", "bash result matched")
         try expectEqual(tools[0].isError, false, "bash not error")
+        try expectEqual(tools[0].duration, 1, "call at :01, result at :02")
         // second tool has no result yet (pending)
         try expect(tools[1].resultText == nil, "t2 pending result")
     })
@@ -68,7 +71,7 @@ func sessionTranscriptChecks() -> [Bool] {
         try expect(e1.isEmpty, "no event until newline arrives")
         let e2 = t.parse(data: Data(bytes[splitAt...]))
         try expectEqual(e2.count, 1, "one event after full line")
-        guard case .userMessage(let blocks2) = e2[0], case .text(let txt) = blocks2[0] else { throw CheckFailure(message: "not userMessage") }
+        guard case .userMessage(let m2) = e2[0], case .text(let txt) = m2.blocks[0] else { throw CheckFailure(message: "not userMessage") }
         try expectEqual(txt, "hi 🎉", "emoji intact across chunk boundary")
     })
 
@@ -86,9 +89,9 @@ func sessionTranscriptChecks() -> [Bool] {
         let usages = e.compactMap { if case .turnUsage(let u) = $0 { return u } else { return nil } }
         try expectEqual(usages.count, 1, "one call")
         try expectEqual(usages.first?.outputTokens, 57, "complete output count")
-        let stats = sessionStats(e)
-        try expectEqual(stats.cacheRead, 900, "cache read not doubled")
-        try expectEqual(stats.assistantMessages, 1, "one assistant message")
+        let stats = TranscriptModel(events: e).stats
+        try expectEqual(stats.cacheReadTokens, 900, "cache read not doubled")
+        try expectEqual(stats.apiCalls, 1, "one API call")
     })
 
     results.append(check("SessionTranscript emits turnUsage from assistant usage, skips synthetic") {

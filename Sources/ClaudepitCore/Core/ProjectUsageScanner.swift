@@ -80,13 +80,11 @@ public final class ProjectUsageScanner: @unchecked Sendable {
     /// project's folders, or of every folder when `base` is nil.
     func transcripts(for base: URL?) -> [Transcript] {
         let fm = FileManager.default
-        let prefix = base.map(Self.slug)
-        let dirs = ((try? fm.contentsOfDirectory(at: projectsRoot, includingPropertiesForKeys: nil,
-                                                 options: [.skipsHiddenFiles])) ?? [])
-            .filter { dir in
-                guard let prefix else { return true }
-                return dir.lastPathComponent == prefix || dir.lastPathComponent.hasPrefix(prefix + "-")
-            }
+        // The same folders `SessionScanner` lists (`ProjectFolders`): the project's own, its
+        // worktrees' and subdirectories' — not a sibling whose name merely extends the slug.
+        let dirs = base.map { ProjectFolders.folders(for: $0, in: projectsRoot) }
+            ?? ((try? fm.contentsOfDirectory(at: projectsRoot, includingPropertiesForKeys: nil,
+                                             options: [.skipsHiddenFiles])) ?? [])
         var out: [Transcript] = []
         for dir in dirs {
             let project = dir.lastPathComponent

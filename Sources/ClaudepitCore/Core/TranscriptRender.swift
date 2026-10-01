@@ -3,14 +3,64 @@ import Foundation
 public enum MarkdownBlock: Equatable {
     case paragraph(String)
     case heading(level: Int, text: String)
-    case bulletList([String])
-    case orderedList([String])
+    /// A list, nested items included: one entry per item, each with its depth and marker.
+    case list([MarkdownListItem])
     case code(language: String?, body: String)
     case table(header: [String], rows: [[String]])
     case quote(String)
+    /// `---`, `***` or `___` on a line of its own.
+    case rule
 }
 
-/// Line-based block splitter. Not full CommonMark — covers the common cases.
+public struct MarkdownListItem: Equatable {
+    public enum Marker: Equatable {
+        case bullet
+        /// The number as written, so a list interrupted by a sub-list keeps counting.
+        case number(Int)
+        /// `- [ ]` / `- [x]`.
+        case task(checked: Bool)
+    }
+    public var level: Int
+    public var marker: Marker
+    public var text: String
+    public init(level: Int = 0, marker: Marker, text: String) {
+        self.level = level; self.marker = marker; self.text = text
+    }
+    public static func bullet(_ text: String, level: Int = 0) -> MarkdownListItem { .init(level: level, marker: .bullet, text: text) }
+    public static func number(_ n: Int, _ text: String, level: Int = 0) -> MarkdownListItem { .init(level: level, marker: .number(n), text: text) }
+}
+
+/// A list-item line: its indentation depth, marker and text. nil for any other line.
+private func listItem(_ line: String) -> MarkdownListItem? {
+    let indent = line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+    let t = line.trimmingCharacters(in: .whitespaces)
+    let level = min(indent / 2, 6)
+    if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("+ ") {
+        var text = String(t.dropFirst(2))
+        if text.hasPrefix("[ ] ") || text.hasPrefix("[x] ") || text.hasPrefix("[X] ") {
+            let checked = !text.hasPrefix("[ ]")
+            text = String(text.dropFirst(4))
+            return MarkdownListItem(level: level, marker: .task(checked: checked), text: text)
+        }
+        return MarkdownListItem(level: level, marker: .bullet, text: text)
+    }
+    if let dot = t.firstIndex(where: { $0 == "." || $0 == ")" }), dot > t.startIndex,
+       t[t.startIndex..<dot].allSatisfy(\.isNumber), t[t.startIndex..<dot].count <= 4,
+       t.index(after: dot) < t.endIndex, t[t.index(after: dot)] == " ",
+       let n = Int(t[t.startIndex..<dot]) {
+        return MarkdownListItem(level: level, marker: .number(n), text: String(t[t.index(dot, offsetBy: 2)...]))
+    }
+    return nil
+}
+
+private func isRule(_ trimmed: String) -> Bool {
+    let compact = trimmed.replacingOccurrences(of: " ", with: "")
+    guard compact.count >= 3, let c = compact.first, "-*_".contains(c) else { return false }
+    return compact.allSatisfy { $0 == c }
+}
+
+/// Line-based block splitter. Not full CommonMark — covers what Claude writes: nested and
+/// numbered lists, task lists, fences, tables, quotes, rules.
 public func parseMarkdownBlocks(_ text: String) -> [MarkdownBlock] {
     let lines = text.components(separatedBy: "\n")
     var blocks: [MarkdownBlock] = []
@@ -38,23 +88,29 @@ public func parseMarkdownBlocks(_ text: String) -> [MarkdownBlock] {
         // fenced code
         if trimmed.hasPrefix("```") {
             let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            // Strip the fence's own indentation from the body (a fence inside a list item).
+            let fenceIndent = line.prefix { $0 == " " }.count
             var body: [String] = []
             i += 1
             while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                body.append(lines[i]); i += 1
+                var l = lines[i]
+                let lead = l.prefix { $0 == " " }.count
+                l.removeFirst(min(lead, fenceIndent))
+                body.append(l); i += 1
             }
             if i < lines.count { i += 1 } // consume closing fence
             blocks.append(.code(language: lang.isEmpty ? nil : lang, body: body.joined(separator: "\n")))
             continue
         }
 
+        // rule (before lists: `- - -` and `***` are rules, not items)
+        if isRule(trimmed) { blocks.append(.rule); i += 1; continue }
+
         // heading
-        if trimmed.hasPrefix("#") {
+        if isHeading(trimmed) {
             let hashes = trimmed.prefix { $0 == "#" }.count
-            if hashes <= 6 {
-                let t = String(trimmed.dropFirst(hashes)).trimmingCharacters(in: .whitespaces)
-                blocks.append(.heading(level: hashes, text: t)); i += 1; continue
-            }
+            let t = String(trimmed.dropFirst(hashes)).trimmingCharacters(in: .whitespaces)
+            blocks.append(.heading(level: hashes, text: t)); i += 1; continue
         }
 
         // blockquote
@@ -78,47 +134,47 @@ public func parseMarkdownBlocks(_ text: String) -> [MarkdownBlock] {
             blocks.append(.table(header: header, rows: rows)); continue
         }
 
-        // unordered list
-        if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
-            var items: [String] = []
+        // list: items at any depth; indented non-item lines continue the item above; a change
+        // of marker kind at the top level starts a new list.
+        if let first = listItem(line) {
+            var items = [first]
+            let baseIndent = first.level
+            let ordered: Bool = { if case .number = first.marker { return true } else { return false } }()
+            i += 1
             while i < lines.count {
-                let t = lines[i].trimmingCharacters(in: .whitespaces)
-                guard t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("+ ") else { break }
-                items.append(String(t.dropFirst(2))); i += 1
+                let l = lines[i]
+                let t = l.trimmingCharacters(in: .whitespaces)
+                if t.isEmpty {
+                    // A blank line continues the list only if the next text belongs to it.
+                    var j = i + 1
+                    while j < lines.count, lines[j].trimmingCharacters(in: .whitespaces).isEmpty { j += 1 }
+                    guard j < lines.count, let next = listItem(lines[j]),
+                          next.level > baseIndent || isOrdered(next) == ordered else { break }
+                    i = j; continue
+                }
+                if var item = listItem(l) {
+                    item.level = max(0, item.level - baseIndent)
+                    if item.level == 0 && isOrdered(item) != ordered { break }
+                    items.append(item); i += 1; continue
+                }
+                // Indented continuation of the previous item (not a fence, rule or table).
+                let indent = l.prefix { $0 == " " || $0 == "\t" }.count
+                guard indent >= 2, !t.hasPrefix("```"), !t.hasPrefix("|"), !isRule(t) else { break }
+                items[items.count - 1].text += "\n" + t
+                i += 1
             }
-            blocks.append(.bulletList(items)); continue
-        }
-
-        // ordered list: "N. "
-        if let dot = trimmed.firstIndex(of: "."),
-           trimmed[trimmed.startIndex..<dot].allSatisfy(\.isNumber),
-           trimmed.index(after: dot) < trimmed.endIndex, trimmed[trimmed.index(after: dot)] == " " {
-            var items: [String] = []
-            while i < lines.count {
-                let t = lines[i].trimmingCharacters(in: .whitespaces)
-                guard let d = t.firstIndex(of: "."),
-                      t[t.startIndex..<d].allSatisfy(\.isNumber), !t[t.startIndex..<d].isEmpty,
-                      t.index(after: d) < t.endIndex, t[t.index(after: d)] == " " else { break }
-                items.append(String(t[t.index(t.index(after: d), offsetBy: 1)...])); i += 1
-            }
-            blocks.append(.orderedList(items)); continue
+            blocks.append(.list(items)); continue
         }
 
         // paragraph: gather consecutive plain lines
         var para: [String] = []
         while i < lines.count {
             let t = lines[i].trimmingCharacters(in: .whitespaces)
-            // stop at the start of any other block
-            let isOrdered: Bool = {
-                guard let d = t.firstIndex(of: "."), t.startIndex < d,
-                      t[t.startIndex..<d].allSatisfy(\.isNumber),
-                      t.index(after: d) < t.endIndex, t[t.index(after: d)] == " " else { return false }
-                return true
-            }()
             let isTableStart = t.contains("|") && i + 1 < lines.count && isTableSep(lines[i + 1])
-            if t.isEmpty || t.hasPrefix("#") || t.hasPrefix("```") || t.hasPrefix(">")
-                || t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("+ ")
-                || isOrdered || isTableStart { break }
+            // The first line is this paragraph's no matter what — every pass must consume one.
+            if !para.isEmpty, t.isEmpty || isHeading(t) || t.hasPrefix("```") || t.hasPrefix(">")
+                || listItem(lines[i]) != nil || isTableStart || isRule(t) { break }
+            if para.isEmpty && t.isEmpty { break }
             para.append(lines[i]); i += 1
         }
         if !para.isEmpty { blocks.append(.paragraph(para.joined(separator: "\n"))) }
@@ -126,11 +182,59 @@ public func parseMarkdownBlocks(_ text: String) -> [MarkdownBlock] {
     return blocks
 }
 
+/// `# Title` … `###### Title`: one to six hashes, then a space or nothing.
+private func isHeading(_ trimmed: String) -> Bool {
+    let hashes = trimmed.prefix { $0 == "#" }.count
+    guard hashes >= 1, hashes <= 6 else { return false }
+    let rest = trimmed.dropFirst(hashes)
+    return rest.isEmpty || rest.first == " "
+}
+
+private func isOrdered(_ item: MarkdownListItem) -> Bool {
+    if case .number = item.marker { return true } else { return false }
+}
+
 public struct DiffLine: Equatable {
     public enum Kind: Equatable { case add, remove, context, file, note }
     public let kind: Kind
     public let text: String
-    public init(kind: Kind, text: String) { self.kind = kind; self.text = text }
+    /// Line numbers in the old / new file, when the source had them (a structured patch).
+    public var oldLine: Int?
+    public var newLine: Int?
+    public init(kind: Kind, text: String, oldLine: Int? = nil, newLine: Int? = nil) {
+        self.kind = kind; self.text = text; self.oldLine = oldLine; self.newLine = newLine
+    }
+}
+
+/// Lines of an edit's `structuredPatch` — the CLI's real hunks, with context lines and line
+/// numbers, which `diffLines(toolName:input:)` (old string vs new string) can't give.
+public func diffLines(patch hunks: [[String: Any]], path: String?) -> [DiffLine] {
+    var out: [DiffLine] = []
+    if let path { out.append(DiffLine(kind: .file, text: path)) }
+    for (h, hunk) in hunks.enumerated() {
+        var old = hunk["oldStart"] as? Int ?? 1
+        var new = hunk["newStart"] as? Int ?? 1
+        if h > 0 { out.append(DiffLine(kind: .note, text: "⋯")) }
+        for raw in hunk["lines"] as? [String] ?? [] {
+            let body = String(raw.dropFirst())
+            switch raw.first {
+            case "+": out.append(DiffLine(kind: .add, text: body, newLine: new)); new += 1
+            case "-": out.append(DiffLine(kind: .remove, text: body, oldLine: old)); old += 1
+            case "\\": continue   // "\ No newline at end of file"
+            default:
+                out.append(DiffLine(kind: .context, text: body, oldLine: old, newLine: new))
+                old += 1; new += 1
+            }
+        }
+    }
+    return out
+}
+
+/// Added and removed line counts — the `+12 −3` on an edit's row.
+public func diffStat(_ lines: [DiffLine]) -> (added: Int, removed: Int) {
+    lines.reduce(into: (0, 0)) { acc, l in
+        if l.kind == .add { acc.0 += 1 } else if l.kind == .remove { acc.1 += 1 }
+    }
 }
 
 public func diffLines(toolName: String, input: [String: Any]) -> [DiffLine] {
@@ -226,15 +330,36 @@ public func deepLinkTarget(for toolClass: ToolClass,
     }
 }
 
-public struct TaskSpan: Equatable {
-    public let taskId: String
-    public let label: String
-    public let startIndex: Int
-    public let endIndex: Int      // inclusive
-    public init(taskId: String, label: String, startIndex: Int, endIndex: Int) {
-        self.taskId = taskId; self.label = label
-        self.startIndex = startIndex; self.endIndex = endIndex
+/// One line of a TaskList result.
+public struct TaskListLine: Equatable, Sendable {
+    public let id: String
+    public let status: String
+    public let subject: String
+    public init(id: String, status: String, subject: String) {
+        self.id = id; self.status = status; self.subject = subject
     }
+}
+
+/// TaskList's text, one task a line — `#1 [completed] Fix bugs` — read leniently: the id from
+/// `#N`, an optional `[status]` (`in progress` normalised to `in_progress`), the rest the subject.
+/// Lines without a `#N` (a heading, a blank) are skipped.
+public func parseTaskListLines(_ text: String) -> [TaskListLine] {
+    var out: [TaskListLine] = []
+    for raw in text.components(separatedBy: "\n") {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        guard let hash = line.firstIndex(of: "#") else { continue }
+        let after = line[line.index(after: hash)...]
+        let id = String(after.prefix { $0.isNumber })
+        guard !id.isEmpty else { continue }
+        var rest = String(after.drop { $0.isNumber }).trimmingCharacters(in: CharacterSet(charactersIn: " .:-"))
+        var status = "pending"
+        if rest.hasPrefix("["), let close = rest.firstIndex(of: "]") {
+            status = String(rest[rest.index(after: rest.startIndex)..<close]).replacingOccurrences(of: " ", with: "_")
+            rest = String(rest[rest.index(after: close)...]).trimmingCharacters(in: .whitespaces)
+        }
+        out.append(TaskListLine(id: id, status: status, subject: rest))
+    }
+    return out
 }
 
 /// Extract the numeric task id from a TaskCreate/TaskUpdate result string ("... #7 ...").
@@ -243,58 +368,6 @@ public func parseCreatedTaskId(_ resultText: String) -> String? {
     let after = resultText[resultText.index(after: hash)...]
     let digits = after.prefix { $0.isNumber }
     return digits.isEmpty ? nil : String(digits)
-}
-
-/// Map task id → subject, from each TaskCreate's input.subject and its result id.
-public func taskSubjects(_ events: [SessionEvent]) -> [String: String] {
-    var out: [String: String] = [:]
-    for e in events {
-        guard case .tool(let inv) = e, inv.name == "TaskCreate" else { continue }
-        guard let subject = inv.input["subject"] as? String,
-              let result = inv.resultText, let id = parseCreatedTaskId(result) else { continue }
-        out[id] = subject
-    }
-    return out
-}
-
-/// Derive flat task spans. Open on TaskUpdate(in_progress); close on the next
-/// in_progress (different task) or this task's completed/deleted. Events outside
-/// spans are ungrouped. Label = "Task <id>: <subject>" or "Task <id>" if unknown.
-public func taskSpans(_ events: [SessionEvent]) -> [TaskSpan] {
-    let subjects = taskSubjects(events)
-    func label(_ id: String) -> String {
-        if let s = subjects[id] { return s.hasPrefix("Task ") ? s : "Task \(id): \(s)" }
-        return "Task \(id)"
-    }
-    var spans: [TaskSpan] = []
-    var openID: String?
-    var openStart = 0
-
-    func closeOpen(at endIndex: Int) {
-        guard let id = openID else { return }
-        spans.append(TaskSpan(taskId: id, label: label(id), startIndex: openStart, endIndex: endIndex))
-        openID = nil
-    }
-
-    for (i, e) in events.enumerated() {
-        guard case .tool(let inv) = e, inv.name == "TaskUpdate",
-              let taskId = inv.input["taskId"] as? String,
-              let status = inv.input["status"] as? String else { continue }
-        switch status {
-        case "in_progress":
-            if let cur = openID {
-                if cur == taskId { break }          // same task, already open
-                closeOpen(at: i - 1)                // switching tasks: close previous just before this
-            }
-            openID = taskId; openStart = i
-        case "completed", "deleted":
-            if openID == taskId { closeOpen(at: i) } // this update is the span's last event
-        default:
-            break
-        }
-    }
-    if openID != nil { closeOpen(at: events.count - 1) }
-    return spans
 }
 
 public struct AskOption: Equatable {
@@ -350,133 +423,26 @@ public func parseAskAnswers(_ resultText: String) -> [String: String] {
     return out
 }
 
-public struct TimelineMarker: Equatable {
-    public enum Kind: Equatable, CaseIterable { case user, task, subagent, skill, question, hook, tools, plan }
-    public let index: Int
-    public let kind: Kind
-    public let label: String
-    public init(index: Int, kind: Kind, label: String) {
-        self.index = index; self.kind = kind; self.label = label
-    }
+// MARK: - Tool output helpers
+
+/// Result lines under `root` rewritten relative to it — a search's matches, with the root said
+/// once. Returns the root actually stripped, or nil when most lines aren't under it.
+public func relativeLines(_ text: String, to root: String?) -> (text: String, root: String?) {
+    guard let root, !root.isEmpty else { return (text, nil) }
+    let prefix = root.hasSuffix("/") ? root : root + "/"
+    let lines = text.components(separatedBy: "\n")
+    let under = lines.filter { $0.hasPrefix(prefix) }.count
+    guard under > 0, under * 2 >= lines.filter({ !$0.isEmpty }).count else { return (text, nil) }
+    return (lines.map { $0.hasPrefix(prefix) ? String($0.dropFirst(prefix.count)) : $0 }.joined(separator: "\n"), root)
 }
 
-/// Notable events for the timeline rail: user messages, TaskCreate, subagents,
-/// skills, AskUserQuestion. High-frequency tools (Bash/Read/Edit/…) are excluded.
-public func timelineMarkers(_ events: [SessionEvent]) -> [TimelineMarker] {
-    func trim(_ s: String, _ n: Int = 60) -> String {
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.count > n ? String(t.prefix(n)) : t
-    }
-    var out: [TimelineMarker] = []
-    for (i, e) in events.enumerated() {
-        switch e {
-        case .userMessage(let blocks):
-            if case .text(let t) = blocks.first, blocks.count == 1, commandChipLabel(t) != nil { break }
-            let label = blocks.compactMap { if case .text(let t) = $0 { return t } else { return nil } }.first ?? ""
-            out.append(TimelineMarker(index: i, kind: .user, label: trim(label)))
-        case .tool(let inv):
-            if inv.name == "TaskCreate" {
-                let subj = (inv.input["subject"] as? String) ?? inv.argSummary
-                out.append(TimelineMarker(index: i, kind: .task, label: trim(subj)))
-            } else if inv.name == "AskUserQuestion" {
-                let qs = parseAskQuestions(inv.input)
-                out.append(TimelineMarker(index: i, kind: .question, label: trim(qs.first?.question ?? "Question")))
-            } else {
-                switch inv.toolClass {
-                case .agent:
-                    out.append(TimelineMarker(index: i, kind: .subagent, label: inv.displayName))
-                case .skill:
-                    out.append(TimelineMarker(index: i, kind: .skill, label: inv.displayName))
-                default:
-                    if inv.name == "Write",
-                       let path = inv.input["file_path"] as? String,
-                       path.hasPrefix(Paths.plansRoot.path + "/"),
-                       path.hasSuffix(".md") {
-                        let planName = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
-                        out.append(TimelineMarker(index: i, kind: .plan, label: planName))
-                    }
-                }
-            }
-        case .hook(let h):
-            out.append(TimelineMarker(index: i, kind: .hook, label: trim(h.hookName)))
-        case .assistantText, .systemNote, .attachment, .turnUsage:
-            break
-        }
-    }
-    return out
+/// A failed shell call's result, `Exit code N` then its output → (N, output). (nil, nil) when
+/// the text doesn't start that way.
+public func splitExitCode(_ text: String?) -> (code: Int?, output: String?) {
+    guard let text, text.hasPrefix("Exit code ") else { return (nil, nil) }
+    let first = text.prefix { $0 != "\n" }
+    let code = Int(first.dropFirst("Exit code ".count).trimmingCharacters(in: .whitespaces))
+    let rest = text.dropFirst(first.count).drop { $0 == "\n" }
+    return (code, String(rest))
 }
 
-/// If a user message is Claude Code command metadata (a slash-command invocation
-/// or local-command wrapper), return a friendly one-line label; else nil.
-public func commandChipLabel(_ text: String) -> String? {
-    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    // slash command: <command-name>/clear</command-name> ...
-    if let name = between(t, "<command-name>", "</command-name>") {
-        let args = between(t, "<command-args>", "</command-args>")?.trimmingCharacters(in: .whitespaces) ?? ""
-        return args.isEmpty ? "ran \(name)" : "ran \(name) \(args)"
-    }
-    // local command caveat / stdout wrappers → treat as a system-ish note
-    if t.hasPrefix("<local-command-caveat>") || t.hasPrefix("<local-command-stdout>") {
-        return "local command output"
-    }
-    return nil
-}
-
-private func between(_ s: String, _ open: String, _ close: String) -> String? {
-    guard let a = s.range(of: open), let b = s.range(of: close, range: a.upperBound..<s.endIndex) else { return nil }
-    return String(s[a.upperBound..<b.lowerBound])
-}
-
-// MARK: - Session aggregate stats
-
-/// Token totals for the context panel under a transcript. One `.turnUsage` per API call (see
-/// `SessionTranscript`), so these are true totals. Everything richer — cost, per-model splits,
-/// cache misses, tools — is the session report's (`SessionReport`).
-public struct SessionStats {
-    public var input = 0, output = 0, cacheRead = 0, cacheWrite = 0
-    /// API calls (one `.turnUsage` each).
-    public var assistantMessages = 0
-    public var total: Int { input + output + cacheRead + cacheWrite }
-    public init() {}
-}
-
-public func sessionStats(_ events: [SessionEvent]) -> SessionStats {
-    var s = SessionStats()
-    for case .turnUsage(let u) in events {
-        s.assistantMessages += 1
-        s.input += u.inputTokens; s.output += u.outputTokens
-        s.cacheRead += u.cacheReadTokens; s.cacheWrite += u.cacheWriteTokens
-    }
-    return s
-}
-
-/// Collapse per-message usage into one summary per *response*: sum all consecutive
-/// `.turnUsage` events since the last user message, keyed by the index of the LAST
-/// turnUsage in that run. Render only those indices to show one line per response.
-/// The summed model is the last message's model (the one that finished the response).
-public func responseUsageSummaries(_ events: [SessionEvent]) -> [Int: TurnUsage] {
-    var out: [Int: TurnUsage] = [:]
-    var runOut = 0, runIn = 0, runCacheR = 0, runCacheW = 0
-    var lastIdx = -1, lastModel = ""
-    func flush() {
-        guard lastIdx >= 0 else { return }
-        out[lastIdx] = TurnUsage(inputTokens: runIn, outputTokens: runOut,
-                                 cacheReadTokens: runCacheR, cacheWriteTokens: runCacheW,
-                                 model: lastModel)
-        runIn = 0; runOut = 0; runCacheR = 0; runCacheW = 0; lastIdx = -1
-    }
-    for (i, e) in events.enumerated() {
-        switch e {
-        case .turnUsage(let u):
-            runIn += u.inputTokens; runOut += u.outputTokens
-            runCacheR += u.cacheReadTokens; runCacheW += u.cacheWriteTokens
-            lastIdx = i; lastModel = u.model
-        case .userMessage:
-            flush()   // a new user message ends the previous response
-        default:
-            break
-        }
-    }
-    flush()
-    return out
-}

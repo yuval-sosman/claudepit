@@ -22,7 +22,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Entry point. DEBUG builds first check for the offscreen snapshot tool's flags
+/// (`DevSnapshot`), which render a transcript to PNG and exit without starting the app.
 @main
+enum ClaudepitMain {
+    static func main() {
+        #if DEBUG
+        if MainActor.assumeIsolated({ DevSnapshot.runIfRequested() }) { return }
+        #endif
+        ClaudepitApp.main()
+    }
+}
+
 struct ClaudepitApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var app = AppState()

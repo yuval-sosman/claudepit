@@ -1,0 +1,202 @@
+import Foundation
+
+/// The Sessions page's left list, as pure functions over `SessionSummary` — what the Recent and
+/// Groups tabs show, in what order, and what a row says about the session. The view only draws it.
+
+// MARK: - Live status
+
+/// The one live indicator a row shows. herdr's agent state wins when the session runs in a herdr
+/// pane (it knows the difference between "working" and "waiting on you"); otherwise a transcript
+/// written in the last minute reads as working.
+public enum SessionLiveStatus: Equatable, Sendable {
+    case working
+    /// herdr reports `blocked`: the turn ended, or Claude asked a question.
+    case waiting
+    /// Open in a herdr pane, idle at its prompt.
+    case open
+    case none
+
+    public static func resolve(herdrStatus: String?, modifiedAt: Date, now: Date,
+                               activeWindow: TimeInterval = SessionScanner.activeWindow) -> SessionLiveStatus {
+        switch herdrStatus {
+        case "working"?: return .working
+        case "blocked"?: return .waiting
+        case .some: return .open
+        case nil:
+            let age = now.timeIntervalSince(modifiedAt)
+            return age <= activeWindow && age >= -5 ? .working : .none
+        }
+    }
+
+    /// Something still holds the transcript open — it must not be moved to the Trash.
+    public var isLive: Bool { self != .none }
+}
+
+// MARK: - Per-session numbers
+
+/// Prompts and cost for one session (subagents included), from the same digest Home counts with,
+/// so a row's figures and the Session Report can never disagree.
+public struct SessionStat: Equatable, Sendable {
+    public var prompts: Int
+    public var cost: Double
+
+    public init(prompts: Int, cost: Double) { self.prompts = prompts; self.cost = cost }
+
+    public static func table(from digest: TranscriptDigest) -> [String: SessionStat] {
+        var out: [String: SessionStat] = [:]
+        for call in digest.calls.values {
+            out[call.sessionID, default: SessionStat(prompts: 0, cost: 0)].cost += call.cost.total
+        }
+        for (session, times) in digest.prompts {
+            out[session, default: SessionStat(prompts: 0, cost: 0)].prompts = times.count
+        }
+        return out
+    }
+}
+
+public enum SessionListing {
+
+    // MARK: Recent — date sections
+
+    public struct DateSection: Identifiable {
+        public let id: String
+        public let title: String
+        public var sessions: [SessionSummary]
+    }
+
+    /// Today · Yesterday · Previous 7 Days · Previous 30 Days, then one section per month
+    /// ("August", or "August 2025" outside the current year). Sessions keep their incoming order
+    /// within a section; sections run newest first.
+    public static func dateSections(_ sessions: [SessionSummary], now: Date,
+                                    calendar: Calendar = .current) -> [DateSection] {
+        var order: [String] = []
+        var byID: [String: DateSection] = [:]
+        for s in sessions.sorted(by: { $0.modifiedAt > $1.modifiedAt }) {
+            let (id, title) = bucket(for: s.modifiedAt, now: now, calendar: calendar)
+            if byID[id] == nil { order.append(id); byID[id] = DateSection(id: id, title: title, sessions: []) }
+            byID[id]!.sessions.append(s)
+        }
+        return order.compactMap { byID[$0] }
+    }
+
+    static func bucket(for date: Date, now: Date, calendar: Calendar) -> (id: String, title: String) {
+        let today = calendar.startOfDay(for: now)
+        if date >= today { return ("today", "Today") }
+        let day = { (n: Int) in calendar.date(byAdding: .day, value: -n, to: today)! }
+        if date >= day(1) { return ("yesterday", "Yesterday") }
+        if date >= day(7) { return ("week", "Previous 7 Days") }
+        if date >= day(30) { return ("month", "Previous 30 Days") }
+        let c = calendar.dateComponents([.year, .month], from: date)
+        let sameYear = c.year == calendar.component(.year, from: now)
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.locale = calendar.locale ?? .current
+        f.timeZone = calendar.timeZone
+        f.setLocalizedDateFormatFromTemplate(sameYear ? "MMMM" : "MMMM y")
+        return ("m\(c.year ?? 0)-\(c.month ?? 0)", f.string(from: date))
+    }
+
+    // MARK: Search
+
+    /// Every word of `query` appears somewhere in the session: its title, id, project or
+    /// worktree, task and phase, summary bullets, or `extra` (its group's name, the live task
+    /// name). Empty query matches everything.
+    public static func matches(_ s: SessionSummary, query: String, extra: [String] = []) -> Bool {
+        let words = query.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return true }
+        var fields = [s.title, s.id, s.projectName]
+        if let w = s.worktreeName { fields.append(w) }
+        if let t = s.task { fields.append(t.phaseLabel); if let n = t.taskName { fields.append(n) } }
+        fields += s.bulletSummary?.bullets ?? []
+        fields += s.subagents.flatMap { [$0.agentType, $0.description] }
+        fields += extra
+        let haystack = fields.joined(separator: "\n")
+        return words.allSatisfy { haystack.localizedCaseInsensitiveContains($0) }
+    }
+
+    // MARK: Groups tab
+
+    public struct GroupLayout {
+        public struct Manual: Identifiable {
+            public let key: String
+            public let group: SessionGroup
+            public var sessions: [SessionSummary]
+            public var id: String { group.id }
+        }
+        /// An automatic group: every session a Claudepit task's phases ran in.
+        public struct TaskBucket: Identifiable {
+            public let taskID: String
+            public let name: String
+            public var sessions: [SessionSummary]
+            public var id: String { taskID }
+            public var latest: Date { sessions.map(\.modifiedAt).max() ?? .distantPast }
+        }
+        public var manual: [Manual] = []
+        public var tasks: [TaskBucket] = []
+        public var ungrouped: [SessionSummary] = []
+    }
+
+    /// Manual groups first (in each file's own order, files in `keyOrder`), then one automatic
+    /// group per task for task-phase sessions nobody filed by hand, then the rest. A session is
+    /// listed exactly once: a manual group wins over its task, and an assignment to a group that
+    /// no longer exists falls through rather than hiding the session.
+    public static func groupLayout(_ sessions: [SessionSummary], groups: [String: ProjectGroups],
+                                   keyOrder: [String], taskNames: [String: String] = [:],
+                                   automaticTaskGroups: Bool = true) -> GroupLayout {
+        var layout = GroupLayout()
+        let sorted = sessions.sorted { $0.modifiedAt > $1.modifiedAt }
+        var placed = Set<String>()
+        for key in keyOrder {
+            guard let pg = groups[key] else { continue }
+            for g in pg.groups {
+                let members = sorted.filter { $0.groupKey == key && $0.groupID == g.id }
+                placed.formUnion(members.map(\.id))
+                layout.manual.append(.init(key: key, group: g, sessions: members))
+            }
+        }
+        var buckets: [String: GroupLayout.TaskBucket] = [:]
+        for s in sorted where !placed.contains(s.id) {
+            if automaticTaskGroups, let ref = s.task {
+                let name = taskNames[ref.taskID] ?? ref.taskName ?? "Task \(ref.taskID)"
+                buckets[ref.taskID, default: .init(taskID: ref.taskID, name: name, sessions: [])].sessions.append(s)
+            } else {
+                layout.ungrouped.append(s)
+            }
+        }
+        layout.tasks = buckets.values.sorted { $0.latest > $1.latest }
+        return layout
+    }
+
+    /// Group files in the order the Groups tab lists them: the open project's alone, or — across
+    /// all projects — every file that has groups, most recently active project first.
+    public static func groupKeyOrder(sessions: [SessionSummary], groups: [String: ProjectGroups],
+                                     projectKey: String?) -> [String] {
+        if let projectKey { return [projectKey] }
+        let latest = Dictionary(sessions.map { ($0.groupKey, $0.modifiedAt) }, uniquingKeysWith: max)
+        return groups.filter { !$0.value.groups.isEmpty }.keys.sorted {
+            let a = latest[$0] ?? .distantPast, b = latest[$1] ?? .distantPast
+            return a != b ? a > b : $0 < $1
+        }
+    }
+
+    // MARK: Keyboard / range selection
+
+    /// The ids strictly between and including `anchor` and `target` in display order — a
+    /// shift-click or shift-arrow selection. Unknown anchor → just the target.
+    public static func range(from anchor: String?, to target: String, in order: [String]) -> [String] {
+        guard let anchor, let a = order.firstIndex(of: anchor), let b = order.firstIndex(of: target) else {
+            return [target]
+        }
+        return Array(order[min(a, b)...max(a, b)])
+    }
+
+    /// The id `step` rows away from `current` (clamped), or the first/last row when nothing is
+    /// selected yet.
+    public static func neighbor(of current: String?, step: Int, in order: [String]) -> String? {
+        guard !order.isEmpty else { return nil }
+        guard let current, let i = order.firstIndex(of: current) else {
+            return step >= 0 ? order.first : order.last
+        }
+        return order[max(0, min(order.count - 1, i + step))]
+    }
+}

@@ -140,7 +140,7 @@ final class AppState: ObservableObject {
         }
     }
     /// Owns the per-file digest cache, so a rescan re-reads only transcripts that changed.
-    private let projectUsageScanner = ProjectUsageScanner()
+    let projectUsageScanner = ProjectUsageScanner()
     private var projectUsageRescanPending = false
     @Published var worktrees: [WorktreeInfo] = []
     @Published var focusWorktreeName: String?   // set to jump the Worktrees page to a specific worktree
@@ -155,6 +155,17 @@ final class AppState: ObservableObject {
     /// `UpdateFromBaseControl` — the documented focus-field contract.
     @Published var pendingWorktreeUpdatePath: String?
     @Published var sessions: [SessionSummary] = []
+    /// The group files `sessions` were stamped from, keyed by `SessionSummary.groupKey`. Held here
+    /// (not re-read per view) so a group edit updates every row at once — see `AppState+Sessions`.
+    @Published var sessionGroups: [String: ProjectGroups] = [:]
+    /// Prompts and cost per session id, over the window Home counts (`reloadSessionStats`).
+    @Published var sessionStats: [String: SessionStat] = [:]
+    var isScanningSessionStats = false
+    var sessionStatsRescanPending = false
+    /// The Sessions page's place — selection, expanded rows, search, filters — kept for the
+    /// app's lifetime: the page is rebuilt on every visit, and coming back used to reset all of it
+    /// and jump to the newest session. Not published; only that page reads it, on appear.
+    var sessionsPageMemory = SessionsPageMemory()
     @Published var loops: [CronEntry] = []
     @Published var tasks: [ProjectTask] = []
     /// Task specs/plans that exist on disk, stamped with their mtime. Cached here rather than
@@ -477,10 +488,16 @@ final class AppState: ObservableObject {
         sessionLoadTask?.cancel()
         sessionLoadTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            let result = SessionScanner().list(activePath: path)
+            let listing = SessionScanner().listing(activePath: path)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.sessions = result
+                self.sessions = listing.sessions
+                self.sessionGroups = listing.groups
+                // The scan read the group files when it started; a group edit made while it ran
+                // would be undone by its result, and nothing watches the groups folder to fix it.
+                // Re-read them now (small files) and re-stamp.
+                for key in listing.groups.keys { self.applyGroups(key: key) }
+                if self.selected == .sessions { self.reloadSessionStats() }
                 self.reloadWorktrees()
                 // Only Home shows project usage, and new transcript activity is what just
                 // triggered this reload — elsewhere, Home's onAppear catches up.
