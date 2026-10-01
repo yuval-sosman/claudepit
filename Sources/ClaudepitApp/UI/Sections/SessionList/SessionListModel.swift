@@ -259,3 +259,45 @@ final class SessionListState: ObservableObject {
         selection = [id]; primaryID = id; anchorID = id
     }
 }
+
+// MARK: - Test hook
+
+#if DEBUG
+/// Where each row and header sits, for `DevSessionsInteraction` to click. Nil (the default)
+/// everywhere but in that harness, which makes `debugFrame` a no-op; release builds drop it.
+private struct DebugFrameReporterKey: EnvironmentKey {
+    static let defaultValue: (@Sendable (String, CGRect) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var debugFrameReporter: (@Sendable (String, CGRect) -> Void)? {
+        get { self[DebugFrameReporterKey.self] }
+        set { self[DebugFrameReporterKey.self] = newValue }
+    }
+}
+
+private struct DebugFrameModifier: ViewModifier {
+    @Environment(\.debugFrameReporter) private var report
+    let id: String
+
+    func body(content: Content) -> some View {
+        if let report {
+            content.background(GeometryReader { g in
+                Color.clear
+                    .onAppear { report(id, g.frame(in: .global)) }
+                    .onChange(of: g.frame(in: .global)) { _, f in report(id, f) }
+            })
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func debugFrame(_ id: String) -> some View { modifier(DebugFrameModifier(id: id)) }
+}
+#else
+extension View {
+    @inline(__always) func debugFrame(_ id: String) -> some View { self }
+}
+#endif

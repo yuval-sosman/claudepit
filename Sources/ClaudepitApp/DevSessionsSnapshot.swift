@@ -22,6 +22,7 @@ import ClaudepitCore
 ///   --new-group           show the inline new-group editor
 ///   --empty               render as if the project had no sessions
 ///   --time-scan           print cold and warm listing times and exit
+///   --interaction-test    drive the list with synthetic clicks and keys (DevSessionsInteraction)
 @MainActor
 enum DevSessionsSnapshot {
     static func runIfRequested() -> Bool {
@@ -45,6 +46,13 @@ enum DevSessionsSnapshot {
             t = Date(); _ = SessionScanner().listing(activePath: base)
             print("warm listing: \(Int(Date().timeIntervalSince(t) * 1000))ms")
             exit(0)
+        }
+        if args.contains("--interaction-test") {
+            let listing = SessionScanner().listing(activePath: base)
+            let key = base.map { SessionScanner.storageKey(forPath: ProjectFolders.normalizedPath($0)) } ?? "all"
+            let ok = DevSessionsInteraction.run(sessions: listing.sessions, key: key,
+                                                outDir: value("--out").map { URL(fileURLWithPath: $0) })
+            exit(ok ? 0 : 1)
         }
         let t0 = Date()
         var listing = SessionScanner().listing(activePath: base)

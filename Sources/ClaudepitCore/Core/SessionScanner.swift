@@ -25,7 +25,11 @@ public struct SessionScanner {
     /// If activePath is set, list only that project's sessions; otherwise all projects.
     public func list(activePath: URL?) -> [SessionSummary] { listing(activePath: activePath).sessions }
 
-    public func listing(activePath: URL?) -> Listing {
+    /// `knownProjects` are project roots the app has opened (its recent paths). Across all
+    /// projects they decide which project a session belongs to — the longest one containing its
+    /// cwd — so a session started in a subdirectory gets the same group file it has with that
+    /// project open. Without one, a worktree folds into its project and anything else stands alone.
+    public func listing(activePath: URL?, knownProjects: [URL] = []) -> Listing {
         let fm = FileManager.default
         let projectDirs: [URL]
         if let base = activePath {
@@ -38,6 +42,7 @@ public struct SessionScanner {
         // subdirectories included — so all of them share its group file. Keying by each session's
         // own folder (the old rule) gave worktree sessions a group file the Groups tab never read.
         let projectKey = activePath.map { Self.storageKey(forPath: ProjectFolders.normalizedPath($0)) }
+        let roots = knownProjects.map(ProjectFolders.normalizedPath)
 
         var out: [SessionSummary] = []
         var seen = Set<String>()
@@ -50,7 +55,7 @@ public struct SessionScanner {
                 seen.insert(file.path)
                 guard var summary = summarize(file, slug: slug) else { continue }
                 summary.groupKey = projectKey ?? summary.cwd.map {
-                    Self.storageKey(forPath: ProjectFolders.ownerPath(ofCwd: $0))
+                    Self.storageKey(forPath: ProjectFolders.ownerPath(ofCwd: $0, knownProjects: roots))
                 } ?? ProjectFolders.ownerSlug(ofFolder: slug)
                 out.append(summary)
             }

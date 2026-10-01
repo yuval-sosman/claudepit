@@ -146,7 +146,9 @@ then one automatic group per task, then Ungrouped — live status, shift/arrow r
   the part that can still change). Spawning two `grep`s per transcript cost ~9 s per rescan here.
 - **Liveness.** The FileWatcher watches folders, which don't change on append, so dates and the live
   dot went stale. The page calls `AppState.refreshSessionLiveness()` every 10 s while visible
-  (re-stat + herdr), moving dates only forward. One status slot per row: herdr's `working` /
+  (re-stat + herdr), moving dates only forward. It stats with `attributesOfItem`, **not**
+  `url.resourceValues`: a URL from a listing that prefetched date/size answers with those cached
+  values forever, so `isActive` went false after a minute and flickered back on each rescan. One status slot per row: herdr's `working` /
   `blocked` (waiting) / idle (open), else "written in the last minute".
 - **Selection** is `SessionListState` (Set + primary + anchor): click, ⌘-click, ⇧-click, ↑/↓
   (⇧ extends), ←/→ fold subagents, ⌘A, ⌫ trash, ⌥⌘F search. Clicking never scrolls the list; only
@@ -160,6 +162,22 @@ then one automatic group per task, then Ungrouped — live status, shift/arrow r
   [--tab groups] [--query q] [--demo-groups] [--demo-live] [--select a,b] [--expand id]
   [--new-group] [--empty] [--time-scan]` (`DevSessionsSnapshot.swift`) — real transcripts, no
   `AppState`, no writes.
+- **Interaction harness:** `--snapshot-sessions <project> --interaction-test [--out dir]`
+  (`DevSessionsInteraction.swift`) drives the real list in an offscreen key window with synthetic
+  clicks and keys and asserts the outcome (33 checks: selection, ⌘/⇧-click, arrows, ⌘A, ⌫, Esc,
+  subagents, inline create/rename, duplicate names, fold, + button, ⌥⌘F, ↓ from search, deep
+  links). Rows and headers report their frames through the DEBUG-only `debugFrame(_:)` hook —
+  SwiftUI builds no accessibility tree offscreen, so they can't be found by identifier. Events
+  go to `window.sendEvent` (so `NSApp.currentEvent` is nil — don't read it in handlers). It
+  caught three real bugs, now fixed and worth knowing as SwiftUI-on-macOS traps:
+  - `onTapGesture` on a `LazyVStack` **section header** never fired; headers are a `Button`.
+    Double-click (rename) is two clicks within `NSEvent.doubleClickInterval`, timed by hand.
+  - The **Delete key** (U+007F) never reaches `onKeyPress` — it becomes `deleteBackward:`;
+    `onDeleteCommand` catches it.
+  - **↓ in a `TextField`** is eaten by the field editor (`moveDown:`); the search box is an
+    `NSTextField` bridge (`SearchTextField`) whose delegate takes the command first.
+  - Modifier clicks use `TapGesture().modifiers(.command)`/`(.shift)`, not
+    `NSEvent.modifierFlags` read when the tap ends.
 
 ## Session Summaries
 
@@ -623,11 +641,17 @@ still shows (by its `rendered` text, else raw). Task-notification bodies are **X
   list on every scroll tick. Only the rail and the jump button observe it.
 - **Live follow** moves the list on its own, so it is the first suspect for "it scrolls by itself".
   It scrolls to the end on a rebuild only while `tracker.following` holds and the reader isn't
-  scrolling. On macOS 15+ (`ScrollIntent`), `following` comes from scroll geometry: reaching the
-  end (12pt slack) sets it, *any* upward move clears it, and content growing below changes the
-  size, not the offset, so it never clears it. Scroll phases mark a gesture in progress. Every
-  programmatic jump away (rail, links, filters, a revealed panel) clears it too. macOS 14 falls
-  back to the end sentinel's appear/disappear. Check: `--follow-test`.
+  scrolling. `following` **starts false** and is armed only by the reader scrolling *down* into
+  the end (12pt slack) or an explicit jump there (opening a live session, Latest, the rail's
+  bottom), or a session going live under a reader already at the end. On macOS 15+
+  (`ScrollIntent`) geometry steps where the content *size* changed are relayouts, not the reader,
+  and neither arm nor clear it — while following they re-pin the end instead (lazy rows measured
+  after a jump grow the content). Any upward move clears it, as does every programmatic jump away
+  (rail, links, filters, a revealed panel). It used to start true and only an upward scroll
+  cleared it: a session opened idle and read top-down was still "following" when it came alive,
+  and every write threw the reader to the end — compounded by `isActive` flapping (see Sessions
+  List → Liveness). macOS 14 falls back to the end sentinel's appear/disappear. Check:
+  `--follow-test` (now also "opened idle, read down, went live" — must stay put).
 - The **timeline rail** (`TranscriptRail`) marks *rows*, not turns:
   `TranscriptModel.landmark(of:)` (Core, tested) gives each notable row a kind. Turn starts are
   wide marks; edits, plan steps, questions, subagents, skills, task changes, compactions and

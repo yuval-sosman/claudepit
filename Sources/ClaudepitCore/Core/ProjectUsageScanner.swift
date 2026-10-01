@@ -55,9 +55,15 @@ public final class ProjectUsageScanner: @unchecked Sendable {
         }
         // Drop what this project no longer has (deleted sessions, removed worktrees) so the
         // cache can't grow without bound across a long-running app.
-        let prefix = base.map { projectsRoot.appending(path: Self.slug($0)).path } ?? projectsRoot.path
+        // Only inside the folders this scan read: a slug-prefix sweep also evicted sibling
+        // projects' digests (cached by Home's all-projects scan), re-parsed on the next switch.
+        let scanned = base.map { ProjectFolders.folders(for: $0, in: projectsRoot).map(\.path) }
         lock.lock()
-        cache = cache.filter { !$0.key.hasPrefix(prefix) || seen.contains($0.key) }
+        cache = cache.filter { path, _ in
+            if seen.contains(path) { return true }
+            guard let scanned else { return !path.hasPrefix(projectsRoot.path) }
+            return !scanned.contains { path.hasPrefix($0 + "/") }
+        }
         lock.unlock()
         return TranscriptDigest.merged(digests)
     }

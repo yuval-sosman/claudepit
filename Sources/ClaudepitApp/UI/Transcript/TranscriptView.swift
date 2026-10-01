@@ -64,10 +64,16 @@ final class TranscriptScrollTracker: ObservableObject {
     @Published var topRowID: String?
     /// The end of the transcript is on screen.
     @Published var atBottom = false
-    /// A live view keeps the newest activity in sight only while this holds. Reaching the end
-    /// sets it; the reader scrolling away, or following a link elsewhere, clears it. Content
-    /// arriving below never clears it — that is what it follows.
-    var following = true
+    /// A live view keeps the newest activity in sight only while this holds. The reader
+    /// scrolling down into the end, or an explicit jump there (opening a live session, Latest,
+    /// the rail's bottom), sets it; scrolling away or following a link elsewhere clears it.
+    /// Content arriving below never clears it — that is what it follows.
+    ///
+    /// Starts **false**. It used to start true and only an upward scroll cleared it, so a session
+    /// opened while idle and read from the top down — never scrolled up — was still "following"
+    /// when it came alive, and every write threw the reader to the end ("it scrolls down every
+    /// few seconds"). `--follow-test` covers both directions.
+    var following = false
     /// The reader's hand is on the list (a drag, a swipe still coasting): never move it under them.
     var userScrolling = false
 }
@@ -183,6 +189,11 @@ struct TranscriptView: View {
                         DispatchQueue.main.async { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
                     }
                 }
+                // A session coming alive under a reader already parked at the end follows from
+                // there; anyone else stays where they are.
+                .onChange(of: isLive) { _, live in
+                    if live, tracker.atBottom, !tracker.userScrolling { tracker.following = true }
+                }
                 .onChange(of: filters) { _, _ in recompute(); if !jumping { scrollToTop(proxy) } }
                 .onChange(of: appliedQuery) { _, _ in recompute(); if !jumping { scrollToTop(proxy) } }
             }
@@ -260,7 +271,7 @@ struct TranscriptView: View {
             .padding(.leading, 2).padding(.trailing, Self.listTrailingInset)
         }
         .scrollPosition(id: Binding(get: { tracker.topRowID }, set: { tracker.topRowID = $0 }), anchor: .top)
-        .modifier(ScrollIntent(tracker: tracker))
+        .modifier(ScrollIntent(tracker: tracker) { proxy.scrollTo(Self.bottomID, anchor: .bottom) })
     }
 
     @ViewBuilder private var emptyState: some View {
@@ -454,10 +465,14 @@ private struct ExpandModeToggle: View {
 /// never does, since it changes the content's size, not the offset.
 private struct ScrollIntent: ViewModifier {
     let tracker: TranscriptScrollTracker
+    /// Put the end back in view. A jump to the end lands before the lazy rows near it are
+    /// measured; when they are, the content grows and a following reader is left short of it.
+    let pinEnd: () -> Void
 
     private struct Position: Equatable {
         var offset: CGFloat
         var atEnd: Bool
+        var contentHeight: CGFloat
     }
 
     func body(content: Content) -> some View {
@@ -467,11 +482,21 @@ private struct ScrollIntent: ViewModifier {
                     Position(offset: g.contentOffset.y,
                              // A few points of slack for fractional offsets, no more: a reader who
                              // nudged up to reread the last line has left the end.
-                             atEnd: g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 12)
+                             atEnd: g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 12,
+                             contentHeight: g.contentSize.height)
                 } action: { old, new in
                     if tracker.atBottom != new.atEnd { tracker.atBottom = new.atEnd }
-                    if new.atEnd { tracker.following = true }
-                    else if new.offset < old.offset - 1 { tracker.following = false }
+                    // Only the reader's own movement decides. When the content changed size in the
+                    // same step it is a relayout — rows arriving, a lazy row measured, a run folding
+                    // — and the offset the list reports then can momentarily read "at the end"
+                    // (arming a jump) or "moved up" (dropping a reader who is following).
+                    guard abs(new.contentHeight - old.contentHeight) < 0.5 else {
+                        if new.contentHeight > old.contentHeight, !new.atEnd,
+                           tracker.following, !tracker.userScrolling { pinEnd() }
+                        return
+                    }
+                    if new.offset < old.offset - 1 { tracker.following = false }
+                    else if new.atEnd, new.offset > old.offset + 0.5 { tracker.following = true }
                 }
                 .onScrollPhaseChange { _, phase in
                     tracker.userScrolling = [.tracking, .interacting, .decelerating].contains(phase)

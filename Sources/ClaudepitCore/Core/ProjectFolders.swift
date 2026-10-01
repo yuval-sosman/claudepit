@@ -55,7 +55,10 @@ public enum ProjectFolders {
 
     /// The project path a session ran for: a worktree checkout (`<p>/.claude/worktrees/<name>…`)
     /// belongs to `<p>`; anything else is its own project.
-    public static func ownerPath(ofCwd cwd: String) -> String {
+    public static func ownerPath(ofCwd cwd: String, knownProjects: [String] = []) -> String {
+        if let known = knownProjects.filter({ cwd == $0 || cwd.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) {
+            return known
+        }
         if let r = cwd.range(of: "/.claude/worktrees/") { return String(cwd[..<r.lowerBound]) }
         return cwd
     }

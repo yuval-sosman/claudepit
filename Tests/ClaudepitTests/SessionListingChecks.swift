@@ -134,6 +134,16 @@ func sessionListingChecks() -> [Bool] {
         try expectEqual(all.sessions.first { $0.id == "b" }?.worktreeName, "w", "worktree name")
     })
 
+    results.append(check("scanner: across all projects a subdirectory session keys to its known project") {
+        let root = try tempDir()
+        try write([user("sub", cwd: "/p/Sources")], to: root.appending(path: "-p-Sources/s.jsonl"))
+        let scanner = SessionScanner(projectsRoot: root, groupStore: GroupStore(root: try tempDir()),
+                                     summaryStore: SummaryStore(root: root))
+        try expectEqual(scanner.listing(activePath: nil, knownProjects: [URL(filePath: "/p/")]).sessions.first?.groupKey,
+                        "-p", "folded into the known project")
+        try expectEqual(scanner.listing(activePath: nil).sessions.first?.groupKey, "-p-Sources", "unknown → its own")
+    })
+
     results.append(check("scanner: an assignment to a deleted group reads as ungrouped") {
         let root = try tempDir()
         try write([user("x", cwd: "/p")], to: root.appending(path: "-p/a.jsonl"))

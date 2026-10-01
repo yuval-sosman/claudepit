@@ -69,7 +69,8 @@ enum DevSnapshot {
         if args.contains("--shrink-test") { shrinkTest(url); exit(0) }
         if args.contains("--follow-test") {
             let ok = [560.0, 900.0].map { followTest(url, height: $0) }.allSatisfy { $0 }
-            exit(ok ? 0 : 1)
+            let woke = [560.0, 900.0].map { wakeTest(url, height: $0) }.allSatisfy { $0 }
+            exit(ok && woke ? 0 : 1)
         }
         if args.contains("--list") {
             for (n, r) in rows.enumerated() { print(String(format: "%4d  %-8@ turn %-3d %@", n, r.id as NSString, r.turn, describe(r, model) as NSString)) }
@@ -199,6 +200,62 @@ enum DevSnapshot {
         return ok
     }
 
+    /// A session opened while idle, read from the top down, that then comes alive and grows:
+    /// the reader never asked to follow, so the list must stay where they are. (The reported
+    /// "scrolls down every few seconds": `following` started out true and only an upward scroll
+    /// cleared it — a reader scrolling *down* never did — so the first write sent them to the end.)
+    private static func wakeTest(_ url: URL, height: CGFloat) -> Bool {
+        let data = (try? Data(contentsOf: url)) ?? Data()
+        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+        var generation = 0
+        var kept = Int(Double(lines.count) * 0.5)
+        func grow(by n: Int) -> TranscriptModel {
+            kept = min(lines.count, kept + n)
+            let keep = Data(lines.prefix(kept).joined(separator: [0x0A]) + [0x0A])
+            var parser = SessionTranscript()
+            var m = TranscriptModel(events: parser.parse(data: keep), metadata: parser.metadata)
+            generation += 1
+            m.generation = generation
+            return m
+        }
+        let box = ShrinkBox(grow(by: 0), isLive: false)
+        let host = NSHostingView(rootView: ShrinkHost(box: box, height: height))
+        host.frame = CGRect(x: 0, y: 0, width: 900, height: height)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
+        window.orderFrontRegardless()
+        func settle(_ seconds: Double = 0.9) {
+            let until = Date().addingTimeInterval(seconds)
+            while Date() < until { host.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        func scrollView(in v: NSView) -> NSScrollView? {
+            if let s = v as? NSScrollView, s.documentView != nil { return s }
+            for sub in v.subviews { if let s = scrollView(in: sub) { return s } }
+            return nil
+        }
+        settle()
+        guard let scroll = scrollView(in: host) else { print("no scroll view found"); return false }
+        func offset() -> CGFloat { scroll.contentView.bounds.origin.y }
+        func move(to y: CGFloat) { scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, y))); scroll.reflectScrolledClipView(scroll.contentView) }
+
+        var ok = true
+        for start in [0.0, 400.0, 1500.0] {
+            move(to: start); settle(0.4)            // reading, top down
+            move(to: start + 200); settle(0.4)
+            let parked = offset()
+            box.isLive = true                        // the session wakes up…
+            var worst: CGFloat = 0
+            for _ in 0..<4 { box.model = grow(by: 4); settle(0.35); worst = max(worst, abs(offset() - parked)) }
+            box.isLive = false
+            let stayed = worst < 40
+            ok = ok && stayed
+            print(String(format: "[h=%.0f] opened idle, read down to %.0fpt, went live, 4 updates: drifted %.0fpt → %@",
+                         height, parked, worst, stayed ? "stayed put" : "JUMPED"))
+        }
+        return ok
+    }
+
     private static func parseRange(_ s: String, count: Int) -> (Int, Int)? {
         let parts = s.split(separator: "-").compactMap { Int($0) }
         guard parts.count == 2, count > 0 else { return nil }
@@ -256,13 +313,14 @@ enum DevSnapshot {
 @MainActor
 private final class ShrinkBox: ObservableObject {
     @Published var model: TranscriptModel
-    init(_ m: TranscriptModel) { model = m }
+    @Published var isLive: Bool
+    init(_ m: TranscriptModel, isLive: Bool = true) { model = m; self.isLive = isLive }
 }
 
 private struct ShrinkHost: View {
     @ObservedObject var box: ShrinkBox
     var height: CGFloat = 1000
-    var body: some View { TranscriptView(model: box.model, isLive: true).frame(width: 900, height: height) }
+    var body: some View { TranscriptView(model: box.model, isLive: box.isLive).frame(width: 900, height: height) }
 }
 
 /// The detail card as the Sessions page frames it, minus the parts that need `AppState`.

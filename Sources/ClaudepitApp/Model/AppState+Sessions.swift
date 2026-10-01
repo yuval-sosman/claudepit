@@ -128,9 +128,13 @@ extension AppState {
             let stamps = await Task.detached(priority: .utility) { () -> [String: (Date, Int)] in
                 var out: [String: (Date, Int)] = [:]
                 for (id, url) in files {
-                    guard let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-                          let m = v.contentModificationDate else { continue }
-                    out[id] = (m, v.fileSize ?? 0)
+                    // Not `url.resourceValues`: these URLs came from a directory listing that
+                    // prefetched date and size, and a URL keeps answering with those cached
+                    // values forever — the tick saw nothing change, so live sessions went "idle"
+                    // after a minute and flickered back on each rescan.
+                    guard let a = try? FileManager.default.attributesOfItem(atPath: url.path),
+                          let m = a[.modificationDate] as? Date else { continue }
+                    out[id] = (m, (a[.size] as? Int) ?? 0)
                 }
                 return out
             }.value

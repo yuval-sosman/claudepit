@@ -31,10 +31,15 @@ struct SessionListView: View {
     let actions: SessionListActions
 
     @FocusState private var listFocused: Bool
-    @FocusState private var searchFocused: Bool
+    /// Bumped to put the cursor in the search box (⌥⌘F).
+    @State private var searchFocusToken = 0
     @State private var hoveredID: String?
     @State private var dropTarget: String?
     @State private var showCustomRange = false
+    /// The last header click, for telling a double-click (rename) from two single ones.
+    @State private var lastHeaderClick: HeaderClick?
+
+    private struct HeaderClick { let id: String; let at: Date }
 
     var body: some View {
         let model = SessionListModel(sessions: sessions, context: context, prefs: prefs, query: state.query,
@@ -102,6 +107,7 @@ struct SessionListView: View {
                 .buttonStyle(.plain)
                 .disabled(newGroupKey(for: []) == nil)
                 .help("New Group")
+                .debugFrame("new-group-button")
             }
         }
         .padding(.leading, 16)
@@ -114,16 +120,19 @@ struct SessionListView: View {
         HStack(spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: Icon.search).font(.system(size: 11)).foregroundStyle(.secondary)
-                TextField("Search sessions", text: $state.query)
-                    .textFieldStyle(.plain)
-                    .font(.caption)
-                    .focused($searchFocused)
-                    .onExitCommand { state.query = "" }
-                    .onKeyPress(.downArrow) {
-                        listFocused = true
-                        moveSelection(1, extend: false, order: currentOrder)
-                        return .handled
-                    }
+                SearchTextField(text: $state.query, placeholder: "Search sessions", focusToken: searchFocusToken,
+                                onArrowDown: {
+                                    // Into the results: the first match, whatever was selected before.
+                                    listFocused = true
+                                    if let first = currentOrder.first {
+                                        state.select(first)
+                                        state.scrollRequest = .init(id: first, center: false)
+                                    }
+                                },
+                                onEscape: {
+                                    if state.query.isEmpty { listFocused = true } else { state.query = "" }
+                                })
+                    .frame(height: 16)
                 if !state.query.isEmpty {
                     Button { state.query = "" } label: {
                         Image(systemName: Icon.clearField).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -153,7 +162,7 @@ struct SessionListView: View {
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
         .background {
-            Button("") { searchFocused = true }
+            Button("") { searchFocusToken += 1 }
                 .keyboardShortcut("f", modifiers: [.command, .option])
                 .opacity(0).frame(width: 0, height: 0)
         }
@@ -308,6 +317,9 @@ struct SessionListView: View {
             .focused($listFocused)
             .focusEffectDisabled()
             .onKeyPress(phases: [.down, .repeat]) { handleKey($0, model) }
+            // The Delete key arrives as `deleteBackward:` (U+007F), which `onKeyPress` never sees —
+            // found by the interaction harness; ⌫ did nothing.
+            .onDeleteCommand { requestTrashSelection() }
             .onChange(of: state.scrollRequest) { _, request in
                 guard let request else { return }
                 if request.center {
@@ -342,8 +354,10 @@ struct SessionListView: View {
                     SubagentRowView(sub: sub, isSelected: state.selection.contains(id),
                                     isFocused: listFocused, isHovered: hoveredID == id)
                         .id(id)
+                        .accessibilityIdentifier("subagent-row-\(id)")
+                        .debugFrame("subagent-row-\(id)")
                         .contentShape(Rectangle())
-                        .onTapGesture { click(id, model: model) }
+                        .onTapGesture { click(id, model: model, modifiers: []) }
                         .onHover { hover(id, $0) }
                 }
             }
@@ -364,8 +378,11 @@ struct SessionListView: View {
         }
         .id(s.id)
         .contentShape(Rectangle())
-        .onTapGesture { click(s.id, model: model) }
+        .gesture(rowTap(s.id, model))
         .onHover { hover(s.id, $0) }
+        .accessibilityIdentifier("session-row-\(s.id)")
+        .debugFrame("session-row-\(s.id)")
+        .accessibilityAddTraits(state.selection.contains(s.id) ? .isSelected : [])
         .contextMenu { sessionMenu(targets(for: s)) }
         .draggable(SessionDragPayload.encode(targets(for: s).map(\.id))) {
             dragPreview(targets(for: s))
@@ -435,7 +452,9 @@ struct SessionListView: View {
                              projectName: String?, isFirst: Bool, isLast: Bool) -> some View {
         foldHeader(section, collapsed: section.collapsed,
                    toggle: { actions.setGroupCollapsed(group.id, !group.isCollapsed, key) },
-                   help: "Click to \(section.collapsed ? "show" : "fold") · double-click the name to rename · drop sessions here to file them") {
+                   doubleClick: { state.renamingGroupID = group.id },
+                   isEditing: state.renamingGroupID == group.id,
+                   help: "Click to \(section.collapsed ? "show" : "fold") · double-click to rename · drop sessions here to file them") {
             Circle().fill(group.color.swiftUIColor).frame(width: 8, height: 8)
             if state.renamingGroupID == group.id {
                 GroupNameField(initial: group.name, placeholder: "Group name",
@@ -447,17 +466,11 @@ struct SessionListView: View {
                                },
                                cancel: { state.renamingGroupID = nil })
             } else {
-                // Double-click renames; a single click still folds. Exclusive, so a double-click
-                // doesn't also fold and unfold the group on the way.
                 Text(group.name)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
-                    .gesture(TapGesture(count: 2).onEnded { state.renamingGroupID = group.id }
-                        .exclusively(before: TapGesture().onEnded {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                actions.setGroupCollapsed(group.id, !group.isCollapsed, key)
-                            }
-                        }))
+                    .accessibilityIdentifier("group-name-\(group.id)")
+                    .debugFrame("group-name-\(group.id)")
             }
             if let projectName {
                 Text(projectName).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
@@ -470,13 +483,21 @@ struct SessionListView: View {
 
     /// A foldable section header: chevron, label, count, hover menu; right-click shows the menu
     /// too, and the whole header is a drop target when its section is.
+    ///
+    /// The clickable part is a `Button`: an `onTapGesture` on a section header never fired for the
+    /// interaction harness's clicks while row taps did. A second click on the same header within
+    /// the system's double-click interval undoes the first one's fold and renames — no
+    /// fold-unfold flicker, no single-click delay. While the name is being edited the header is
+    /// not a button at all, so a click in the field can't fold the group.
     private func foldHeader<Label: View, Menu_: View>(_ section: SessionListModel.Section, collapsed: Bool,
-                                                     toggle: @escaping () -> Void, help: String,
+                                                     toggle: @escaping () -> Void,
+                                                     doubleClick: (() -> Void)? = nil, isEditing: Bool = false,
+                                                     help: String,
                                                      @ViewBuilder label: () -> Label,
                                                      @ViewBuilder menu: @escaping () -> Menu_) -> some View {
         let id = "header-\(section.id)"
         let targeted = dropTarget == section.id
-        return HStack(spacing: 6) {
+        let content = HStack(spacing: 6) {
             Image(systemName: Icon.chevronCollapsed)
                 .font(.system(size: 8, weight: .bold))
                 .foregroundStyle(.secondary)
@@ -484,6 +505,22 @@ struct SessionListView: View {
                 .frame(width: 10)
             label()
             Spacer(minLength: 4)
+        }
+        .contentShape(Rectangle())
+        return HStack(spacing: 4) {
+            if isEditing {
+                content
+            } else {
+                Button {
+                    let now = Date()
+                    let isDouble = lastHeaderClick.map { $0.id == id && now.timeIntervalSince($0.at) <= NSEvent.doubleClickInterval } ?? false
+                    lastHeaderClick = isDouble ? nil : HeaderClick(id: id, at: now)
+                    withAnimation(.easeInOut(duration: 0.15)) { toggle() }
+                    if isDouble, let doubleClick { doubleClick() }
+                } label: { content }
+                .buttonStyle(.plain)
+                .accessibilityLabel(collapsed ? "Expand section" : "Collapse section")
+            }
             Menu { menu() } label: {
                 Image(systemName: Icon.moreActions)
                     .font(.caption)
@@ -501,9 +538,9 @@ struct SessionListView: View {
         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentColor.opacity(targeted ? 0.8 : 0)))
         .padding(.horizontal, 6).padding(.top, 4)
         .background(headerBackground)
-        .contentShape(Rectangle())
-        .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { toggle() } }
         .onHover { hover(id, $0) }
+        .accessibilityIdentifier(id)
+        .debugFrame(id)
         .contextMenu { menu() }
         .help(help)
         .modifier(DropTargetModifier(section: section, dropTarget: $dropTarget, onDrop: drop))
@@ -668,20 +705,29 @@ struct SessionListView: View {
         return sessions.filter { state.selection.contains($0.id) }
     }
 
-    private func click(_ id: String, model: SessionListModel) {
+    /// A row click, with the modifiers SwiftUI matched on the click itself. Reading
+    /// `NSEvent.modifierFlags` (or `NSApp.currentEvent`) when the tap action runs is too late —
+    /// the gesture ends after the event, and the interaction harness showed both missing ⌘ and ⇧.
+    private func rowTap(_ id: String, _ model: SessionListModel) -> some Gesture {
+        TapGesture().modifiers(.command).onEnded { click(id, model: model, modifiers: .command) }
+            .exclusively(before: TapGesture().modifiers(.shift).onEnded { click(id, model: model, modifiers: .shift) })
+            .exclusively(before: TapGesture().onEnded { click(id, model: model, modifiers: []) })
+    }
+
+    private func click(_ id: String, model: SessionListModel, modifiers flags: EventModifiers) {
         listFocused = true
-        searchFocused = false
-        let flags = NSEvent.modifierFlags
         let isSession = !id.contains("/")
         if isSession, flags.contains(.command) {
             if state.selection.contains(id), state.selection.count > 1 {
                 state.selection.remove(id)
                 if state.primaryID == id { state.primaryID = model.order.first { state.selection.contains($0) } }
+                // A range starts from a row that is still selected, not the one just dropped.
+                state.anchorID = state.primaryID
             } else {
                 state.selection = state.selection.filter { !$0.contains("/") }.union([id])
                 state.primaryID = id
+                state.anchorID = id
             }
-            state.anchorID = id
         } else if isSession, flags.contains(.shift) {
             let sessionOrder = model.order.filter { !$0.contains("/") }
             state.selection = Set(SessionListing.range(from: state.anchorID ?? state.primaryID, to: id, in: sessionOrder))
@@ -724,8 +770,7 @@ struct SessionListView: View {
             }
             return .handled
         case .delete, .deleteForward:
-            let targets = sessions.filter { state.selection.contains($0.id) && !context.status(of: $0).isLive }
-            if !targets.isEmpty { state.pendingTrash = targets }
+            requestTrashSelection()
             return .handled
         case .escape:
             guard let primary = state.primaryID, state.selection.count > 1 else { return .ignored }
@@ -740,6 +785,11 @@ struct SessionListView: View {
             }
             return .ignored
         }
+    }
+
+    private func requestTrashSelection() {
+        let targets = sessions.filter { state.selection.contains($0.id) && !context.status(of: $0).isLive }
+        if !targets.isEmpty { state.pendingTrash = targets }
     }
 
     private func hover(_ id: String, _ inside: Bool) {

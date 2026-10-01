@@ -485,10 +485,11 @@ final class AppState: ObservableObject {
 
     func reloadSessions() {
         let path = activePath
+        let known = recentPaths + (activePath.map { [$0] } ?? [])
         sessionLoadTask?.cancel()
         sessionLoadTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            let listing = SessionScanner().listing(activePath: path)
+            let listing = SessionScanner().listing(activePath: path, knownProjects: known)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.sessions = listing.sessions
