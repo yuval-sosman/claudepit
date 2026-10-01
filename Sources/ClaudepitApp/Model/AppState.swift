@@ -1044,6 +1044,29 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Memory files Claude stops reading partway through, root first — what the Memory page
+    /// flags and what the fix agent is asked to split.
+    var oversizedMemoryFiles: [MemoryNode] {
+        memoryGraph.nodes.filter(\.exceedsReadLimit)
+            .sorted { a, b in a.isRoot != b.isRoot ? a.isRoot : a.id < b.id }
+    }
+
+    /// Open a Claude agent in herdr briefed to split and trim the oversized memory files.
+    /// `done` reports whether it started, so a missing herdr surfaces as a message.
+    func openMemoryFixAgent(done: @MainActor @escaping (Bool) -> Void = { _ in }) {
+        let files = oversizedMemoryFiles.compactMap { node in
+            node.size.map { MemoryReadLimit.Oversized(filename: node.id, size: $0) }
+        }
+        guard let base = activePath, !files.isEmpty else { done(false); return }
+        let prompt = MemoryReadLimit.fixPrompt(
+            memoryDir: Paths.memoryDir(projectSlug: Paths.slug(for: base)), files: files)
+        Task {
+            let ok = await TaskRunner.shared.openMemoryFixAgent(projectRoot: base, prompt: prompt)
+            if ok { activateHerdrHost() }
+            done(ok)
+        }
+    }
+
     func openTaskInHerdr(_ task: ProjectTask, phase: TaskPhase) {
         guard let base = activePath else { return }
         let slug = Paths.slug(for: base)

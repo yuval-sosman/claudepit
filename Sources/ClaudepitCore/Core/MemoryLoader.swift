@@ -5,10 +5,17 @@ public struct MemoryNode: Identifiable, Equatable, Hashable, Sendable {
     public let title: String    // link label from MEMORY.md, or filename stem
     public let url: URL
     public let isRoot: Bool
+    /// The body's size, measured at load so a list can flag an over-limit file without reading
+    /// it. Nil when the file couldn't be read.
+    public let size: MemoryReadLimit.Size?
 
-    public init(id: String, title: String, url: URL, isRoot: Bool = false) {
-        self.id = id; self.title = title; self.url = url; self.isRoot = isRoot
+    public init(id: String, title: String, url: URL, isRoot: Bool = false,
+                size: MemoryReadLimit.Size? = nil) {
+        self.id = id; self.title = title; self.url = url; self.isRoot = isRoot; self.size = size
     }
+
+    /// Claude stops reading this file before its end (see `MemoryReadLimit`).
+    public var exceedsReadLimit: Bool { size?.exceedsLimit ?? false }
 }
 
 public struct MemoryEdge: Sendable, Equatable {
@@ -29,7 +36,11 @@ public struct MemoryLoader {
     private static let linkRegex = try! NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)]+\.md)\)"#)
 
     public static func load(projectSlug: String) -> MemoryGraph {
-        let dir = Paths.memoryDir(projectSlug: projectSlug)
+        load(dir: Paths.memoryDir(projectSlug: projectSlug))
+    }
+
+    /// `dir` is injectable so checks run against a temp directory, never the real ~/.claude.
+    public static func load(dir: URL) -> MemoryGraph {
         let rootURL = dir.appending(path: "MEMORY.md")
         guard let rootText = try? String(contentsOf: rootURL, encoding: .utf8) else {
             return .empty
@@ -69,7 +80,13 @@ public struct MemoryLoader {
             }
         }
 
-        return MemoryGraph(nodes: Array(nodes.values), edges: edges)
+        let measured = nodes.values.map { node -> MemoryNode in
+            guard let raw = try? String(contentsOf: node.url, encoding: .utf8) else { return node }
+            let body = MemoryFrontmatter.parse(from: raw).body
+            return MemoryNode(id: node.id, title: node.title, url: node.url, isRoot: node.isRoot,
+                              size: MemoryReadLimit.size(of: body))
+        }
+        return MemoryGraph(nodes: measured, edges: edges)
     }
 
     private static func extractLinks(from text: String) -> [(label: String, filename: String)] {
