@@ -267,6 +267,17 @@ func sessionListingChecks() -> [Bool] {
         try expectEqual(table["s1"], SessionStat(prompts: 3, cost: 3.0), "s1")
     })
 
+    results.append(check("worktree label: task worktrees shorten to their id; colour slots are stable") {
+        try expectEqual(WorktreeLabel.short("task-56cf65b6-close-the-previous-phase-s-herdr"), "56cf65b6", "task")
+        try expectEqual(WorktreeLabel.short("feature-x"), "feature-x", "other")
+        try expectEqual(WorktreeLabel.short("task-notahexid-x"), "task-notahexid-x", "not a task id")
+        let a = WorktreeLabel.colorIndex(for: "task-56cf65b6-close", paletteSize: 5)
+        try expectEqual(a, WorktreeLabel.colorIndex(for: "task-56cf65b6-close", paletteSize: 5), "deterministic")
+        try expect((0..<5).contains(a), "in range")
+        let slots = Set(["a", "b", "c", "d", "e", "f", "g", "h"].map { WorktreeLabel.colorIndex(for: $0, paletteSize: 5) })
+        try expect(slots.count >= 3, "spreads across the palette")
+    })
+
     // MARK: Groups
 
     results.append(check("group names: trimmed, required, unique ignoring case; rename keeps its own") {

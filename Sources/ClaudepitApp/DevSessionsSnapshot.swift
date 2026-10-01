@@ -18,6 +18,7 @@ import ClaudepitCore
 ///   --expand id           show this session's subagents
 ///   --collapse name       fold this demo group
 ///   --hide-tasks          hide task sessions
+///   --worktree name       show only this worktree's sessions (as a pill click does)
 ///   --no-summaries        hide the summary line
 ///   --new-group           show the inline new-group editor
 ///   --empty               render as if the project had no sessions
@@ -101,6 +102,7 @@ enum DevSessionsSnapshot {
             state.primaryID = first
         }
         if let e = value("--expand") { state.expanded = [e] }
+        state.worktreeFilter = value("--worktree")
         if args.contains("--new-group"), let key = context.projectKey ?? sessions.first?.groupKey {
             state.newGroup = .init(key: key, sessionIDs: [])
         }

@@ -10,6 +10,7 @@ struct SessionsPageMemory {
     var expanded: Set<String> = []
     var search = ""
     var timeFilter: TimeFilter = .all
+    var worktreeFilter: String?
 }
 
 /// The Sessions list's actions: group edits, trash, liveness and per-session numbers.

@@ -644,7 +644,7 @@ private struct WorktreeBadge: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.branch")
-                    .font(.caption).foregroundStyle(Color.accentColor)
+                    .font(.caption.weight(.bold)).foregroundStyle(WorktreePalette.color(for: wt.name))
                 (Text("Running in worktree  ").foregroundStyle(.secondary)
                  + Text(wt.name).fontWeight(.semibold).foregroundStyle(.primary)
                  + Text("  ·  \(wt.branch)").foregroundStyle(.secondary))

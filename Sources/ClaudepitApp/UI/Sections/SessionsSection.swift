@@ -158,6 +158,7 @@ struct SessionsSection: View {
         state.expanded = m.expanded
         state.query = m.search
         state.timeFilter = m.timeFilter
+        state.worktreeFilter = m.worktreeFilter
         if let id = m.primaryID, app.focusSessionID == nil {
             DispatchQueue.main.async { state.scrollRequest = .init(id: id, center: true) }
         }
@@ -166,7 +167,8 @@ struct SessionsSection: View {
     private func saveMemory() {
         app.sessionsPageMemory = SessionsPageMemory(
             projectPath: app.activePath, selection: state.selection, primaryID: state.primaryID,
-            expanded: state.expanded, search: state.query, timeFilter: state.timeFilter)
+            expanded: state.expanded, search: state.query, timeFilter: state.timeFilter,
+            worktreeFilter: state.worktreeFilter)
     }
 
     // MARK: - Detail card (right, wide)

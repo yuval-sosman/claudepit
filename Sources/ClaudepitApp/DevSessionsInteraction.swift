@@ -36,7 +36,8 @@ enum DevSessionsInteraction {
         }
         func order() -> [String] {
             SessionListModel(sessions: model.sessions, context: model.context, prefs: model.prefs,
-                             query: state.query, includeDate: state.timeFilter.includes, expanded: state.expanded).order
+                             query: state.query, includeDate: state.timeFilter.includes, expanded: state.expanded,
+                             worktree: state.worktreeFilter).order
         }
         func snap(_ name: String) {
             guard let outDir else { return }
@@ -227,7 +228,25 @@ enum DevSessionsInteraction {
             }
         }
 
+        // A worktree pill filters the list to that worktree; a second click clears it.
+        model.prefs.tab = .recent
+        d.settle(0.4)
+        if let wtSession = model.sessions.first(where: { model.context.worktree(of: $0) != nil && d.exists("worktree-pill-\($0.id)") }),
+           let wt = model.context.worktree(of: wtSession) {
+            d.click("worktree-pill-\(wtSession.id)")
+            let shown = order().filter { !$0.contains("/") }
+            expect(state.worktreeFilter == wt, "clicking a worktree pill filters to that worktree")
+            expect(!shown.isEmpty && shown.allSatisfy { id in model.context.worktree(of: model.sessions.first { $0.id == id }!) == wt },
+                   "…and only that worktree's sessions are listed (\(shown.count))")
+            d.click("worktree-pill-\(wtSession.id)")
+            expect(state.worktreeFilter == nil, "clicking it again shows everything")
+        } else {
+            print("SKIP  no worktree session on screen")
+        }
+
         // The + button opens the inline editor.
+        model.prefs.tab = .groups
+        d.settle(0.3)
         d.click("new-group-button")
         expect(state.newGroup != nil, "+ opens a new-group editor")
         d.key(.escape)

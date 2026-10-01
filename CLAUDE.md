@@ -156,6 +156,12 @@ then one automatic group per task, then Ungrouped — live status, shift/arrow r
   unfolds groups that hide the row) do. Several selected → `SessionSelectionPanel` in the detail
   card. Selection, expansion, search and date filter survive leaving the page
   (`AppState.sessionsPageMemory`); view options persist in `@AppStorage("sessionsListPrefs")`.
+- **Worktrees** read at a glance: each worktree has its own colour (`WorktreePalette`, slot from
+  `WorktreeLabel.colorIndex` — FNV-1a, since `String.hashValue` is reseeded per launch), drawn as a
+  stripe down the row's leading edge and a pill (`task-<id>-…` shortens to the id). Clicking the
+  pill filters to that worktree (`SessionListState.worktreeFilter`, shown as a chip). Phase pills
+  are neutral so colour in the meta line only ever means "which worktree"; the palette avoids
+  green (working), orange (waiting) and the accent, and the system pink (it renders error-red).
 - **Trash** (`SessionTrash`) takes the transcript *and* its `<id>/` folder to the Trash and removes
   the summary and group assignment; it is confirmed, and refused for a live session.
 - **Debug snapshot:** `.build/debug/ClaudepitApp --snapshot-sessions <project path | all> --out <dir>

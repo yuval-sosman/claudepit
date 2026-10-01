@@ -77,6 +77,9 @@ struct SessionListContext {
 
     func group(of s: SessionSummary) -> SessionGroup? { groups[s.groupKey]?.group(s.groupID) }
 
+    /// The worktree a session ran in (its cwd), or the one it is bound to.
+    func worktree(of s: SessionSummary) -> String? { s.worktreeName ?? boundWorktrees[s.id] }
+
     func title(of s: SessionSummary) -> String {
         if let ref = s.task, let live = taskNames[ref.taskID] { return live }
         return s.title
@@ -115,11 +118,12 @@ struct SessionListModel {
     let isSearching: Bool
 
     init(sessions: [SessionSummary], context: SessionListContext, prefs: SessionListPrefs,
-         query: String, includeDate: (Date) -> Bool, expanded: Set<String>) {
+         query: String, includeDate: (Date) -> Bool, expanded: Set<String>, worktree: String? = nil) {
         let q = query.trimmingCharacters(in: .whitespaces)
         isSearching = !q.isEmpty
         matching = sessions.filter { s in
             guard includeDate(s.modifiedAt), prefs.showTaskSessions || s.task == nil else { return false }
+            if let worktree, context.worktree(of: s) != worktree { return false }
             var extra: [String] = []
             if let g = context.group(of: s) { extra.append(g.name) }
             if let ref = s.task, let n = context.taskNames[ref.taskID] { extra.append(n) }
@@ -223,6 +227,8 @@ final class SessionListState: ObservableObject {
     @Published var expanded: Set<String> = []
     @Published var query = ""
     @Published var timeFilter: TimeFilter = .all
+    /// Show only this worktree's sessions (a click on a row's worktree pill).
+    @Published var worktreeFilter: String?
     /// An inline "new group" editor at the top of the Groups tab, filing these sessions on commit.
     @Published var newGroup: NewGroupDraft?
     @Published var renamingGroupID: String?

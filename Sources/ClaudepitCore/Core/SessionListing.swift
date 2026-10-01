@@ -216,3 +216,28 @@ public enum SessionListing {
         return order[max(0, min(order.count - 1, i + step))]
     }
 }
+
+// MARK: - Worktree label
+
+/// How a worktree reads in the Sessions list: a short name for its pill, and a colour slot that
+/// stays the same for the same worktree on every launch (so all its sessions share it).
+public enum WorktreeLabel {
+    /// `task-56cf65b6-close-the-previous-phase…` → `56cf65b6` (the task id the app shows
+    /// everywhere else); any other name as it is.
+    public static func short(_ name: String) -> String {
+        let parts = name.split(separator: "-", maxSplits: 2)
+        if parts.count >= 2, parts[0] == "task", parts[1].count == 8, parts[1].allSatisfy(\.isHexDigit) {
+            return String(parts[1])
+        }
+        return name
+    }
+
+    /// FNV-1a over the name — `String.hashValue` is seeded per process, so it would recolour
+    /// every worktree on each launch.
+    public static func colorIndex(for name: String, paletteSize: Int) -> Int {
+        guard paletteSize > 0 else { return 0 }
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in name.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        return Int(hash % UInt64(paletteSize))
+    }
+}

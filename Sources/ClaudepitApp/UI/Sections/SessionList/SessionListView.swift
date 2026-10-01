@@ -44,7 +44,8 @@ struct SessionListView: View {
 
     var body: some View {
         let model = SessionListModel(sessions: sessions, context: context, prefs: prefs, query: state.query,
-                                     includeDate: state.timeFilter.includes, expanded: state.expanded)
+                                     includeDate: state.timeFilter.includes, expanded: state.expanded,
+                                     worktree: state.worktreeFilter)
         VStack(spacing: 0) {
             header
             searchRow
@@ -169,7 +170,9 @@ struct SessionListView: View {
         }
     }
 
-    private var filtersActive: Bool { state.timeFilter.isActive || !prefs.showTaskSessions }
+    private var filtersActive: Bool {
+        state.timeFilter.isActive || !prefs.showTaskSessions || state.worktreeFilter != nil
+    }
 
     private var filterMenu: some View {
         Menu {
@@ -231,6 +234,11 @@ struct SessionListView: View {
                 if !prefs.showTaskSessions {
                     chip("Task sessions hidden") { prefs.showTaskSessions = true }
                 }
+                if let wt = state.worktreeFilter {
+                    chip("\(Image(systemName: "arrow.triangle.branch")) \(WorktreeLabel.short(wt))",
+                         tint: WorktreePalette.color(for: wt)) { state.worktreeFilter = nil }
+                        .help("Only sessions in worktree \(wt)")
+                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
@@ -238,7 +246,7 @@ struct SessionListView: View {
         }
     }
 
-    private func chip(_ text: String, clear: @escaping () -> Void) -> some View {
+    private func chip(_ text: LocalizedStringKey, tint: Color = .accentColor, clear: @escaping () -> Void) -> some View {
         HStack(spacing: 4) {
             Text(text)
             Button(action: clear) {
@@ -249,7 +257,7 @@ struct SessionListView: View {
         }
         .font(.caption)
         .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(Color.accentColor.opacity(0.2), in: Capsule())
+        .background(tint.opacity(0.2), in: Capsule())
     }
 
     // MARK: - Content
@@ -373,7 +381,12 @@ struct SessionListView: View {
             isFocused: listFocused,
             isHovered: hoveredID == s.id,
             isExpanded: state.expanded.contains(s.id),
-            onToggleExpand: { toggleExpanded(s.id) }
+            onToggleExpand: { toggleExpanded(s.id) },
+            onWorktreeTap: { wt in
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    state.worktreeFilter = state.worktreeFilter == wt ? nil : wt
+                }
+            }
         ) {
             MenuEntriesView(entries: menus.session(menus.targets(for: s)))
         }
@@ -612,7 +625,8 @@ struct SessionListView: View {
 
     private var currentOrder: [String] {
         SessionListModel(sessions: sessions, context: context, prefs: prefs, query: state.query,
-                         includeDate: state.timeFilter.includes, expanded: state.expanded).order
+                         includeDate: state.timeFilter.includes, expanded: state.expanded,
+                         worktree: state.worktreeFilter).order
     }
 
     /// A row click, with the modifiers SwiftUI matched on the click itself. Reading
@@ -739,6 +753,7 @@ struct SessionListView: View {
         guard let s = sessions.first(where: { $0.id == sessionID }) else { return }
         if !state.timeFilter.includes(s.modifiedAt) { state.timeFilter = .all }
         if s.task != nil, !prefs.showTaskSessions { prefs.showTaskSessions = true }
+        if let wt = state.worktreeFilter, context.worktree(of: s) != wt { state.worktreeFilter = nil }
         var extra: [String] = []
         if let g = context.group(of: s) { extra.append(g.name) }
         if !SessionListing.matches(s, query: state.query, extra: extra) { state.query = "" }
@@ -824,6 +839,7 @@ struct SessionListView: View {
 
     private func clearFilters() {
         state.timeFilter = .all
+        state.worktreeFilter = nil
         prefs.showTaskSessions = true
     }
 }

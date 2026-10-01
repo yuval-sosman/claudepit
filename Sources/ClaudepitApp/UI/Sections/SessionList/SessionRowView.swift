@@ -14,7 +14,12 @@ struct SessionRowView<MenuItems: View>: View {
     let isHovered: Bool
     let isExpanded: Bool
     let onToggleExpand: () -> Void
+    /// Show only this worktree's sessions.
+    var onWorktreeTap: (String) -> Void = { _ in }
     @ViewBuilder let menuItems: () -> MenuItems
+
+    /// The worktree the session ran in (its cwd), or the one it is bound to.
+    private var worktree: String? { session.worktreeName ?? context.boundWorktrees[session.id] }
 
     var body: some View {
         let status = context.status(of: session)
@@ -37,8 +42,12 @@ struct SessionRowView<MenuItems: View>: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     if let ref = session.task { PhasePill(label: ref.phaseLabel) }
+                    if let wt = worktree {
+                        WorktreePill(name: wt) { onWorktreeTap(wt) }
+                            .debugFrame("worktree-pill-\(session.id)")
+                    }
                     meta.font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
@@ -58,6 +67,16 @@ struct SessionRowView<MenuItems: View>: View {
         }
         .padding(.leading, 6).padding(.trailing, 6).padding(.vertical, 6)
         .background(background, in: RoundedRectangle(cornerRadius: 8))
+        // A worktree session carries its worktree's colour down its leading edge, so every
+        // session of one worktree reads as a set while scanning.
+        .overlay(alignment: .leading) {
+            if let wt = worktree {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(WorktreePalette.color(for: wt))
+                    .frame(width: 3)
+                    .padding(.vertical, 5)
+            }
+        }
         .padding(.horizontal, 6)
         .help(tooltip(status: status))
     }
@@ -98,9 +117,6 @@ struct SessionRowView<MenuItems: View>: View {
         if !session.subagents.isEmpty {
             parts.append(Text("\(Image(systemName: "sparkles"))\u{2009}\(session.subagents.count)"))
         }
-        if session.task == nil, let wt = session.worktreeName ?? context.boundWorktrees[session.id] {
-            parts.append(Text("\(Image(systemName: "arrow.triangle.branch"))\u{2009}\(wt)"))
-        }
         return parts.dropFirst().reduce(parts[0]) { $0 + Text(" · ") + $1 }
     }
 
@@ -112,7 +128,7 @@ struct SessionRowView<MenuItems: View>: View {
         var facts = ["Last written \(session.modifiedAt.formatted(date: .abbreviated, time: .shortened))",
                      ByteCountFormatter.string(fromByteCount: Int64(session.fileSize), countStyle: .file)]
         if let label = status.label { facts.insert(label, at: 0) }
-        if let wt = context.boundWorktrees[session.id] { facts.append("bound to worktree \(wt)") }
+        if let wt = worktree { facts.append("worktree \(wt)") }
         lines.append(facts.joined(separator: " · "))
         return lines.joined(separator: "\n")
     }
@@ -193,6 +209,49 @@ struct PulsingDot: View {
     }
 }
 
+/// One colour per worktree (stable across launches — `WorktreeLabel.colorIndex`). Soft tones, so
+/// none reads as an error (the system pink renders a hot red here), and none near the colours
+/// that already mean something in the list: green (working), orange (waiting) and the accent
+/// (selection). Phase pills are neutral, so in a row's meta line colour only means "which worktree".
+enum WorktreePalette {
+    static let colors: [Color] = [
+        Color(red: 0.96, green: 0.58, blue: 0.80),   // rose
+        Color(red: 0.42, green: 0.80, blue: 0.98),   // sky
+        Color(red: 0.98, green: 0.82, blue: 0.38),   // amber
+        Color(red: 0.74, green: 0.62, blue: 1.00),   // lavender
+        Color(red: 0.55, green: 0.90, blue: 0.80),   // seafoam
+    ]
+
+    static func color(for worktree: String) -> Color {
+        colors[WorktreeLabel.colorIndex(for: worktree, paletteSize: colors.count)]
+    }
+}
+
+/// The worktree a session ran in, in that worktree's colour. Clicking it shows only that
+/// worktree's sessions.
+struct WorktreePill: View {
+    let name: String
+    let action: () -> Void
+
+    var body: some View {
+        let color = WorktreePalette.color(for: name)
+        Button(action: action) {
+            HStack(spacing: 2) {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 8, weight: .bold))
+                Text(WorktreeLabel.short(name)).lineLimit(1)
+            }
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .foregroundStyle(color)
+            .background(color.opacity(0.18), in: Capsule())
+            .overlay(Capsule().strokeBorder(color.opacity(0.35), lineWidth: 0.5))
+            .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .help("Worktree \(name) — click to show only its sessions")
+    }
+}
+
 struct PhasePill: View {
     let label: String
 
@@ -200,8 +259,8 @@ struct PhasePill: View {
         Text(label)
             .font(.system(size: 9, weight: .semibold))
             .padding(.horizontal, 5).padding(.vertical, 1)
-            .foregroundStyle(Color.teal)
-            .background(Color.teal.opacity(0.16), in: Capsule())
+            .foregroundStyle(.secondary)
+            .background(Color.white.opacity(0.09), in: Capsule())
             .help("Task phase: \(label)")
     }
 }
