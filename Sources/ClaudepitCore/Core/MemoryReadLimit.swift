@@ -54,7 +54,7 @@ public enum MemoryReadLimit {
     /// herdr agent name for the fix — one per project, so a second click focuses the running
     /// agent instead of starting another one on the same files.
     public static func fixAgentName(projectPath: URL) -> String {
-        "memory-fix-\(projectPath.lastPathComponent)"
+        Herdr.agentName("memory-fix-\(projectPath.lastPathComponent)")
     }
 
     /// The brief handed to the herdr agent: why the files are a problem, what done looks like,

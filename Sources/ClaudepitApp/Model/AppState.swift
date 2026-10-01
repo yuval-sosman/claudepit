@@ -68,6 +68,7 @@ final class AppState: ObservableObject {
             if selected != oldValue {
                 selectedSessionID = nil
                 selectedPlanName = nil
+                selectedSpecName = nil
                 selectedMemoryTitle = nil
                 // Clear cross-section crumb when navigating away from plans
                 if oldValue == .plans {
@@ -80,7 +81,6 @@ final class AppState: ObservableObject {
     @Published var pendingHighlight: HighlightTarget?
     @Published var focusPluginID: String?   // set to jump the Plugins page to a specific plugin
     @Published var focusPlanPath: String?   // set to jump the Plans page to a specific plan
-    @Published var plansChangeToken: Int = 0
     @Published var focusSpecPath: String?   // set to jump the Specs page to a specific spec
     @Published var returnToSpecTaskID: String? // set before a spec deep-link so SpecDetailView can offer "Back to task"
     @Published var focusClaudeMdPath: String? // set to jump the CLAUDE.md page to a specific file
@@ -173,6 +173,9 @@ final class AppState: ObservableObject {
     /// app's lifetime: the page is rebuilt on every visit, and coming back used to reset all of it
     /// and jump to the newest session. Not published; only that page reads it, on appear.
     var sessionsPageMemory = SessionsPageMemory()
+    var plansPageMemory = DocumentPageMemory()
+    var specsPageMemory = DocumentPageMemory()
+    var memoryPageMemory = MemoryPageMemory()
     @Published var loops: [CronEntry] = []
     @Published var tasks: [ProjectTask] = []
     /// Task specs/plans that exist on disk, stamped with their mtime. Cached here rather than
@@ -181,12 +184,20 @@ final class AppState: ObservableObject {
     /// The Plans/Specs/Memory pages' own listings, mtime-stamped for Home's activity feed —
     /// whatever those pages show appears in Recent. Cached for the same reason as above.
     @Published var planFiles: [PageFile] = []
+    /// Every plan the Plans page lists, titled by its own first heading (`MarkdownDoc`).
+    @Published var plans: [MarkdownDoc] = []
+    /// Every spec the Specs page lists, named by its task.
+    @Published var specs: [MarkdownDoc] = []
+    /// Each re-reads only the files whose size or date changed — `reload()` runs on every watcher tick.
+    private let planLoader = MarkdownDocLoader()
+    private let specLoader = MarkdownDocLoader()
     @Published var specFiles: [PageFile] = []
     @Published var memoryFiles: [PageFile] = []
     @Published var memoryGraph: MemoryGraph = .empty
     @Published var memoryLog: [MemoryLogEntry] = []
     @Published var selectedSessionID: String?
     @Published var selectedPlanName: String?
+    @Published var selectedSpecName: String?
     @Published var selectedMemoryTitle: String?
     @Published var focusMemoryFileID: String?
     @Published var breadcrumbSessionCrumb: String?   // set when navigating to Plans from a session
@@ -489,7 +500,6 @@ final class AppState: ObservableObject {
         driveAutoRunTasks()   // first: armed tasks claim their id in `driving` before the others look
         driveBlockedTasks()
         driveRunningTasks()
-        plansChangeToken += 1
         restartWatching()
     }
 
@@ -597,17 +607,12 @@ final class AppState: ObservableObject {
     }
 
     /// Every plan the Plans page lists (`~/.claude/plans/*.md` — plan mode's global output,
-    /// deliberately NOT project-scoped, exactly like the page), mtime-stamped for the feed.
+    /// deliberately NOT project-scoped, exactly like the page), mtime-stamped for the feed, which
+    /// names each plan by the same title the page shows.
     func reloadPlanFiles() {
-        let items = (try? FileManager.default.contentsOfDirectory(
-            at: Paths.plansRoot,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: .skipsHiddenFiles)) ?? []
-        planFiles = items.filter { $0.pathExtension == "md" }.compactMap { url in
-            fileModifiedAt(url.path).map {
-                PageFile(path: url.path, name: url.deletingPathExtension().lastPathComponent, date: $0)
-            }
-        }
+        let loaded = planLoader.loadPlans(dir: Paths.plansRoot)
+        if loaded != plans { plans = loaded }
+        planFiles = plans.map { PageFile(path: $0.url.path, name: $0.title, date: $0.modifiedAt) }
     }
 
     private func fileModifiedAt(_ path: String) -> Date? {
@@ -617,7 +622,7 @@ final class AppState: ObservableObject {
 
     func loadTasks() {
         guard let base = activePath else {
-            tasks = []; taskArtifacts = []; specFiles = []; return
+            tasks = []; taskArtifacts = []; specFiles = []; specs = []; return
         }
         let slug = Paths.slug(for: base)
         var loaded = TaskStore.shared.loadAll(projectSlug: slug)
@@ -636,21 +641,12 @@ final class AppState: ObservableObject {
 
     /// Every spec the Specs page lists (`tasks/*/spec.md` on disk — including orphaned task
     /// folders whose task.json is gone, which `links.specPath` can never reach), named like the
-    /// page names them: the task's name, falling back to the folder name.
+    /// page names them: the task's name, falling back to the spec's own heading.
     private func reloadSpecFiles(projectSlug slug: String, tasks loaded: [ProjectTask]) {
         let nameByID = Dictionary(loaded.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
-        let taskDirs = (try? FileManager.default.contentsOfDirectory(
-            at: Paths.tasksRoot(projectSlug: slug),
-            includingPropertiesForKeys: nil,
-            options: .skipsHiddenFiles)) ?? []
-        specFiles = taskDirs.compactMap { dir in
-            let spec = dir.appendingPathComponent("spec.md")
-            return fileModifiedAt(spec.path).map {
-                PageFile(path: spec.path,
-                         name: nameByID[dir.lastPathComponent] ?? dir.lastPathComponent,
-                         date: $0)
-            }
-        }
+        let docs = specLoader.loadSpecs(tasksRoot: Paths.tasksRoot(projectSlug: slug), taskNames: nameByID)
+        if docs != specs { specs = docs }
+        specFiles = specs.map { PageFile(path: $0.url.path, name: $0.title, date: $0.modifiedAt) }
     }
 
     /// An agent working in a herdr pane produces no file-system event of its own, so the
@@ -1065,6 +1061,21 @@ final class AppState: ObservableObject {
             memoryDir: Paths.memoryDir(projectSlug: Paths.slug(for: base)), files: files)
         Task {
             let ok = await TaskRunner.shared.openMemoryFixAgent(projectRoot: base, prompt: prompt)
+            if ok { activateHerdrHost() }
+            done(ok)
+        }
+    }
+
+    /// Open a Claude agent in herdr to brainstorm a plan or spec: a new pane, the document attached,
+    /// the prompt typed and waiting for the person's ask (`DocumentBrainstorm`). Runs in the active
+    /// project, so Claude has the code the document is about. `done` reports whether it opened.
+    func openDocumentBrainstorm(noun: String, doc: MarkdownDoc, done: @MainActor @escaping (Bool) -> Void = { _ in }) {
+        let cwd = activePath ?? FileManager.default.homeDirectoryForCurrentUser
+        let name = DocumentBrainstorm.agentName(noun: noun, tag: doc.tag)
+        let draft = DocumentBrainstorm.draft(noun: noun, path: doc.url.path)
+        Task {
+            let ok = await TaskRunner.shared.openBrainstormAgent(name: name, cwd: cwd,
+                                                                 tabLabel: "brainstorm-\(noun)", draft: draft)
             if ok { activateHerdrHost() }
             done(ok)
         }

@@ -339,8 +339,8 @@ public actor TaskRunner {
     /// task, because `HomeAgents.resolveTarget` claims that prefix and the merge genuinely does
     /// belong to that task in Home's Live Agents list.
     public static func mergeAgentName(taskID: String?, worktreePath: String) -> String {
-        if let id = taskID, !id.isEmpty { return "task-\(id)-merge" }
-        return "merge-\(URL(filePath: worktreePath).lastPathComponent)"
+        if let id = taskID, !id.isEmpty { return Herdr.agentName("task-\(id)-merge") }
+        return Herdr.agentName("merge-\(URL(filePath: worktreePath).lastPathComponent)")
     }
 
     /// The merge agent's brief. Same contract as `phasePrompt`: the slash-command **alone on line
@@ -428,13 +428,30 @@ public actor TaskRunner {
                                         prompt: prompt)
     }
 
-    /// Start `name` in a fresh, focused tab and hand it `prompt`. The shared tail of every
-    /// one-off agent (merge, memory fix); the caller holds `launching` and has already released
-    /// any stale agent by that name.
+    /// Open an interactive Claude agent in herdr to brainstorm a plan or spec, with
+    /// `DocumentBrainstorm.draft` typed into its input but not sent. Already live? Focus it — the
+    /// person is mid-conversation, and typing the draft again would land in their next message.
+    public func openBrainstormAgent(name: String, cwd: URL, tabLabel: String, draft: String) async -> Bool {
+        guard !launching.contains(name) else { return false }
+        launching.insert(name)
+        defer { launching.remove(name) }
+        if await agentReady(name) {
+            await HerdrFocus.focus(agentName: name, tabID: nil, cwd: cwd)
+            return true
+        }
+        await releaseAgentName(name)
+        return await launchHandoffAgent(name: name, cwd: cwd, tabLabel: tabLabel, prompt: draft, submit: false)
+    }
+
+    /// Start `name` in a fresh, focused tab and hand it `prompt` — sent (`agent prompt`), or with
+    /// `submit: false` only typed (`pane send-text`, no Return) for the person to finish. The
+    /// shared tail of every one-off agent (merge, memory fix, brainstorm); the caller holds
+    /// `launching` and has already released any stale agent by that name.
     ///
     /// Its OWN tab. Never `openPhaseTab`: that closes the task's stored tab and overwrites
     /// `worktree.paneID`/`tabID`, which is the bookkeeping every phase focus depends on.
-    private func launchHandoffAgent(name: String, cwd: URL, tabLabel: String, prompt: String) async -> Bool {
+    private func launchHandoffAgent(name: String, cwd: URL, tabLabel: String, prompt: String,
+                                    submit: Bool = true) async -> Bool {
         guard let fresh = await Herdr.tabCreate(cwd: cwd, label: tabLabel) else { return false }
         // User-initiated, so focus it (unlike an armed auto-run, which must not steal focus).
         await herdr(["tab", "focus", fresh.tabID], cwd: nil)
@@ -448,9 +465,17 @@ public actor TaskRunner {
             if await agentReady(name) { break }
             if attempt < 4 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
         }
-        guard await agentReady(name) else { return false }
-        await herdr(["agent", "prompt", name, prompt], cwd: cwd)
-        return true
+        guard await agentReady(name) else {
+            // Claude never came up (a rejected name, a shell that never reached its prompt): close
+            // the tab we just opened rather than leave an empty pane that looks like the feature.
+            await herdr(["tab", "close", fresh.tabID], cwd: nil)
+            return false
+        }
+        if submit {
+            await herdr(["agent", "prompt", name, prompt], cwd: cwd)
+            return true
+        }
+        return await Herdr.succeeds(["pane", "send-text", pane, prompt], cwd: cwd)
     }
 
     // MARK: - Worktree

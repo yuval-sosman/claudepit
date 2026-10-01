@@ -36,6 +36,7 @@ enum DevSnapshot {
 
     static func runIfRequested() -> Bool {
         if DevSessionsSnapshot.runIfRequested() { return true }
+        if DevPagesSnapshot.runIfRequested() { return true }
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--snapshot-transcript"), i + 1 < args.count else { return false }
         func value(_ flag: String) -> String? {

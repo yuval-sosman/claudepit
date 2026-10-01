@@ -50,6 +50,37 @@ public enum Herdr {
         await Subprocess.run(path, args, cwd: cwd, timeout: timeout)?.stdout
     }
 
+    /// herdr's agent-name rule (0.8.2): start with a lowercase letter; only lowercase letters,
+    /// digits, `-` or `_`; 1–32 characters. Anything else fails `agent start` with
+    /// `invalid_agent_name` — after the tab is already open, so the click looks like "herdr opened
+    /// a pane and nothing ran". Brainstorm's `brainstorm-plan-<long slug>` hit exactly that.
+    public static let maxAgentNameLength = 32
+
+    /// `raw` made into a name herdr accepts. A valid name comes back unchanged; anything else is
+    /// lowercased, its other characters turned into `-`, and — when too long — cut and closed with
+    /// a stable 6-hex hash of `raw`, so two long names sharing a prefix stay distinct and the same
+    /// `raw` always maps to the same name (a second click must find the first click's agent).
+    public static func agentName(_ raw: String) -> String {
+        var chars: [Character] = raw.lowercased().map { c in
+            (c.isASCII && (c.isLetter || c.isNumber)) || c == "-" || c == "_" ? c : "-"
+        }
+        if chars.first.map({ !($0.isASCII && $0.isLetter) }) ?? true { chars.insert(contentsOf: "a-", at: 0) }
+        guard chars.count > maxAgentNameLength else { return String(chars) }
+        var hash: UInt64 = 0xcbf29ce484222325   // FNV-1a: stable across launches, unlike hashValue
+        for byte in raw.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        let suffix = String(String(hash, radix: 16).suffix(6))
+        var head = String(chars.prefix(maxAgentNameLength - suffix.count - 1))
+        while head.hasSuffix("-") || head.hasSuffix("_") { head.removeLast() }
+        return head + "-" + suffix
+    }
+
+    /// Whether the command exited 0. For commands that print nothing either way — `pane send-text`
+    /// writes no stdout on success or failure (herdr 0.8.2), so only the exit code tells them apart.
+    public static func succeeds(_ args: [String], cwd: URL?,
+                                timeout: TimeInterval = Subprocess.defaultTimeout) async -> Bool {
+        await Subprocess.run(path, args, cwd: cwd, timeout: timeout)?.ok ?? false
+    }
+
     /// Pane id from a `herdr pane split` response: `result.pane.pane_id`.
     public static func paneID(fromJSON obj: [String: Any]) -> String? {
         (obj["result"] as? [String: Any])

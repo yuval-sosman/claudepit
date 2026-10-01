@@ -362,18 +362,19 @@ private struct InteractionHost: View {
     }
 }
 
-/// A borderless window refuses key status by default; key events need it.
-private final class KeyableWindow: NSWindow {
+/// A borderless window refuses key status by default; key events need it. Shared with
+/// `DevPagesInteraction`, as are `FrameBox` and `Driver`.
+final class KeyableWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
 
 /// Synthetic input against an offscreen window, targeting views by the frames they report.
 /// Row frames as the views report them (always on the main thread).
-private final class FrameBox: @unchecked Sendable { var map: [String: CGRect] = [:] }
+final class FrameBox: @unchecked Sendable { var map: [String: CGRect] = [:] }
 
 @MainActor
-private struct Driver {
+struct Driver {
     let window: NSWindow
     let host: NSView
     let frames: FrameBox

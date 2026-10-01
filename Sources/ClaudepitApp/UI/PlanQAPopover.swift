@@ -76,6 +76,9 @@ struct PlanQAPanel: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
+                        if messages.isEmpty && !isLoading && errorMessage == nil {
+                            emptyHint
+                        }
                         ForEach(Array(messages.enumerated()), id: \.offset) { idx, msg in
                             messageRow(msg, index: idx).id(idx)
                         }
@@ -134,6 +137,25 @@ struct PlanQAPanel: View {
                 .padding(.vertical, 8)
             }
         }
+    }
+
+    /// What the panel is for, until the first question: a fixed-height panel was otherwise an
+    /// empty box above the field.
+    private var emptyHint: some View {
+        let subject = contentLabel ?? (showImprovement ? "plan" : "file")
+        return VStack(alignment: .leading, spacing: 4) {
+            Label("Claude answers from the \(subject)'s text.", systemImage: "sparkles")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            if showImprovement && planPath != nil {
+                Text("Ask it to change something and it can suggest a rewrite — you review the diff before anything is saved.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 2)
     }
 
     @ViewBuilder
