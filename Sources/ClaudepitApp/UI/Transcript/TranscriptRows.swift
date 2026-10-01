@@ -742,12 +742,12 @@ struct ContextRow: View {
     @ObservedObject var expansion: TranscriptExpansion
 
     var body: some View {
-        // Plan mode names its plan file: the row links to it, collapsed or not.
+        // Plan mode names its plan file: drawn as a plan row, but the Ask / Plans links live only
+        // on the plan's Write (`TranscriptModel.planLinkEvents`).
         let planPath = items.first { TranscriptModel.isPlanContext($0) && $0.path != nil }?.path
         DisclosureRow(icon: planPath != nil ? "list.bullet.clipboard" : "paperclip",
                       tint: planPath != nil ? TranscriptStyle.plan : TranscriptStyle.context,
                       isExpanded: expansion.isExpanded(id),
-                      inset: planPath.map { AnyView(PlanQASlot(path: $0, id: id, actions: actions, expansion: expansion)) },
                       onToggle: { expansion.toggle(id) }) {
             HStack(spacing: 7) {
                 Text(items.count == 1 ? items[0].title : "Context")
@@ -757,8 +757,6 @@ struct ContextRow: View {
             }
         } trailing: {
             if items.count > 1 { MetaText(TranscriptFormat.plural(items.count, "item")) }
-        } accessory: {
-            if let planPath { PlanLinks(path: planPath, id: id, actions: actions, expansion: expansion) }
         } content: {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(Array(items.enumerated()), id: \.offset) { i, item in

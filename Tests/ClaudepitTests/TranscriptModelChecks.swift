@@ -296,6 +296,22 @@ func transcriptModelChecks() -> [Bool] {
         try expectEqual(m.turns[0].plans, 2, "the turn counts the write and the approval")
         try expectEqual(m.turns[0].tasks, 6, "and every task call")
         try expectEqual(m.turns[0].questions, 1, "and the question")
+        // The links: on the plan's Write — not the plan-mode context, not the approval.
+        try expectEqual(m.planLinkEvents, [2: root + "/p.md"], "Ask / Plans sit on the plan's Write alone")
+    })
+
+    results.append(check("plan links: every Write of a plan; a plan never written links its first edit") {
+        let root = "/home/u/.claude/plans"
+        let m = TranscriptModel(events: [
+            call("e1", "Edit", ["file_path": root + "/old.md", "old_string": "a", "new_string": "b"]),
+            call("e2", "Edit", ["file_path": root + "/old.md", "old_string": "b", "new_string": "c"]),
+            call("e3", "Edit", ["file_path": root + "/new.md", "old_string": "x", "new_string": "y"]),
+            call("w1", "Write", ["file_path": root + "/new.md", "content": "# N"]),
+            call("w2", "Write", ["file_path": root + "/new.md", "content": "# N2"]),
+        ], plansRoot: root)
+        try expectEqual(m.planLinkEvents, [0: root + "/old.md", 3: root + "/new.md", 4: root + "/new.md"],
+                        "old.md (never written): its first edit; new.md: each write, not its edit")
+        try expectEqual(m.planLinkPath(at: 2), nil, "an edit of a written plan carries none")
     })
 
     results.append(check("rail: one mark per notable row, so a single long turn is not an empty rail") {

@@ -20,12 +20,14 @@ struct ToolRowView: View {
 
     var body: some View {
         let planPath = model.planPath(of: inv)
+        // Every plan row is styled as one; only the plan's Write carries its Ask / Plans links.
+        let linkPath = model.planLinkPath(at: index)
         let startsSpan = inv.name == "TaskUpdate" ? model.taskSpans.first { $0.start == index } : nil
         let style = rowStyle(isPlan: planPath != nil, span: startsSpan)
         DisclosureRow(icon: style.icon, tint: inv.failed ? TranscriptStyle.error : style.color,
                       // The page's "Edits" mode: a file change opens on its diff, the rest folds.
                       isExpanded: expansion.isExpanded(id, default: inv.isFileChange),
-                      inset: planPath.map { AnyView(PlanQASlot(path: $0, id: id, actions: actions, expansion: expansion)) },
+                      inset: linkPath.map { AnyView(PlanQASlot(path: $0, id: id, actions: actions, expansion: expansion)) },
                       onToggle: { expansion.toggle(id) }) {
             if let span = startsSpan {
                 TaskSpanTitle(span: span, color: style.color)
@@ -39,7 +41,7 @@ struct ToolRowView: View {
                 ToolTrailing(inv: inv, hooks: hooks)
             }
         } accessory: {
-            accessory(planPath: planPath, startsSpan: startsSpan)
+            accessory(planPath: linkPath, startsSpan: startsSpan)
         } content: {
             ToolBody(inv: inv, id: id, model: model, actions: actions, expansion: expansion, hooks: hooks,
                      jumpToEvent: jumpToEvent)

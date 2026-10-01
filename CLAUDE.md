@@ -608,10 +608,12 @@ context, hook, system prompt and system event, in order, with its time and cost.
   anywhere — including the debug snapshot tool below.
 
 **Features the old page had, kept on purpose** — the rebuild dropped them once and the user
-noticed; check them after any rework: the **Plans / Tasks / Questions** filter chips; on every row
-about a plan file (a Write/Edit under `Paths.plansRoot`, ExitPlanMode, plan-mode context)
-always-visible **Ask** (inline `PlanQAPanel`) and **Plans** (`actions.openPlan` → the Plans page,
-which also scrolls its list to the plan) links, or "plan file deleted"; **task spans**
+noticed; check them after any rework: the **Plans / Tasks / Questions** filter chips; every row
+about a plan file (a Write/Edit under `Paths.plansRoot`, ExitPlanMode, plan-mode context) is styled
+as a plan row, but the always-visible **Ask** (inline `PlanQAPanel`) and **Plans**
+(`actions.openPlan` → the Plans page, which also scrolls its list to the plan) links, or "plan
+file deleted", sit **only on a plan's Write rows** — plus, for a plan this session never writes,
+its first edit (`TranscriptModel.planLinkEvents`; by request — they used to be on every plan row); **task spans**
 (`TranscriptModel.taskSpans` — open on `TaskUpdate(in_progress)`, close on that task's
 completion or the next task's start): a coloured bar down the span, a "Started Task N" heading
 with its duration, `TaskCreate` rows showing the task's final status with a `#N` jump to its

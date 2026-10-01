@@ -187,6 +187,11 @@ public struct TranscriptModel: @unchecked Sendable {
     public private(set) var taskSpans: [TranscriptTaskSpan] = []
     /// The session's last TaskList / TodoWrite — the latest full picture of the task list.
     public private(set) var lastTaskListEvent: Int?
+    /// The events that carry a plan's Ask / Plans links: every Write of a plan file — and, for a
+    /// plan this session never writes (only edits or presents), its first such call, so it can
+    /// still be opened. Every plan row used to carry them (each edit, the approval, plan-mode
+    /// context); by request they now sit on the Write alone.
+    public private(set) var planLinkEvents: [Int: String] = [:]
     /// Where plan files live; a write there is a plan, not an ordinary edit.
     public let plansRoot: String
     /// Lowercased searchable text per event (capped per event).
@@ -220,6 +225,24 @@ public struct TranscriptModel: @unchecked Sendable {
         default:
             return nil
         }
+    }
+
+    /// The plan file whose links the event at `index` carries (see `planLinkEvents`).
+    public func planLinkPath(at index: Int) -> String? { planLinkEvents[index] }
+
+    private mutating func collectPlanLinks() {
+        var written = Set<String>()
+        var firstTouch: [String: Int] = [:]
+        planLinkEvents = [:]
+        for (i, e) in events.enumerated() {
+            guard case .tool(let inv) = e, let path = planPath(of: inv) else { continue }
+            if firstTouch[path] == nil { firstTouch[path] = i }
+            if inv.name == "Write" {
+                planLinkEvents[i] = path
+                written.insert(path)
+            }
+        }
+        for (path, touched) in firstTouch where !written.contains(path) { planLinkEvents[touched] = path }
     }
 
     public func isPlanFile(_ path: String) -> Bool {
@@ -324,6 +347,7 @@ public struct TranscriptModel: @unchecked Sendable {
         searchBlobs = events.map { Self.searchText($0) }
         collectAttachments()
         collectTasks()
+        collectPlanLinks()
 
         var turn = TranscriptTurn(index: 0, opener: .preamble, promptIndex: nil, label: "Session start")
         var turnFirstEvent = 0
