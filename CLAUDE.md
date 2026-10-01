@@ -164,9 +164,12 @@ then one automatic group per task, then Ungrouped — live status, shift/arrow r
   `AppState`, no writes.
 - **Interaction harness:** `--snapshot-sessions <project> --interaction-test [--out dir]`
   (`DevSessionsInteraction.swift`) drives the real list in an offscreen key window with synthetic
-  clicks and keys and asserts the outcome (33 checks: selection, ⌘/⇧-click, arrows, ⌘A, ⌫, Esc,
+  clicks and keys and asserts the outcome (54 checks: selection, ⌘/⇧-click, arrows, ⌘A, ⌫, Esc,
   subagents, inline create/rename, duplicate names, fold, + button, ⌥⌘F, ↓ from search, deep
-  links). Rows and headers report their frames through the DEBUG-only `debugFrame(_:)` hook —
+  links, every menu's items and actions, and drops). Menus are data (`SessionListMenus` →
+  `MenuEntry`, rendered by `MenuEntriesView` for both the "…" and right-click menus) and drops
+  resolve in `SessionListMenus.drop`, because a SwiftUI `Menu` can't be opened and a drag can't be
+  performed offscreen — only the AppKit popup and drag gesture themselves go unexercised. Rows and headers report their frames through the DEBUG-only `debugFrame(_:)` hook —
   SwiftUI builds no accessibility tree offscreen, so they can't be found by identifier. Events
   go to `window.sendEvent` (so `NSApp.currentEvent` is nil — don't read it in handlers). It
   caught three real bugs, now fixed and worth knowing as SwiftUI-on-macOS traps:

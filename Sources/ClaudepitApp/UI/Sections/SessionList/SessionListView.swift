@@ -6,6 +6,7 @@ import ClaudepitCore
 /// (the DEBUG `--snapshot-sessions` tool supplies stand-ins).
 struct SessionListActions {
     var openTranscript: (SessionSummary) -> Void = { NSWorkspace.shared.open($0.fileURL) }
+    var reveal: (SessionSummary) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0.fileURL]) }
     /// Resume in herdr, or focus its pane when already open. nil without herdr.
     var resume: ((SessionSummary) -> Void)?
     var openTask: ((String) -> Void)?
@@ -374,7 +375,7 @@ struct SessionListView: View {
             isExpanded: state.expanded.contains(s.id),
             onToggleExpand: { toggleExpanded(s.id) }
         ) {
-            sessionMenu(targets(for: s))
+            MenuEntriesView(entries: menus.session(menus.targets(for: s)))
         }
         .id(s.id)
         .contentShape(Rectangle())
@@ -383,9 +384,9 @@ struct SessionListView: View {
         .accessibilityIdentifier("session-row-\(s.id)")
         .debugFrame("session-row-\(s.id)")
         .accessibilityAddTraits(state.selection.contains(s.id) ? .isSelected : [])
-        .contextMenu { sessionMenu(targets(for: s)) }
-        .draggable(SessionDragPayload.encode(targets(for: s).map(\.id))) {
-            dragPreview(targets(for: s))
+        .contextMenu { MenuEntriesView(entries: menus.session(menus.targets(for: s))) }
+        .draggable(SessionDragPayload.encode(menus.targets(for: s).map(\.id))) {
+            dragPreview(menus.targets(for: s))
         }
         .modifier(DropTargetModifier(section: section, dropTarget: $dropTarget, onDrop: drop))
     }
@@ -431,10 +432,9 @@ struct SessionListView: View {
                 Text(name).font(.caption.weight(.semibold)).lineLimit(1)
                 countLabel(count)
             } menu: {
-                if let open = actions.openTask {
-                    Button { open(taskID) } label: { Label("Open Task", systemImage: "checklist") }
-                }
-                Button(section.collapsed ? "Expand" : "Collapse") { toggleTaskGroup(taskID) }
+                MenuEntriesView(entries: menus.taskGroup(taskID: taskID, collapsed: section.collapsed) {
+                    toggleTaskGroup(taskID)
+                })
             }
         case .ungrouped(let count):
             foldHeader(section, collapsed: section.collapsed,
@@ -443,7 +443,7 @@ struct SessionListView: View {
                 Text("Ungrouped").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 countLabel(count)
             } menu: {
-                Button(section.collapsed ? "Expand" : "Collapse") { prefs.ungroupedCollapsed.toggle() }
+                MenuEntriesView(entries: [.button(section.collapsed ? "Expand" : "Collapse") { prefs.ungroupedCollapsed.toggle() }])
             }
         }
     }
@@ -477,7 +477,7 @@ struct SessionListView: View {
             }
             countLabel(count)
         } menu: {
-            groupMenu(key: key, group: group, count: count, isFirst: isFirst, isLast: isLast)
+            MenuEntriesView(entries: menus.group(key: key, group: group, count: count, isFirst: isFirst, isLast: isLast))
         }
     }
 
@@ -602,92 +602,10 @@ struct SessionListView: View {
 
     // MARK: - Menus
 
-    @ViewBuilder private func sessionMenu(_ targets: [SessionSummary]) -> some View {
-        if targets.count == 1, let s = targets.first {
-            Button { actions.openTranscript(s) } label: { Label("Open Transcript", systemImage: Icon.openFile) }
-            Button { NSWorkspace.shared.activateFileViewerSelecting([s.fileURL]) } label: {
-                Label("Reveal in Finder", systemImage: Icon.revealInFinder)
-            }
-            Button { copy(s.fileURL.path) } label: { Label("Copy Path", systemImage: Icon.copyPath) }
-            Divider()
-            groupMenuItems(targets)
-            Divider()
-            if let resume = actions.resume {
-                let open = context.herdrStatus[s.id] != nil
-                Button { resume(s) } label: {
-                    Label(open ? "Focus in herdr" : "Resume in herdr", systemImage: open ? "terminal" : "play.circle")
-                }
-            }
-            if let ref = s.task, let openTask = actions.openTask {
-                Button { openTask(ref.taskID) } label: { Label("Open Task", systemImage: "checklist") }
-            }
-            Button("Copy Session ID") { copy(s.id) }
-            Button("Copy Resume Command") { copy("claude --resume \(s.id)") }
-            Divider()
-            trashItem(targets)
-        } else {
-            Text("\(targets.count) Sessions")
-            groupMenuItems(targets)
-            Divider()
-            Button("Copy Session IDs") { copy(targets.map(\.id).joined(separator: "\n")) }
-            Divider()
-            trashItem(targets)
-        }
-    }
-
-    @ViewBuilder private func groupMenuItems(_ targets: [SessionSummary]) -> some View {
-        let keys = Set(targets.map(\.groupKey))
-        let ids = targets.map(\.id)
-        if keys.count == 1, let key = keys.first {
-            let groups = context.groups[key]?.groups ?? []
-            Menu("Move to Group") {
-                ForEach(groups) { g in
-                    let allIn = targets.allSatisfy { $0.groupID == g.id }
-                    Button { actions.assign(ids, g.id, key) } label: {
-                        if allIn { Label(g.name, systemImage: "checkmark") } else { Text(g.name) }
-                    }
-                    .disabled(allIn)
-                }
-                if !groups.isEmpty { Divider() }
-                Button(targets.count == 1 ? "New Group…" : "New Group from Selection…") { startNewGroup(ids: ids) }
-            }
-        } else {
-            Text("Sessions from different projects can't share a group")
-        }
-        if targets.contains(where: { $0.groupID != nil }) {
-            Button(targets.count == 1 ? "Remove from Group" : "Remove from Groups") { actions.unassign(ids) }
-        }
-    }
-
-    @ViewBuilder private func trashItem(_ targets: [SessionSummary]) -> some View {
-        let movable = targets.filter { !context.status(of: $0).isLive }
-        if movable.isEmpty {
-            Text(targets.count == 1 ? "Can't Trash a Running Session" : "Can't Trash Running Sessions")
-        } else {
-            Button(role: .destructive) { state.pendingTrash = movable } label: {
-                Label(targets.count == 1 ? "Move to Trash…" : "Move \(movable.count) to Trash…", systemImage: Icon.delete)
-            }
-        }
-    }
-
-    @ViewBuilder private func groupMenu(key: String, group: SessionGroup, count: Int, isFirst: Bool, isLast: Bool) -> some View {
-        Button("Rename…") { state.renamingGroupID = group.id }
-        Menu("Color") {
-            ForEach(GroupColor.allCases, id: \.self) { c in
-                Button { actions.recolorGroup(group.id, c, key) } label: {
-                    if c == group.color { Label(c.rawValue.capitalized, systemImage: "checkmark") }
-                    else { Text(c.rawValue.capitalized) }
-                }
-            }
-        }
-        Button(group.isCollapsed ? "Expand" : "Collapse") { actions.setGroupCollapsed(group.id, !group.isCollapsed, key) }
-        Divider()
-        Button("Move Up") { actions.moveGroup(group.id, -1, key) }.disabled(isFirst)
-        Button("Move Down") { actions.moveGroup(group.id, 1, key) }.disabled(isLast)
-        Divider()
-        Button(role: .destructive) {
-            state.pendingGroupDelete = .init(key: key, group: group, count: count)
-        } label: { Label("Delete Group…", systemImage: Icon.delete) }
+    /// Menu contents and drop handling (`SessionListMenus`), over what this render shows.
+    private var menus: SessionListMenus {
+        SessionListMenus(sessions: sessions, context: context, state: state, actions: actions,
+                         startNewGroup: { startNewGroup(ids: $0) })
     }
 
     // MARK: - Selection
@@ -695,14 +613,6 @@ struct SessionListView: View {
     private var currentOrder: [String] {
         SessionListModel(sessions: sessions, context: context, prefs: prefs, query: state.query,
                          includeDate: state.timeFilter.includes, expanded: state.expanded).order
-    }
-
-    /// The sessions a menu or drag acts on: the whole selection when the row is part of it,
-    /// otherwise just the row (Finder's rule).
-    private func targets(for s: SessionSummary) -> [SessionSummary] {
-        let ids = state.selectedSessionIDs
-        guard ids.count > 1, ids.contains(s.id) else { return [s] }
-        return sessions.filter { state.selection.contains($0.id) }
     }
 
     /// A row click, with the modifiers SwiftUI matched on the click itself. Reading
@@ -865,16 +775,7 @@ struct SessionListView: View {
     }
 
     private func drop(_ items: [String], into section: SessionListModel.Section) -> Bool {
-        let ids = SessionDragPayload.decode(items)
-        guard !ids.isEmpty else { return false }
-        if let target = section.dropGroup {
-            actions.assign(ids, target.id, target.key)
-        } else if section.dropUngroups {
-            actions.unassign(ids)
-        } else {
-            return false
-        }
-        return true
+        SessionListMenus.drop(items, into: section, actions: actions)
     }
 
     // MARK: - Trash
@@ -924,11 +825,6 @@ struct SessionListView: View {
     private func clearFilters() {
         state.timeFilter = .all
         prefs.showTaskSessions = true
-    }
-
-    private func copy(_ s: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(s, forType: .string)
     }
 }
 

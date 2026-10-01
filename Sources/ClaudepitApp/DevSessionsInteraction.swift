@@ -132,6 +132,101 @@ enum DevSessionsInteraction {
             expect(model.groups[key]?.groups.first?.isCollapsed == false, "…and again unfolds it")
         }
 
+        // Menus: what each would show, and what each item does. (A SwiftUI Menu can't be opened
+        // offscreen; the "…" and right-click menus both render exactly these entries.)
+        var copied: [String] = []
+        var newGroupFor: [[String]] = []
+        func menus() -> SessionListMenus {
+            var m = SessionListMenus(sessions: model.sessions, context: model.context, state: state,
+                                     actions: model.actions, startNewGroup: { newGroupFor.append($0) })
+            m.copy = { copied.append($0) }
+            return m
+        }
+        func s(_ id: String) -> SessionSummary { model.sessions.first { $0.id == id }! }
+        func run(_ e: MenuEntry?) { if case let .button(_, _, _, _, _, action)? = e { action() }; d.settle(0.2) }
+        func enabled(_ e: MenuEntry?) -> Bool { if case let .button(_, _, _, on, _, _)? = e { return on }; return false }
+        func checked(_ e: MenuEntry?) -> Bool { if case let .button(_, _, c, _, _, _)? = e { return c }; return false }
+        func children(_ e: MenuEntry?) -> [MenuEntry] { if case let .submenu(_, c)? = e { return c }; return [] }
+        if let group = model.groups[key]?.groups.first {
+            state.select(o[0])
+            var menu = menus().session([s(o[0])])
+            let move = menu.entry("Move to Group")
+            expect(checked(children(move).entry(group.name)) && !enabled(children(move).entry(group.name)),
+                   "menu: the current group is checked and not offered again")
+            expect(menu.entry("Open Transcript") != nil && menu.entry("Remove from Group") != nil,
+                   "menu: a grouped session offers Open Transcript and Remove from Group")
+            run(menu.entry("Copy Session ID"))
+            expect(copied.last == o[0], "menu: Copy Session ID copies the id")
+            run(menu.entry("New Group…"))
+            expect(newGroupFor.last == [o[0]], "menu: New Group… opens the editor for this session")
+            run(menu.entry("Remove from Group"))
+            expect(s(o[0]).groupID == nil, "menu: Remove from Group ungroups it")
+            menu = menus().session([s(o[0])])
+            run(children(menu.entry("Move to Group")).entry(group.name))
+            expect(s(o[0]).groupID == group.id, "menu: Move to Group files it")
+            // A session that isn't running (the newest is often this very session, live).
+            if let quiet = o.first(where: { model.context.status(of: s($0)) == .none }) {
+                run(menus().session([s(quiet)]).entry("Move to Trash…"))
+                expect(state.pendingTrash?.map(\.id) == [quiet], "menu: Move to Trash… asks first")
+                state.pendingTrash = nil
+            }
+
+            model.herdr[o[2]] = "working"
+            d.settle(0.2)
+            menu = menus().session([s(o[2])])
+            expect(menu.entry("Move to Trash…") == nil && menu.entry("Can't Trash a Running Session") != nil,
+                   "menu: a running session can't be trashed, and says why")
+            model.herdr = [:]
+
+            state.selection = [o[0], o[3]]; state.primaryID = o[3]
+            let both = menus().targets(for: s(o[0]))
+            expect(Set(both.map(\.id)) == [o[0], o[3]], "menu: a row in the selection acts on the whole selection")
+            expect(menus().targets(for: s(o[5])).map(\.id) == [o[5]], "menu: a row outside it acts on just that row")
+            menu = menus().session(both)
+            let movable = both.filter { model.context.status(of: $0) == .none }.count
+            expect(menu.first?.title == "2 Sessions" && menu.entry("Move \(movable) to Trash…") != nil,
+                   "menu: a multi-selection says so, counting only sessions that can go")
+            run(children(menu.entry("Move to Group")).entry("New Group from Selection…"))
+            expect(Set(newGroupFor.last ?? []) == [o[0], o[3]], "menu: New Group from Selection takes them all")
+
+            let only = model.groups[key]!.groups.first!
+            let gmenu = menus().group(key: key, group: only, count: 1, isFirst: true, isLast: true)
+            expect(!enabled(gmenu.entry("Move Up")) && !enabled(gmenu.entry("Move Down")), "group menu: a lone group can't move")
+            expect(children(gmenu.entry("Color")).count == GroupColor.allCases.count &&
+                   checked(children(gmenu.entry("Color")).entry(only.color.rawValue.capitalized)),
+                   "group menu: every colour, the current one checked")
+            run(children(gmenu.entry("Color")).entry("Purple"))
+            expect(model.groups[key]?.groups.first?.color == .purple, "group menu: Color recolours")
+            run(gmenu.entry("Rename…"))
+            expect(state.renamingGroupID == only.id, "group menu: Rename… starts the inline rename")
+            d.key(.escape)
+            run(gmenu.entry("Delete Group…"))
+            expect(state.pendingGroupDelete?.group.id == only.id, "group menu: Delete Group… asks first")
+            state.pendingGroupDelete = nil
+
+            // Drops: the logic behind `.dropDestination` on each section.
+            model.prefs.tab = .groups
+            d.settle(0.3)
+            let sections = SessionListModel(sessions: model.sessions, context: model.context, prefs: model.prefs,
+                                            query: "", includeDate: { _ in true }, expanded: []).sections
+            let payload = [SessionDragPayload.encode([o[4]])]
+            if let target = sections.first(where: { $0.dropGroup?.id == only.id }) {
+                expect(SessionListMenus.drop(payload, into: target, actions: model.actions) && s(o[4]).groupID == only.id,
+                       "drop: onto a group files the dragged sessions")
+            } else { expect(false, "drop: the group section accepts drops") }
+            if let ungrouped = sections.first(where: { $0.dropUngroups }) {
+                expect(SessionListMenus.drop(payload, into: ungrouped, actions: model.actions) && s(o[4]).groupID == nil,
+                       "drop: onto Ungrouped takes them out of their group")
+                expect(!SessionListMenus.drop(["plain text"], into: ungrouped, actions: model.actions),
+                       "drop: plain text is refused")
+            } else { expect(false, "drop: Ungrouped accepts drops") }
+            var recent = model.prefs; recent.tab = .recent
+            if let day = SessionListModel(sessions: model.sessions, context: model.context, prefs: recent, query: "",
+                                          includeDate: { _ in true }, expanded: []).sections.first {
+                expect(!SessionListMenus.drop(payload, into: day, actions: model.actions), "drop: a date section takes none")
+            }
+        }
+
         // The + button opens the inline editor.
         d.click("new-group-button")
         expect(state.newGroup != nil, "+ opens a new-group editor")
@@ -174,6 +269,7 @@ private final class InteractionModel: ObservableObject {
     @Published var sessions: [SessionSummary]
     @Published var groups: [String: ProjectGroups] = [:]
     @Published var prefs = SessionListPrefs()
+    @Published var herdr: [String: String] = [:]
     let key: String
     var log: [String] = []
 
@@ -187,6 +283,7 @@ private final class InteractionModel: ObservableObject {
         var c = SessionListContext()
         c.projectKey = key
         c.groups = groups
+        c.herdrStatus = herdr
         return c
     }
 
@@ -220,6 +317,9 @@ private final class InteractionModel: ObservableObject {
         }
         a.setGroupCollapsed = { [unowned self] id, collapsed, _ in
             self.edit { pg in if let i = pg.groups.firstIndex(where: { $0.id == id }) { pg.groups[i].collapsed = collapsed } }
+        }
+        a.recolorGroup = { [unowned self] id, color, _ in
+            self.edit { pg in if let i = pg.groups.firstIndex(where: { $0.id == id }) { pg.groups[i].color = color } }
         }
         a.assign = { [unowned self] ids, gid, _ in self.edit { pg in for id in ids { pg.assignments[id] = gid } } }
         a.unassign = { [unowned self] ids in self.edit { pg in for id in ids { pg.assignments.removeValue(forKey: id) } } }
