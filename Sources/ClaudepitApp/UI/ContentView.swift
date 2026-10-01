@@ -62,12 +62,11 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             } else if app.selected == .memory {
+                // Memory owns its own multi-card layout (list card + graph/file card).
                 VStack(spacing: 12) {
                     PathBar(app: app)
-                    GlassCard {
-                        MemorySection(app: app)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
+                    MemorySection(app: app)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             } else if app.selected == .plugins {
                 VStack(spacing: 12) {

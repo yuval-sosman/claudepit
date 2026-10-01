@@ -375,7 +375,7 @@ are given paths to. A path whose artifact doesn't exist yet is listed in the "No
 instead of being emitted as a bare `key=`, which the agent would resolve against the cwd. Covered by
 `Tests/ClaudepitTests/TaskPromptChecks.swift`.
 
-**Deep links** — from a task's detail view, buttons jump to the produced artifact using the app's focus pattern (there is no `navHistory`/`NavEntry` — that was removed): `app.focusPlanPath = path; app.selected = .plans` and `app.focusSessionID = sid; app.selected = .sessions`. `PlansSection`/`SessionsSection` consume the focus fields via `.onChange`.
+**Deep links** — from a task's detail view, buttons jump to the produced artifact using the app's focus pattern (there is no `navHistory`/`NavEntry` — that was removed): `app.focusPlanPath = path; app.selected = .plans` and `app.focusSessionID = sid; app.selected = .sessions`. `DocumentsPage` (behind `PlansSection`)/`SessionsSection` consume the focus fields via `.onChange`.
 
 **Versions** — a task keeps a **main version** (its top-level `name`/`topic`/`description`/`requirements`/`priority`/`tags`/`dependsOn` fields — TaskRunner and all views read these directly) plus optional **suggestion versions** in `ProjectTask.suggestions: [TaskVersion]?` (both `topic` and `suggestions` are Optional for Codable back-compat — missing keys decode to `nil`). Suggestions are alternate proposals compared against main. Pure mutations live on `ProjectTask`: `applyField(_:from:)` (per-field Accept) and `promote(_:now:)` (Make main — keeps old main as a suggestion). **Suggestion** editing is **backlog-only**: once `status != .backlog` the versions UI and the New Draft button are locked (`TaskVersionsSheet` shows its lock banner, and the five suggestion mutators on `AppState` guard on `status == .backlog`). The **Edit** button — which edits main in place, writing straight through `TaskStore.update` with no `AppState` guard — is wider: `ProjectTask.allowsMainEdit` keeps it available in the **Backlog** and **Brainstorm** columns (`phase == nil || phase == .brainstorm`, excluding `.done`), minus `.running`/`.blocked`, because brainstorm is the phase whose job *is* refining the request, but a live herdr agent already holds the old description in its prompt and would never see the edit. UI: `NewTaskSheet` doubles as the create/edit/draft form (`editing`/`taskID`/`draftMode` params); `TaskVersionsSheet` is the two-pane compare/edit/accept/promote view (reuses `planDiffLines`/`PlanDiffView`). Per-project free-text **topics** persist in `TopicStore` at `~/.claude/claudepit-task-topics/<slug>.json` (seeds the New Task Topic combo box).
 
@@ -535,9 +535,9 @@ app.focusSessionID = sid;         app.selected = .sessions
 app.focusManagedConfigID = id;    app.selected = .appConfig
 ```
 
-The destination section consumes the field via `.onChange` and clears it: `PlansSection` reads `focusPlanPath` (`applyFocusPlanPath()`), `SessionsSection` reads `focusSessionID`, `AppConfigSection` reads `focusManagedConfigID` (`applyFocusManagedConfigID()`, which expands the matching card). To add a new deep link, set the relevant focus field and set `app.selected` — no history to push.
+The destination section consumes the field via `.onChange` and clears it: `DocumentsPage` reads `focusPlanPath` for Plans and `focusSpecPath` for Specs (`applyFocus()`), `SessionsSection` reads `focusSessionID`, `MemorySection` reads `focusMemoryFileID` (`applyFocus`, matching a bare filename to a nested file), `AppConfigSection` reads `focusManagedConfigID` (`applyFocusManagedConfigID()`, which expands the matching card). To add a new deep link, set the relevant focus field and set `app.selected` — no history to push.
 
-Key fields: `AppState.focusPlanPath`, `AppState.focusSessionID`, `AppState.focusManagedConfigID`. Consumers: `PlansSection.swift`, `SessionsSection.swift`, `AppConfigSection.swift`.
+Key fields: `AppState.focusPlanPath`, `AppState.focusSpecPath`, `AppState.focusSessionID`, `AppState.focusManagedConfigID`. Consumers: `DocumentsPage.swift`, `SessionsSection.swift`, `AppConfigSection.swift`.
 
 Home's quick actions and drill-downs use the same one-shot contract for *intents* rather than
 identities: `openNewTaskPanel` / `focusTaskStatusFilter` / `focusTaskPhase` (consumed by
@@ -755,3 +755,57 @@ subagents (calls, cost, hit rate, peak, misses) and tools (calls, failures, tota
 
 - Checks: `Tests/ClaudepitTests/ProjectUsageChecks.swift` (usage, scanner, report) and
   `SessionTranscriptChecks.swift` (one `.turnUsage` per call).
+
+## Plans, Specs and Memory Pages
+
+All three are the Sessions page's shape: a list card and a detail card (`MasterDetailLayout`),
+with the views taking plain data and closures and a container only wiring them to `AppState`.
+Shared list pieces (`PageListRow`, search field, pinned date headers, empty states, ↑/↓ stepping)
+live in `UI/PageList.swift`; the capsule header actions (`HeaderButton`, `HeaderMenu`,
+`HeaderFact`) in `UI/HeaderControls.swift`, used by the session page too. Date headers come from
+Core `DateSections`, shared with the Sessions list.
+
+- **Plans and Specs are one page over two sources.** `DocumentsPage` (`PlansSection` and
+  `SpecsSection` are one-line wrappers) hosts `DocumentListView` + `DocumentDetailView`; what
+  differs is wording, in `DocumentKind`, and which `AppState` fields each reads — key paths in
+  `DocumentsPage.Source`. Don't fork either view for one page: add a `DocumentKind` property.
+  A spec has no Trash (it belongs to its task) and has a **Task** button; a plan has Trash.
+- **Brainstorm in herdr** (header capsule + row menu, both pages): `AppState.openDocumentBrainstorm`
+  → `TaskRunner.openBrainstormAgent` opens Claude in a new herdr tab (cwd = the active project)
+  and **types** `DocumentBrainstorm.draft` — `@<path>` plus a closing "My ask: " — with `herdr
+  pane send-text`, which writes literal text and no Return, so nothing is sent until the person
+  finishes the ask. The draft must stay on **one line**: a newline would press Return. One agent
+  per document (`brainstorm-<plan|spec>-<tag>`); a second click focuses it, never re-types.
+  **Every herdr agent name goes through `Herdr.agentName`**: herdr 0.8.2 accepts only
+  `^[a-z][a-z0-9_-]{0,31}$` and otherwise fails `agent start` with `invalid_agent_name` *after* the
+  tab is open — the first Brainstorm build opened an empty pane for every plan (slugs run past
+  32 chars). Long names are cut and closed with a stable FNV hash; the memory-fix and merge agents,
+  which embed a folder name, go through it too. A launch whose agent never comes up closes its tab.
+  `send-text` prints nothing on success *or* failure (herdr 0.8.2) — only the exit code
+  differs, hence `Herdr.succeeds`.
+- **Documents are titled by name, not file** (`Core/MarkdownDocs.swift`). `MarkdownDoc.title` is
+  the name the source gives (a spec's task name) else the document's first `#` heading (plan mode
+  names files with random slugs) else the stem made readable; `tag` is the slug or task id;
+  `summary` is the first line of prose, skipping an opening `·` byline like a spec's
+  "Task `id` · date". `AppState.plans`/`specs` are the listings — each `MarkdownDocLoader`
+  re-reads only files whose size/date changed, on every watcher tick — and Home's Recent names
+  plans and specs by the same titles. Search reads every word.
+- **Memory lists every `.md` file, not just the linked ones.** `MemoryLoader` follows links from
+  MEMORY.md breadth-first to any depth; any other file in the directory is a node with `isOrphan`,
+  listed under "Not in MEMORY.md" and drawn dashed in the graph (Claude finds topics through the
+  index, so it may never read them). Nodes also carry `description` (frontmatter, else the first
+  prose line), `modifiedAt` and `body` — so search and "Ask about all memory" read no files.
+- **The graph web view only gets what changed.** The page re-renders on every `AppState` change;
+  `D3GraphView` used to re-send the graph each time and re-run the layout, so the graph jumped
+  whenever anything in the app moved. It now compares the JSON, keeps surviving nodes' positions
+  on a real change, lays out before showing, and fits itself above the legend.
+- **List rows are Buttons**, with the "…" menu beside them. Synthetic clicks reach a SwiftUI
+  `Button` but not a bare `TapGesture`/`onTapGesture` (verified with a probe), so a gesture row
+  passes in the app and silently fails in the harness.
+- **Memory's views** are `MemoryListView`/`MemoryFileView`/`MemoryGraphPanel`, wired by `MemorySection`.
+- **Debug tools:** `.build/debug/ClaudepitApp --snapshot-pages plans|specs|memory --out <dir>
+  [--project p] [--memory-dir d] [--plans-dir d] [--select slug|task-id|file-id|graph] [--query q] [--ask]
+  [--empty] [--log-open]` renders the page offscreen (the graph also to `graph.png`, via the web
+  view's own snapshot); add `--interaction-test` to drive the list with clicks and keys
+  (`DevPagesInteraction`). Focus its search with ⌥⌘F, never a click: a click on an `NSTextField`
+  enters AppKit's tracking loop and waits forever for a mouse-up from the real event queue.

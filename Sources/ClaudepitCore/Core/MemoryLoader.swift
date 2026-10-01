@@ -1,21 +1,41 @@
 import Foundation
 
 public struct MemoryNode: Identifiable, Equatable, Hashable, Sendable {
-    public let id: String       // filename, e.g. "hooks.md"
+    public let id: String       // path relative to the memory dir, e.g. "hooks.md"
     public let title: String    // link label from MEMORY.md, or filename stem
     public let url: URL
     public let isRoot: Bool
     /// The body's size, measured at load so a list can flag an over-limit file without reading
     /// it. Nil when the file couldn't be read.
     public let size: MemoryReadLimit.Size?
+    /// The frontmatter's `description`, else the body's first line of prose.
+    public let description: String?
+    /// The file's modification date on disk.
+    public let modifiedAt: Date?
+    /// The file sits in the memory directory but nothing links to it — not MEMORY.md, not another
+    /// topic file. Claude finds topic files through the index, so it may never read this one.
+    public let isOrphan: Bool
+    /// The body after the frontmatter block — for search, and for asking about every file at once.
+    public let body: String
 
     public init(id: String, title: String, url: URL, isRoot: Bool = false,
-                size: MemoryReadLimit.Size? = nil) {
+                size: MemoryReadLimit.Size? = nil, description: String? = nil,
+                modifiedAt: Date? = nil, isOrphan: Bool = false, body: String = "") {
         self.id = id; self.title = title; self.url = url; self.isRoot = isRoot; self.size = size
+        self.description = description; self.modifiedAt = modifiedAt; self.isOrphan = isOrphan
+        self.body = body
     }
 
     /// Claude stops reading this file before its end (see `MemoryReadLimit`).
     public var exceedsReadLimit: Bool { size?.exceedsLimit ?? false }
+
+    /// The name a list shows: the index is always "MEMORY.md".
+    public var displayTitle: String { isRoot ? "MEMORY.md" : title }
+
+    /// Every word of `query` appears in the title, the filename, the description or the body.
+    public func matches(_ query: String) -> Bool {
+        SearchText.matches([title, id, description ?? "", body], query: query)
+    }
 }
 
 public struct MemoryEdge: Sendable, Equatable {
@@ -40,53 +60,82 @@ public struct MemoryLoader {
     }
 
     /// `dir` is injectable so checks run against a temp directory, never the real ~/.claude.
+    ///
+    /// Nodes are MEMORY.md and everything its links reach (followed to any depth), plus — flagged
+    /// `isOrphan` — every other `.md` file in the directory. A topic keeps the label MEMORY.md
+    /// gives it; a file only other topics link to is titled by its filename.
     public static func load(dir: URL) -> MemoryGraph {
-        let rootURL = dir.appending(path: "MEMORY.md")
-        guard let rootText = try? String(contentsOf: rootURL, encoding: .utf8) else {
-            return .empty
-        }
-
         let rootID = "MEMORY.md"
-        let rootNode = MemoryNode(id: rootID, title: "MEMORY.md", url: rootURL, isRoot: true)
-        var nodes: [String: MemoryNode] = [rootID: rootNode]
+        let rootURL = dir.appending(path: rootID)
+        var nodes: [String: MemoryNode] = [:]
         var edges: [MemoryEdge] = []
+        var reachable: Set<String> = []
+        func link(_ from: String, _ to: String) {
+            if !edges.contains(where: { $0.from == from && $0.to == to }) { edges.append(MemoryEdge(from: from, to: to)) }
+        }
+        func stem(_ id: String) -> String { URL(fileURLWithPath: id).deletingPathExtension().lastPathComponent }
 
-        // Parse links from MEMORY.md → topic nodes + root edges
-        for (label, filename) in extractLinks(from: rootText) {
-            let nodeID = filename
-            let url = dir.appending(path: filename)
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            if nodes[nodeID] == nil {
-                nodes[nodeID] = MemoryNode(id: nodeID, title: label, url: url)
+        // Breadth-first from the index, so every link MEMORY.md makes is labelled before a topic's
+        // own links can name the same file by its stem.
+        if let rootText = try? String(contentsOf: rootURL, encoding: .utf8) {
+            nodes[rootID] = MemoryNode(id: rootID, title: rootID, url: rootURL, isRoot: true)
+            reachable.insert(rootID)
+            var queue: [(id: String, text: String)] = [(rootID, rootText)]
+            while !queue.isEmpty {
+                let (from, text) = queue.removeFirst()
+                for (label, target) in extractLinks(from: text) where target != rootID && target != from {
+                    let url = dir.appending(path: target)
+                    guard FileManager.default.fileExists(atPath: url.path) else { continue }
+                    if nodes[target] == nil {
+                        nodes[target] = MemoryNode(id: target, title: from == rootID ? label : stem(target), url: url)
+                        reachable.insert(target)
+                        if let t = try? String(contentsOf: url, encoding: .utf8) { queue.append((target, t)) }
+                    }
+                    link(from, target)
+                }
             }
-            edges.append(MemoryEdge(from: rootID, to: nodeID))
         }
 
-        // Parse cross-links within each topic file
-        for (nodeID, node) in nodes where !node.isRoot {
-            guard let text = try? String(contentsOf: node.url, encoding: .utf8) else { continue }
-            for (_, filename) in extractLinks(from: text) {
-                guard filename != rootID else { continue }
-                let url = dir.appending(path: filename)
-                guard FileManager.default.fileExists(atPath: url.path) else { continue }
-                if nodes[filename] == nil {
-                    let stem = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
-                    nodes[filename] = MemoryNode(id: filename, title: stem, url: url)
-                }
-                let alreadyExists = edges.contains { $0.from == nodeID && $0.to == filename }
-                if !alreadyExists {
-                    edges.append(MemoryEdge(from: nodeID, to: filename))
-                }
+        // Files no link from the index reaches. Their own links still draw, so an orphan that
+        // points at a topic shows where it belongs.
+        let orphans = markdownFiles(in: dir).filter { nodes[$0] == nil && $0 != rootID }
+        for id in orphans { nodes[id] = MemoryNode(id: id, title: stem(id), url: dir.appending(path: id)) }
+        for id in orphans {
+            guard let text = try? String(contentsOf: dir.appending(path: id), encoding: .utf8) else { continue }
+            for (_, target) in extractLinks(from: text) where target != rootID && target != id && nodes[target] != nil {
+                link(id, target)
             }
         }
 
         let measured = nodes.values.map { node -> MemoryNode in
-            guard let raw = try? String(contentsOf: node.url, encoding: .utf8) else { return node }
-            let body = MemoryFrontmatter.parse(from: raw).body
+            let modified = (try? FileManager.default.attributesOfItem(atPath: node.url.path))?[.modificationDate] as? Date
+            let orphan = !reachable.contains(node.id)
+            guard let raw = try? String(contentsOf: node.url, encoding: .utf8) else {
+                return MemoryNode(id: node.id, title: node.title, url: node.url, isRoot: node.isRoot,
+                                  modifiedAt: modified, isOrphan: orphan)
+            }
+            let (frontmatter, body) = MemoryFrontmatter.parse(from: raw)
+            let described = frontmatter?.description.flatMap { $0.isEmpty ? nil : $0 }
             return MemoryNode(id: node.id, title: node.title, url: node.url, isRoot: node.isRoot,
-                              size: MemoryReadLimit.size(of: body))
+                              size: MemoryReadLimit.size(of: body),
+                              description: node.isRoot ? nil : (described ?? MarkdownOutline.summary(of: body, limit: 160)),
+                              modifiedAt: modified, isOrphan: orphan, body: body)
         }
         return MemoryGraph(nodes: measured, edges: edges)
+    }
+
+    /// Every `.md` file under `dir`, as a path relative to it (hidden files skipped).
+    private static func markdownFiles(in dir: URL) -> [String] {
+        let base = dir.standardizedFileURL.path
+        guard let walker = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil,
+                                                          options: [.skipsHiddenFiles]) else { return [] }
+        var out: [String] = []
+        for case let url as URL in walker where url.pathExtension == "md" {
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(base + "/") else { continue }
+            out.append(String(path.dropFirst(base.count + 1)))
+        }
+        return out.sorted()
     }
 
     private static func extractLinks(from text: String) -> [(label: String, filename: String)] {

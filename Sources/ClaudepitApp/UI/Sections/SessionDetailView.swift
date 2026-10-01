@@ -435,31 +435,6 @@ struct SessionHeader<Actions: View>: View {
     }
 }
 
-/// A capsule action in the session header.
-private struct HeaderButton: View {
-    let title: String
-    let icon: String
-    let help: String
-    let action: () -> Void
-    @State private var hover = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 10))
-                Text(title)
-            }
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8).padding(.vertical, 3.5)
-            .background(Color.white.opacity(hover ? 0.10 : 0.06), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .onHover { hover = $0 }
-        .help(help)
-    }
-}
-
 /// How full the context window was on the last request: a slim bar and `152k / 1M`.
 struct ContextGauge: View {
     let used: Int

@@ -39,6 +39,8 @@ let groups: [(String, () -> [Bool])] = [
     ("ProjectUsage", projectUsageChecks),
     ("MemoryLog", memoryLogChecks),
     ("MemoryReadLimit", memoryReadLimitChecks),
+    ("MemoryLoader", memoryLoaderChecks),
+    ("MarkdownDoc", markdownDocChecks),
     ("AppConfigStore", appConfigStoreChecks),
     ("HookRegistration", hookRegistrationChecks),
     ("HerdrPath", herdrPathChecks),

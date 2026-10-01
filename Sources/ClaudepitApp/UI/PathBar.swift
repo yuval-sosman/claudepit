@@ -159,6 +159,8 @@ struct PathBar: View {
                 .map(truncate)
         case .plans:
             return app.selectedPlanName.map(truncate)
+        case .specs:
+            return app.selectedSpecName.map(truncate)
         case .memory:
             return app.selectedMemoryTitle.map(truncate)
         default:

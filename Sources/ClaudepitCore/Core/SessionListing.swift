@@ -65,50 +65,11 @@ public enum SessionListing {
     }
 
     /// Today · Yesterday · Previous 7 Days · Previous 30 Days, then one section per month
-    /// ("August", or "August 2025" outside the current year). Sessions keep their incoming order
-    /// within a section; sections run newest first.
+    /// (`DateSections`, shared with the Plans and Memory lists). Sessions run newest first.
     public static func dateSections(_ sessions: [SessionSummary], now: Date,
                                     calendar: Calendar = .current) -> [DateSection] {
-        var order: [String] = []
-        var byID: [String: DateSection] = [:]
-        let today = calendar.startOfDay(for: now)
-        let bounds = [1, 7, 30].map { calendar.date(byAdding: .day, value: -$0, to: today)! }
-        for s in sessions.sorted(by: { $0.modifiedAt > $1.modifiedAt }) {
-            let id = bucketID(for: s.modifiedAt, today: today, bounds: bounds, calendar: calendar)
-            if byID[id] == nil {
-                order.append(id)
-                byID[id] = DateSection(id: id, title: title(of: id, date: s.modifiedAt, now: now, calendar: calendar),
-                                       sessions: [])
-            }
-            byID[id]!.sessions.append(s)
-        }
-        return order.compactMap { byID[$0] }
-    }
-
-    /// Cheap per session; the (formatter-built) title is made once per section.
-    private static func bucketID(for date: Date, today: Date, bounds: [Date], calendar: Calendar) -> String {
-        if date >= today { return "today" }
-        if date >= bounds[0] { return "yesterday" }
-        if date >= bounds[1] { return "week" }
-        if date >= bounds[2] { return "month" }
-        let c = calendar.dateComponents([.year, .month], from: date)
-        return "m\(c.year ?? 0)-\(c.month ?? 0)"
-    }
-
-    private static func title(of id: String, date: Date, now: Date, calendar: Calendar) -> String {
-        switch id {
-        case "today": return "Today"
-        case "yesterday": return "Yesterday"
-        case "week": return "Previous 7 Days"
-        case "month": return "Previous 30 Days"
-        default:
-            let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
-            let f = DateFormatter()
-            f.calendar = calendar
-            f.locale = calendar.locale ?? .current
-            f.timeZone = calendar.timeZone
-            f.setLocalizedDateFormatFromTemplate(sameYear ? "MMMM" : "MMMM y")
-            return f.string(from: date)
+        DateSections.group(sessions, date: \.modifiedAt, now: now, calendar: calendar).map {
+            DateSection(id: $0.id, title: $0.title, sessions: $0.items)
         }
     }
 
