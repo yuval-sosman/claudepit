@@ -9,7 +9,7 @@ import Foundation
 /// on your reply in Herdr". The rows are told apart by their subtitles (the task's phase reason vs
 /// the agent's pane) and by where they click through to, see `focusPane`.
 public struct WorkItem: Identifiable, Equatable {
-    public enum Target: Equatable { case task(String), worktree(String), session(String), none }
+    public enum Target: Equatable { case task(String), worktree(String), session(String), loop(String), none }
     public enum Kind: Equatable { case attentionTask, dirtyWorktree, agent }
 
     public let id: String
@@ -85,6 +85,13 @@ public func buildWorkstream(attention: [AttentionItem],
         case .worktree(let name):
             kind = .dirtyWorktree
             target = .worktree(name)
+        case .loop(let id):
+            target = .loop(id)
+            // A loop's session open in herdr: its agent row is the pane a click should answer in.
+            if let pane = item.paneID, let agent = agents.first(where: { $0.id == pane && !matched.contains($0.id) }) {
+                matched.insert(agent.id)
+                backing = agent
+            }
         }
 
         // Its agent went back to work, so the task is not waiting on anyone — drop the attention

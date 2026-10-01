@@ -21,7 +21,7 @@ struct ContentView: View {
 
     private var content: some View {
         HStack(spacing: 28) {
-            GlassSidebar(selected: $app.selected)
+            GlassSidebar(selected: $app.selected, badges: app.loopSidebarBadge.map { [.loops: $0] } ?? [:])
             if app.selected == .home {
                 VStack(spacing: 12) {
                     PathBar(app: app)
@@ -66,6 +66,20 @@ struct ContentView: View {
                 VStack(spacing: 12) {
                     PathBar(app: app)
                     MemorySection(app: app)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            } else if app.selected == .worktrees {
+                // Worktrees owns its own multi-card layout (list card + detail card).
+                VStack(spacing: 12) {
+                    PathBar(app: app)
+                    WorktreesSection(app: app)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            } else if app.selected == .loops {
+                // Loops owns its own multi-card layout (list card + loop / overview card).
+                VStack(spacing: 12) {
+                    PathBar(app: app)
+                    LoopsSection(app: app)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             } else if app.selected == .plugins {
@@ -113,8 +127,8 @@ struct ContentView: View {
         case .agents:   AgentsSection(app: app)
         case .rules:    RulesSection(app: app)
         case .hooks:    HooksSection(app: app)
-        case .loops:    LoopsSection(app: app)
-        case .worktrees: WorktreesSection(app: app)
+        case .loops:    EmptyView()
+        case .worktrees: EmptyView()
         case .tasks:    TasksSection(app: app)
         case .plugins:  PluginsSection(app: app)
         case .settings: SettingsSection(app: app)

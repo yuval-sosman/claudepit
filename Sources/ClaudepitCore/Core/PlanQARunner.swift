@@ -15,10 +15,13 @@ public enum PlanQAError: Error {
 }
 
 public struct PlanQARunner {
-    public static func buildImprovementPrompt(planContent: String, suggestion: String) -> String {
+    /// `subject` names what is being rewritten ("implementation plan", "loop.md — the instructions
+    /// a bare /loop runs at every iteration").
+    public static func buildImprovementPrompt(planContent: String, suggestion: String,
+                                              subject: String = "implementation plan") -> String {
         return """
-        You are rewriting an implementation plan based on a suggested improvement.
-        Return ONLY the full rewritten plan in markdown — no preamble, no explanation, no code fences.
+        You are rewriting a \(subject) based on a suggested improvement.
+        Return ONLY the full rewritten text in markdown — no preamble, no explanation, no code fences.
 
         <original_plan>
         \(planContent)
@@ -38,15 +41,19 @@ public struct PlanQARunner {
         planContent: String,
         history: [QAMessage],
         question: String,
-        contentLabel: String = "plan"
+        contentLabel: String = "plan",
+        about: String? = nil,
+        suggestsImprovements: Bool? = nil
     ) -> String {
         var parts = [
             "Answer the user's questions about the \(contentLabel) below, concisely. The working directory is "
                 + "the project it belongs to, so when an answer depends on code the \(contentLabel) refers to, "
                 + "read that code rather than guessing.",
         ]
-        if contentLabel == "plan" {
-            parts.append("If your response includes a concrete suggestion that would improve the plan, append the exact token [[SUGGEST_IMPROVEMENT]] on its own line at the very end of your response. Do not include it otherwise.")
+        if let about { parts.append(about) }
+        // nil: the old rule — only a plan was offered rewrites.
+        if suggestsImprovements ?? (contentLabel == "plan") {
+            parts.append("If your response includes a concrete suggestion that would improve the \(contentLabel), append the exact token [[SUGGEST_IMPROVEMENT]] on its own line at the very end of your response. Do not include it otherwise.")
         }
         parts += [
             "",

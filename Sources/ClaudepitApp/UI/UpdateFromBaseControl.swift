@@ -5,8 +5,9 @@ import AppKit
 #endif
 
 /// The ONE place that renders "Update from <base>", the in-progress-merge block and the
-/// outcome of the last run — hosted by both `WorktreesSection`'s WORKTREE STATE block and
-/// `TaskDetailView`'s WORKTREE row, so the two can never disagree.
+/// outcome of the last run — hosted by both the Worktrees page's "Base branch" section
+/// (`WorktreeDetailView`'s `baseSync` slot) and `TaskDetailView`'s WORKTREE row, so the two can
+/// never disagree.
 ///
 /// Three parts, in this order: (a) the action row, (b) the merge-state block, driven ENTIRELY
 /// by what git says (`wt.mergeInProgress`) and never by the transient outcome, (c) the outcome
@@ -17,7 +18,7 @@ struct UpdateFromBaseControl: View {
     /// driven by these fields, so a captured stale value would freeze the conflict UI.
     let wt: WorktreeInfo
     /// Disables the button while the host is running another git mutation of its own
-    /// (`WorktreeCard` passes its `cleanupBusy`) — a transient busy flag with nothing to
+    /// (the Worktrees page passes its unlock/remove in flight) — a transient busy flag with nothing to
     /// explain. A *reason* the user should see goes through `disabledReason` instead, which is
     /// how BOTH hosts pass the live-agent case.
     var externallyDisabled: Bool = false
@@ -193,7 +194,8 @@ struct UpdateFromBaseControl: View {
                 Text("Merge resolved — commit it to finish")
                     .font(.caption).foregroundStyle(.orange)
             } else {
-                Text("⚠ Conflicted (\(wt.conflictedFiles.count) file\(wt.conflictedFiles.count == 1 ? "" : "s"))")
+                Label("Conflicted (\(wt.conflictedFiles.count) file\(wt.conflictedFiles.count == 1 ? "" : "s"))",
+                      systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).fontWeight(.semibold).foregroundStyle(.orange)
                 ForEach(wt.conflictedFiles, id: \.self) { p in
                     Text(p).font(.caption2.monospaced()).foregroundStyle(.secondary)
@@ -357,21 +359,11 @@ struct UpdateFromBaseControl: View {
         showReviewChanges = true
     }
 
-    /// Matches `WorktreesSection.pillButton`'s shape. A private copy rather than a shared
-    /// helper: that one bakes in `.disabled(cleanupBusy)`, and sharing would either leak that
-    /// flag here or drop it from Unlock/Remove. Two ~12-line builders is the cheaper correctness.
+    /// The Worktrees page's `PillButton`, so Unlock/Remove and these read as one family. It takes
+    /// its `disabled` per call — the old shared helper baked in the card's busy flag, which is
+    /// why this control once kept a private copy.
     private func pill(_ title: String, icon: String, disabled: Bool,
                       action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 10, weight: .medium))
-                Text(title).font(.caption).fontWeight(.medium).fixedSize()
-            }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 7))
-            .foregroundStyle(.blue)
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
+        PillButton(title: title, icon: icon, disabled: disabled, action: action)
     }
 }

@@ -7,13 +7,36 @@ public enum AttentionSeverity: Int, Comparable {
 }
 
 public struct AttentionItem: Identifiable, Equatable {
-    public enum Target: Equatable { case task(String), worktree(String) }
-    public let id: String            // "task:<id>" / "worktree:<name>"
+    public enum Target: Equatable { case task(String), worktree(String), loop(String) }
+    public let id: String            // "task:<id>" / "worktree:<name>" / "loop:<id>"
     public let target: Target
     public let title: String
     public let reason: String
     public let severity: AttentionSeverity
     public let sortKey: TimeInterval // updatedAt for tasks; 0 for worktrees — tiebreak, higher first
+    /// The herdr pane the need sits in, when the item knows it (a loop's session) — matched to its
+    /// live agent row the way a task's agent is.
+    public let paneID: String?
+
+    public init(id: String, target: Target, title: String, reason: String, severity: AttentionSeverity,
+                sortKey: TimeInterval, paneID: String? = nil) {
+        self.id = id; self.target = target; self.title = title; self.reason = reason
+        self.severity = severity; self.sortKey = sortKey; self.paneID = paneID
+    }
+}
+
+/// A loop whose session stopped on a permission prompt or a question: nothing fires until someone
+/// answers — the silent way an unattended loop dies, so it belongs on Home and in the menu bar.
+public struct LoopAttention: Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let reason: String
+    public let paneID: String?
+    public let since: Date
+
+    public init(id: String, title: String, reason: String, paneID: String?, since: Date) {
+        self.id = id; self.title = title; self.reason = reason; self.paneID = paneID; self.since = since
+    }
 }
 
 /// Pure builder: which tasks/worktrees need attention, sorted severity-first then updatedAt-desc.
@@ -21,7 +44,8 @@ public struct AttentionItem: Identifiable, Equatable {
 /// tasks and clean worktrees are excluded. An `.awaitingReview` phase with nothing left to decide
 /// (`phaseNeedsReview == false`) drops out too — it finished, it isn't asking for anything.
 /// Caller takes `.prefix(6)` for display.
-public func buildAttention(tasks: [ProjectTask], worktrees: [WorktreeInfo]) -> [AttentionItem] {
+public func buildAttention(tasks: [ProjectTask], worktrees: [WorktreeInfo],
+                           loops: [LoopAttention] = []) -> [AttentionItem] {
     var items: [AttentionItem] = []
 
     for t in tasks {
@@ -42,6 +66,11 @@ public func buildAttention(tasks: [ProjectTask], worktrees: [WorktreeInfo]) -> [
         items.append(AttentionItem(id: "task:\(t.id)", target: .task(t.id),
                                    title: t.name, reason: reason,
                                    severity: severity, sortKey: t.updatedAt))
+    }
+
+    for l in loops {
+        items.append(AttentionItem(id: "loop:\(l.id)", target: .loop(l.id), title: l.title, reason: l.reason,
+                                   severity: .blocked, sortKey: l.since.timeIntervalSince1970, paneID: l.paneID))
     }
 
     for w in worktrees where w.dirtyCount > 0 {

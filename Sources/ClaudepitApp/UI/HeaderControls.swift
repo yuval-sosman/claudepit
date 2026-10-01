@@ -8,6 +8,8 @@ struct HeaderButton: View {
     let icon: String
     let help: String
     var isOn: Bool = false
+    /// Icon only — for a header too narrow for its labels. The title moves into the tooltip.
+    var compact: Bool = false
     let action: () -> Void
     @State private var hover = false
 
@@ -15,7 +17,7 @@ struct HeaderButton: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 10))
-                Text(title)
+                if !compact { Text(title).lineLimit(1) }
             }
             .font(.system(size: 11))
             .foregroundStyle(isOn ? Color.accentColor : .secondary)
@@ -25,7 +27,7 @@ struct HeaderButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(help)
+        .help(compact ? "\(title) — \(help)" : help)
     }
 }
 

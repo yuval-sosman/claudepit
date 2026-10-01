@@ -235,7 +235,11 @@ struct SessionDetailView: View {
                 app.focusPlanPath = path
                 app.selected = .plans
             },
-            cwd: qaWorkingDirectory)
+            cwd: qaWorkingDirectory,
+            openLoop: { [app, summary] taskID in
+                app.focusLoop = LoopFocus(sessionID: summary.id, taskID: taskID)
+                app.selected = .loops
+            })
     }
 
     // MARK: Summary panel

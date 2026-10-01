@@ -436,9 +436,11 @@ public struct SessionTranscript: @unchecked Sendable {
         case "stop_hook_summary":
             ingestStopHookSummary(obj, time: time)
         case "scheduled_task_fire":
-            append(.notice(TranscriptNotice(kind: .scheduledWakeup, time: time,
-                                            title: content.isEmpty ? "Scheduled wakeup" : content,
-                                            detail: obj["prompt"] as? String, level: level)))
+            var n = TranscriptNotice(kind: .scheduledWakeup, time: time,
+                                     title: content.isEmpty ? "Scheduled wakeup" : content,
+                                     detail: obj["prompt"] as? String, level: level)
+            n.loopTaskID = obj["taskId"] as? String
+            append(.notice(n))
         case "informational":
             guard !content.isEmpty else { return }
             append(.notice(TranscriptNotice(kind: .informational, time: time, title: content, level: level)))

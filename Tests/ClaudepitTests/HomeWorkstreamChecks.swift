@@ -17,6 +17,17 @@ func homeWorkstreamChecks() -> [Bool] {
         ProjectTask(id: id, name: name, phase: phase, status: .running)
     }
 
+    results.append(check("a blocked loop and its herdr agent are one need: the loop row focuses the pane") {
+        let item = AttentionItem(id: "loop:s1#a", target: .loop("s1#a"), title: "Watch the deploy",
+                                 reason: "Loop waiting for you", severity: .blocked, sortKey: 0, paneID: "w3:p1Q")
+        let out = buildWorkstream(attention: [item],
+                                  agents: [agent("w3:p1Q", "loop-1c6a3144", "blocked", target: .none)], tasks: [])
+        try expectEqual(out.map(\.id), ["loop:s1#a", "agent:w3:p1Q"], "the loop row, then its agent")
+        try expectEqual(out.filter(\.needsAttention).count, 1, "one need, not two")
+        try expectEqual(out.first?.focusPane, "w3:p1Q", "a click answers it in herdr")
+        try expectEqual(out.first?.target, .loop("s1#a"), "or opens the loop in the app")
+    })
+
     results.append(check("an agent row carries its pane id; an unbacked attention row carries none") {
         let out = buildWorkstream(
             attention: [attention("task:t1", "test", "blocked", .blocked, target: .task("t1"))],

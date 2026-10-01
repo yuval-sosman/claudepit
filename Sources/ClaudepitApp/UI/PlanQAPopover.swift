@@ -23,6 +23,12 @@ struct PlanQAPanel: View {
     var growsWithContent: Bool = false
     /// Put the cursor in the question field as the panel opens.
     var focusOnAppear: Bool = false
+    /// One sentence telling Claude what the content is, when its label alone doesn't (loop.md).
+    var about: String? = nil
+    /// Ask Claude to flag answers that suggest a rewrite. nil: only for a plan, as before.
+    var suggestsRewrites: Bool? = nil
+    /// What a rewrite rewrites, for the improvement prompt. nil: an implementation plan.
+    var rewriteSubject: String? = nil
 
     @State private var messages: [QAMessage] = []
     @State private var inputText: String = ""
@@ -235,7 +241,9 @@ struct PlanQAPanel: View {
             planContent: planContent,
             history: Array(messages.dropLast()),
             question: question,
-            contentLabel: contentLabel ?? (showImprovement ? "plan" : "memory file")
+            contentLabel: contentLabel ?? (showImprovement ? "plan" : "memory file"),
+            about: about,
+            suggestsImprovements: suggestsRewrites
         )
         let answerIndex = messages.count
 
@@ -267,7 +275,8 @@ struct PlanQAPanel: View {
         applyingIndex = index
         errorMessage = nil
 
-        let prompt = PlanQARunner.buildImprovementPrompt(planContent: planContent, suggestion: suggestion)
+        let prompt = PlanQARunner.buildImprovementPrompt(planContent: planContent, suggestion: suggestion,
+                                                         subject: rewriteSubject ?? "implementation plan")
 
         Task {
             do {

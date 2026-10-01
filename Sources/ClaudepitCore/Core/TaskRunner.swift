@@ -443,15 +443,36 @@ public actor TaskRunner {
         return await launchHandoffAgent(name: name, cwd: cwd, tabLabel: tabLabel, prompt: draft, submit: false)
     }
 
+    /// Start a new interactive Claude session in its own herdr tab and send it `message` — how the
+    /// Loops page starts a loop. `/loop` is session-scoped, so the loop lives exactly as long as
+    /// this session; `claudeArgs` carries the session's id (`--session-id`, fixed by the caller so
+    /// the page finds its transcript), name and permission mode. A second click while the agent
+    /// is live focuses it rather than sending the loop twice.
+    @discardableResult
+    public func openLoopSession(name: String, cwd: URL, tabLabel: String, claudeArgs: [String],
+                                message: String) async -> Bool {
+        guard !launching.contains(name) else { return false }
+        launching.insert(name)
+        defer { launching.remove(name) }
+        if await agentReady(name) {
+            await HerdrFocus.focus(agentName: name, tabID: nil, cwd: cwd)
+            return true
+        }
+        await releaseAgentName(name)
+        return await launchHandoffAgent(name: name, cwd: cwd, tabLabel: tabLabel, prompt: message,
+                                        claudeArgs: claudeArgs)
+    }
+
     /// Start `name` in a fresh, focused tab and hand it `prompt` — sent (`agent prompt`), or with
     /// `submit: false` only typed (`pane send-text`, no Return) for the person to finish. The
-    /// shared tail of every one-off agent (merge, memory fix, brainstorm); the caller holds
+    /// shared tail of every one-off agent (merge, memory fix, brainstorm, loop); the caller holds
     /// `launching` and has already released any stale agent by that name.
     ///
     /// Its OWN tab. Never `openPhaseTab`: that closes the task's stored tab and overwrites
     /// `worktree.paneID`/`tabID`, which is the bookkeeping every phase focus depends on.
     private func launchHandoffAgent(name: String, cwd: URL, tabLabel: String, prompt: String,
-                                    submit: Bool = true) async -> Bool {
+                                    submit: Bool = true,
+                                    claudeArgs: [String] = ["--permission-mode", "auto"]) async -> Bool {
         guard let fresh = await Herdr.tabCreate(cwd: cwd, label: tabLabel) else { return false }
         // User-initiated, so focus it (unlike an armed auto-run, which must not steal focus).
         await herdr(["tab", "focus", fresh.tabID], cwd: nil)
@@ -460,7 +481,7 @@ public actor TaskRunner {
         // until it is. Same 5×2s ceiling as startAgent.
         for attempt in 0..<5 {
             await herdr(["agent", "start", name, "--kind", "claude", "--pane", pane,
-                         "--timeout", "120000", "--", "--permission-mode", "auto"],
+                         "--timeout", "120000", "--"] + claudeArgs,
                         cwd: cwd, timeout: Self.ceiling(forHerdrTimeoutMS: "120000"))
             if await agentReady(name) { break }
             if attempt < 4 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
@@ -472,8 +493,10 @@ public actor TaskRunner {
             return false
         }
         if submit {
-            await herdr(["agent", "prompt", name, prompt], cwd: cwd)
-            return true
+            // A refused prompt (`agent_blocked`, …) exits non-zero; say so rather than report a
+            // launch whose message never arrived.
+            return await Herdr.succeeds(["agent", "prompt", name, prompt], cwd: cwd,
+                                        timeout: Self.ceiling(forHerdrTimeoutMS: "60000"))
         }
         return await Herdr.succeeds(["pane", "send-text", pane, prompt], cwd: cwd)
     }

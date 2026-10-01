@@ -13,7 +13,7 @@ struct HomeSection: View {
     @State private var showAllAttention = false
 
     private var attention: [AttentionItem] {
-        buildAttention(tasks: app.tasks, worktrees: app.worktrees)
+        buildAttention(tasks: app.tasks, worktrees: app.worktrees, loops: app.loopAttention())
     }
 
     /// Deliberately unmemoized, like `attention`: both arrays are tiny, and a cache keyed on
@@ -287,6 +287,7 @@ struct HomeSection: View {
         case .task(let id):        app.focusTaskID = id; app.selected = .tasks
         case .worktree(let name):  app.focusWorktreeName = name; app.selected = .worktrees
         case .session(let id):     app.focusSessionID = id; app.selected = .sessions
+        case .loop(let id):        app.focusLoopID = id; app.selected = .loops
         case .none:                break
         }
     }
