@@ -67,6 +67,11 @@ enum DevSessionsSnapshot {
         context.stats = SessionStat.table(from: ProjectUsageScanner().digest(for: base, since: since))
         context.taskNames = [:]
         context.herdrAvailable = Herdr.available()
+        // Live worktrees: the folders under <project>/.claude/worktrees that still exist.
+        let live = base.map { b in
+            ((try? FileManager.default.contentsOfDirectory(atPath: b.appending(path: ".claude/worktrees").path)) ?? [])
+        } ?? []
+        context.worktreeSlots = WorktreeColors.assign(live: live, previous: [:], paletteSize: WorktreePalette.colors.count)
 
         var sessions = listing.sessions
         if args.contains("--demo-groups"), let key = context.projectKey ?? sessions.first?.groupKey {

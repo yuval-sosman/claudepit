@@ -51,7 +51,7 @@ struct SessionDetailView: View {
                 .padding(.bottom, 10)
 
             if let wt = currentWorktree {
-                WorktreeBadge(wt: wt) {
+                WorktreeBadge(wt: wt, color: WorktreePalette.color(slot: app.worktreeColorSlots[wt.name])) {
                     app.focusWorktreeName = wt.name
                     app.selected = .worktrees
                 }
@@ -637,6 +637,8 @@ enum ModelBadge {
 /// git worktree. Reads as a button (accent tint, hover highlight, trailing "View" cue).
 private struct WorktreeBadge: View {
     let wt: WorktreeInfo
+    /// The worktree's colour in the Sessions list.
+    let color: Color
     let action: () -> Void
     @State private var hovering = false
 
@@ -644,7 +646,7 @@ private struct WorktreeBadge: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.branch")
-                    .font(.caption.weight(.bold)).foregroundStyle(WorktreePalette.color(for: wt.name))
+                    .font(.caption.weight(.bold)).foregroundStyle(color)
                 (Text("Running in worktree  ").foregroundStyle(.secondary)
                  + Text(wt.name).fontWeight(.semibold).foregroundStyle(.primary)
                  + Text("  ·  \(wt.branch)").foregroundStyle(.secondary))

@@ -45,7 +45,7 @@ struct SessionRowView<MenuItems: View>: View {
                 HStack(spacing: 4) {
                     if let ref = session.task { PhasePill(label: ref.phaseLabel) }
                     if let wt = worktree {
-                        WorktreePill(name: wt) { onWorktreeTap(wt) }
+                        WorktreePill(name: wt, color: context.worktreeColor(wt)) { onWorktreeTap(wt) }
                             .debugFrame("worktree-pill-\(session.id)")
                     }
                     meta.font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -72,7 +72,7 @@ struct SessionRowView<MenuItems: View>: View {
         .overlay(alignment: .leading) {
             if let wt = worktree {
                 RoundedRectangle(cornerRadius: 1.5)
-                    .fill(WorktreePalette.color(for: wt))
+                    .fill(context.worktreeColor(wt))
                     .frame(width: 3)
                     .padding(.vertical, 5)
             }
@@ -213,6 +213,11 @@ struct PulsingDot: View {
 /// none reads as an error (the system pink renders a hot red here), and none near the colours
 /// that already mean something in the list: green (working), orange (waiting) and the accent
 /// (selection). Phase pills are neutral, so in a row's meta line colour only means "which worktree".
+///
+/// Slots are handed out by `WorktreeColors.assign` to worktrees that exist, so live worktrees
+/// don't share a colour until there are more of them than colours; a removed worktree's sessions
+/// draw `neutral`. Manual groups keep their own, separate colours (a solid dot you pick) on purpose:
+/// drawing both from one palette would make one blue mean two things.
 enum WorktreePalette {
     static let colors: [Color] = [
         Color(red: 0.96, green: 0.58, blue: 0.80),   // rose
@@ -220,10 +225,15 @@ enum WorktreePalette {
         Color(red: 0.98, green: 0.82, blue: 0.38),   // amber
         Color(red: 0.74, green: 0.62, blue: 1.00),   // lavender
         Color(red: 0.55, green: 0.90, blue: 0.80),   // seafoam
+        Color(red: 0.99, green: 0.69, blue: 0.52),   // peach
     ]
 
-    static func color(for worktree: String) -> Color {
-        colors[WorktreeLabel.colorIndex(for: worktree, paletteSize: colors.count)]
+    /// A worktree that no longer exists.
+    static let neutral = Color(white: 0.55)
+
+    static func color(slot: Int?) -> Color {
+        guard let slot, colors.indices.contains(slot) else { return neutral }
+        return colors[slot]
     }
 }
 
@@ -231,10 +241,10 @@ enum WorktreePalette {
 /// worktree's sessions.
 struct WorktreePill: View {
     let name: String
+    let color: Color
     let action: () -> Void
 
     var body: some View {
-        let color = WorktreePalette.color(for: name)
         Button(action: action) {
             HStack(spacing: 2) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 8, weight: .bold))

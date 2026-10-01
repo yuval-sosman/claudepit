@@ -236,7 +236,7 @@ struct SessionListView: View {
                 }
                 if let wt = state.worktreeFilter {
                     chip("\(Image(systemName: "arrow.triangle.branch")) \(WorktreeLabel.short(wt))",
-                         tint: WorktreePalette.color(for: wt)) { state.worktreeFilter = nil }
+                         tint: context.worktreeColor(wt)) { state.worktreeFilter = nil }
                         .help("Only sessions in worktree \(wt)")
                 }
                 Spacer(minLength: 0)
@@ -437,11 +437,13 @@ struct SessionListView: View {
         case let .group(key, group, count, projectName, isFirst, isLast):
             groupHeader(section, key: key, group: group, count: count, projectName: projectName,
                         isFirst: isFirst, isLast: isLast)
-        case let .taskGroup(taskID, name, count):
+        case let .taskGroup(taskID, name, count, worktree):
             foldHeader(section, collapsed: section.collapsed,
                        toggle: { toggleTaskGroup(taskID) },
-                       help: "Sessions of this task's phases — click to \(section.collapsed ? "show" : "fold")") {
-                Image(systemName: "checklist").font(.system(size: 10, weight: .semibold)).foregroundStyle(.teal)
+                       help: "Sessions of this task's phases\(worktree.map { " — worktree \($0)" } ?? "") · click to \(section.collapsed ? "show" : "fold")") {
+                // The task's worktree colour: the same one its sessions' stripes and pills wear.
+                Image(systemName: "checklist").font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(worktree.map(context.worktreeColor) ?? WorktreePalette.neutral)
                 Text(name).font(.caption.weight(.semibold)).lineLimit(1)
                 countLabel(count)
             } menu: {

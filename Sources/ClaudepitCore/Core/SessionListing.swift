@@ -241,3 +241,32 @@ public enum WorktreeLabel {
         return Int(hash % UInt64(paletteSize))
     }
 }
+
+/// Which colour each *existing* worktree wears. Hashing names straight into a handful of colours
+/// made two live worktrees share one as soon as there were a few — and colour is what the eye
+/// scans by. Instead a worktree keeps the slot it already has, a new one takes its hashed slot if
+/// that is free (else the first free one), and two share only when every slot is taken.
+/// Worktrees that no longer exist get no slot: their sessions draw neutral and free the colour.
+public enum WorktreeColors {
+    /// Slots for `live`, honouring `previous` (which may also hold worktrees gone or from other
+    /// projects — those are kept by the caller but never block a slot here).
+    public static func assign(live: [String], previous: [String: Int], paletteSize: Int) -> [String: Int] {
+        guard paletteSize > 0 else { return [:] }
+        var out: [String: Int] = [:]
+        var used = Set<Int>()
+        for name in Set(live).sorted() {
+            if let slot = previous[name], (0..<paletteSize).contains(slot), !used.contains(slot) {
+                out[name] = slot
+                used.insert(slot)
+            }
+        }
+        for name in Set(live).sorted() where out[name] == nil {
+            let preferred = WorktreeLabel.colorIndex(for: name, paletteSize: paletteSize)
+            let slot = !used.contains(preferred) ? preferred
+                : (0..<paletteSize).first { !used.contains($0) } ?? preferred
+            out[name] = slot
+            used.insert(slot)
+        }
+        return out
+    }
+}

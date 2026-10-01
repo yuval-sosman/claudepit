@@ -143,6 +143,10 @@ final class AppState: ObservableObject {
     let projectUsageScanner = ProjectUsageScanner()
     private var projectUsageRescanPending = false
     @Published var worktrees: [WorktreeInfo] = []
+    /// Colour slot per existing worktree (`WorktreeColors.assign`), so its sessions, its task
+    /// group and its badge share one colour. Remembered across launches — including worktrees of
+    /// other projects, so switching back keeps their colours.
+    @Published var worktreeColorSlots: [String: Int] = [:]
     @Published var focusWorktreeName: String?   // set to jump the Worktrees page to a specific worktree
     @Published var autoOpenReviewWorktree: String?   // one-shot: auto-present a worktree's Source Control sheet after focusing
     @Published var worktreeLastCommit: [String: (hash: String, subject: String)] = [:]
@@ -551,6 +555,7 @@ final class AppState: ObservableObject {
                 sessions: self.sessions, cwdMap: raw.cwdMap)
             let activePaths = Set(self.worktrees.map { $0.path })
             self.worktreeLastCommit = self.worktreeLastCommit.filter { activePaths.contains($0.key) }
+            self.updateWorktreeColors()
         }
     }
 

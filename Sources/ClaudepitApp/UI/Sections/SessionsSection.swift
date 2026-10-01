@@ -82,6 +82,7 @@ struct SessionsSection: View {
         c.taskNames = Dictionary(app.tasks.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         c.boundWorktrees = Dictionary(app.worktrees.compactMap { wt in wt.ownerSessionID.map { ($0, wt.name) } },
                                       uniquingKeysWith: { a, _ in a })
+        c.worktreeSlots = app.worktreeColorSlots
         c.herdrAvailable = Herdr.available()
         return c
     }

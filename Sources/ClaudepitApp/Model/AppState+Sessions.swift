@@ -188,4 +188,19 @@ extension AppState {
             }
         }
     }
+
+    // MARK: Worktree colours
+
+    private static let worktreeColorKey = "worktreeColorSlots"
+
+    /// Re-assign colours for the worktrees that exist now, keeping each one's colour.
+    func updateWorktreeColors() {
+        let stored = (UserDefaults.standard.dictionary(forKey: Self.worktreeColorKey) as? [String: Int]) ?? [:]
+        let live = WorktreeColors.assign(live: worktrees.map(\.name), previous: stored,
+                                         paletteSize: WorktreePalette.colors.count)
+        if live != worktreeColorSlots { worktreeColorSlots = live }
+        var merged = stored.merging(live) { _, new in new }
+        if merged.count > 200 { merged = live }   // forget long-gone worktrees, never the live ones
+        if merged != stored { UserDefaults.standard.set(merged, forKey: Self.worktreeColorKey) }
+    }
 }

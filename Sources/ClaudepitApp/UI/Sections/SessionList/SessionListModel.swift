@@ -69,6 +69,8 @@ struct SessionListContext {
     var taskNames: [String: String] = [:]
     /// Worktree name by the session id it is bound to.
     var boundWorktrees: [String: String] = [:]
+    /// Colour slot per existing worktree (`AppState.worktreeColorSlots`).
+    var worktreeSlots: [String: Int] = [:]
     var herdrAvailable = false
 
     func status(of s: SessionSummary) -> SessionLiveStatus {
@@ -79,6 +81,9 @@ struct SessionListContext {
 
     /// The worktree a session ran in (its cwd), or the one it is bound to.
     func worktree(of s: SessionSummary) -> String? { s.worktreeName ?? boundWorktrees[s.id] }
+
+    /// A worktree's colour; neutral once the worktree no longer exists.
+    func worktreeColor(_ name: String) -> Color { WorktreePalette.color(slot: worktreeSlots[name]) }
 
     func title(of s: SessionSummary) -> String {
         if let ref = s.task, let live = taskNames[ref.taskID] { return live }
@@ -93,7 +98,7 @@ struct SessionListModel {
         case date(String)
         case group(key: String, group: SessionGroup, count: Int, projectName: String?, isFirst: Bool, isLast: Bool)
         case caption(String)
-        case taskGroup(taskID: String, name: String, count: Int)
+        case taskGroup(taskID: String, name: String, count: Int, worktree: String?)
         case ungrouped(count: Int)
     }
 
@@ -174,7 +179,8 @@ struct SessionListModel {
             for t in layout.tasks {
                 sections.append(Section(
                     id: "task-\(t.taskID)",
-                    header: .taskGroup(taskID: t.taskID, name: t.name, count: t.sessions.count),
+                    header: .taskGroup(taskID: t.taskID, name: t.name, count: t.sessions.count,
+                                       worktree: t.sessions.lazy.compactMap { context.worktree(of: $0) }.first),
                     sessions: t.sessions,
                     collapsed: !prefs.expandedTaskGroups.contains(t.taskID) && !isSearching))
             }

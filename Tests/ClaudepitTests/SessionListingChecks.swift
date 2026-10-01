@@ -278,6 +278,24 @@ func sessionListingChecks() -> [Bool] {
         try expect(slots.count >= 3, "spreads across the palette")
     })
 
+    results.append(check("worktree colours: live worktrees never share while slots remain; slots are kept") {
+        let live = ["wt-a", "wt-b", "wt-c", "wt-d", "wt-e"]
+        let first = WorktreeColors.assign(live: live, previous: [:], paletteSize: 5)
+        try expectEqual(Set(first.values).count, 5, "five live worktrees, five colours")
+        // A worktree keeps its colour when another appears or one goes away.
+        let shrunk = WorktreeColors.assign(live: ["wt-a", "wt-c"], previous: first, paletteSize: 5)
+        try expectEqual(shrunk, ["wt-a": first["wt-a"]!, "wt-c": first["wt-c"]!], "kept, and gone ones dropped")
+        let grown = WorktreeColors.assign(live: ["wt-a", "wt-c", "wt-new"], previous: shrunk, paletteSize: 5)
+        try expectEqual(grown["wt-a"], first["wt-a"], "unchanged after a new worktree")
+        try expect(![grown["wt-a"], grown["wt-c"]].contains(grown["wt-new"]), "the new one takes a free colour")
+        // Only past the palette do two share.
+        let crowded = WorktreeColors.assign(live: live + ["wt-f"], previous: first, paletteSize: 5)
+        try expectEqual(Set(crowded.values).count, 5, "six on five slots: every slot used, one shared")
+        // A stale previous slot that now clashes yields to whoever holds it first.
+        let clash = WorktreeColors.assign(live: ["x", "y"], previous: ["x": 1, "y": 1], paletteSize: 5)
+        try expect(clash["x"] != clash["y"], "a clash in stored slots is resolved")
+    })
+
     // MARK: Groups
 
     results.append(check("group names: trimmed, required, unique ignoring case; rename keeps its own") {
