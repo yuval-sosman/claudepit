@@ -160,7 +160,8 @@ then one automatic group per task, then Ungrouped — live status, shift/arrow r
   down the row's leading edge, a pill (`task-<id>-…` shortens to the id), its automatic task
   group's icon and the session page's badge. Slots come from `WorktreeColors.assign` via
   `AppState.worktreeColorSlots` (refreshed on every worktree scan, remembered in UserDefaults): a
-  worktree keeps its colour, a new one takes a free colour, two share only past the palette's 6,
+  worktree keeps its colour, a new one takes a free colour, two share only past the palette's 10
+  (`--snapshot-sessions <p> --palette` renders them),
   and a removed worktree's sessions draw neutral. (Hashing names straight into slots made live
   worktrees collide.) Clicking the pill filters to that worktree (`worktreeFilter`, a chip). Phase
   pills are neutral so colour in the meta line only means "which worktree". Manual group colours

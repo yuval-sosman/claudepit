@@ -23,6 +23,7 @@ import ClaudepitCore
 ///   --new-group           show the inline new-group editor
 ///   --empty               render as if the project had no sessions
 ///   --time-scan           print cold and warm listing times and exit
+///   --palette             render the worktree colours (palette.png) and exit
 ///   --interaction-test    drive the list with synthetic clicks and keys (DevSessionsInteraction)
 @MainActor
 enum DevSessionsSnapshot {
@@ -40,6 +41,35 @@ enum DevSessionsSnapshot {
         let width = CGFloat(Double(value("--width") ?? "") ?? 300)
         let height = CGFloat(Double(value("--height") ?? "") ?? 900)
 
+        if args.contains("--palette") {
+            // Every worktree colour as the list draws it: stripe, pill, task-group icon.
+            let sheet = VStack(alignment: .leading, spacing: 8) {
+                ForEach(WorktreePalette.colors.indices, id: \.self) { i in
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(WorktreePalette.colors[i]).frame(width: 3, height: 26)
+                        Image(systemName: "checklist").font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(WorktreePalette.colors[i])
+                        WorktreePill(name: "task-\(String(format: "%08x", 0x1a2b3c00 + i * 4097))-x",
+                                     color: WorktreePalette.colors[i]) {}
+                        Text("\(i) \(WorktreePalette.names[i])").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 1.5).fill(WorktreePalette.neutral).frame(width: 3, height: 26)
+                    WorktreePill(name: "removed-worktree", color: WorktreePalette.neutral) {}
+                    Text("neutral (removed)").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    SessionStatusGlyph(status: .working); Text("working").font(.caption).foregroundStyle(.secondary)
+                    SessionStatusGlyph(status: .waiting); Text("waiting").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(16)
+            .frame(width: 420, alignment: .leading)
+            .background(GlassCard { Color.clear }.padding(4))
+            .background(Color(red: 0.11, green: 0.115, blue: 0.13))
+            write(sheet, size: CGSize(width: 420, height: 440), to: outDir.appending(path: "palette.png"))
+            exit(0)
+        }
         if args.contains("--time-scan") {
             var t = Date()
             _ = SessionScanner().listing(activePath: base)

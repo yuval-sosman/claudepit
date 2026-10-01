@@ -219,14 +219,23 @@ struct PulsingDot: View {
 /// draw `neutral`. Manual groups keep their own, separate colours (a solid dot you pick) on purpose:
 /// drawing both from one palette would make one blue mean two things.
 enum WorktreePalette {
+    /// Ten soft tones spread round the wheel (skipping pure green, orange and red), ordered so
+    /// neighbouring slots — what "first free colour" hands out in turn — sit far apart in hue.
     static let colors: [Color] = [
-        Color(red: 0.96, green: 0.58, blue: 0.80),   // rose
-        Color(red: 0.42, green: 0.80, blue: 0.98),   // sky
-        Color(red: 0.98, green: 0.82, blue: 0.38),   // amber
-        Color(red: 0.74, green: 0.62, blue: 1.00),   // lavender
-        Color(red: 0.55, green: 0.90, blue: 0.80),   // seafoam
-        Color(red: 0.99, green: 0.69, blue: 0.52),   // peach
+        Color(hue: 0.944, saturation: 0.42, brightness: 0.97),   // rose
+        Color(hue: 0.530, saturation: 0.55, brightness: 0.97),   // aqua
+        Color(hue: 0.120, saturation: 0.62, brightness: 0.98),   // amber
+        Color(hue: 0.745, saturation: 0.40, brightness: 1.00),   // lavender
+        Color(hue: 0.450, saturation: 0.42, brightness: 0.90),   // seafoam
+        Color(hue: 0.820, saturation: 0.40, brightness: 0.97),   // orchid
+        Color(hue: 0.210, saturation: 0.50, brightness: 0.92),   // chartreuse
+        Color(hue: 0.600, saturation: 0.50, brightness: 1.00),   // periwinkle
+        Color(hue: 0.070, saturation: 0.48, brightness: 0.99),   // peach
+        Color(hue: 0.100, saturation: 0.22, brightness: 0.86),   // sand
     ]
+
+    static let names = ["rose", "aqua", "amber", "lavender", "seafoam", "orchid", "chartreuse",
+                        "periwinkle", "peach", "sand"]
 
     /// A worktree that no longer exists.
     static let neutral = Color(white: 0.55)
