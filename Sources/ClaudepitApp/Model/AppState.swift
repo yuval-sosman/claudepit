@@ -478,6 +478,9 @@ final class AppState: ObservableObject {
     }
 
     func reload() {
+        // Before the store rescans, so the Rules page lists the restored file. This is what makes
+        // a direct edit to an installed rules file revert at once: the watcher below fires reload().
+        if let base = activePath { ManagedInstaller(appConfig: appConfig, base: base).syncRuleFiles() }
         store.reload(activePath: activePath)
         reloadSessions()
         reloadMemory()
@@ -1217,6 +1220,10 @@ final class AppState: ObservableObject {
         var paths = [Paths.globalSettings, Paths.globalLocalSettings, Paths.pluginsRoot, Paths.stateFile, Paths.projectsRoot, Paths.plansRoot, Paths.globalCommands]
         if let base = activePath {
             paths.append(Paths.projectClaude(base))
+            // The rules folder and the managed rules files themselves: a folder only reports
+            // entries added or removed, so an in-place edit to a file needs the file watched too.
+            paths.append(Paths.projectClaude(base).appending(path: "rules"))
+            paths += ManagedConfig.catalog.compactMap { ManagedArtifacts.ruleFile(for: $0.id, base: base) }
             let memDir = Paths.memoryDir(projectSlug: Paths.slug(for: base))
             if FileManager.default.fileExists(atPath: memDir.path) {
                 paths.append(memDir)

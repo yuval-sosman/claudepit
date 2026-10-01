@@ -1,5 +1,5 @@
 ---
-description: Open the Plugins card in Claude Cockpit
+description: Open the Plugins card in Claudepit
 ---
 
 ```bash

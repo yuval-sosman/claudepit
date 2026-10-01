@@ -816,7 +816,7 @@ public actor TaskRunner {
         case .codeReview:
             task.links.reviewPath = marked ?? expected ?? task.links.reviewPath
             // The FILE first, scrollback only as a fallback. The block is written into review.md,
-            // so the file is complete; scrollback is a 400-line window that a long review overruns
+            // so the file is complete; scrollback is a fixed-length window that a long review overruns
             // and that is gone entirely once herdr restarts or the pane closes.
             let fileText = task.links.reviewPath
                 .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? ""

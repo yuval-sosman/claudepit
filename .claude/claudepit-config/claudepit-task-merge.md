@@ -30,13 +30,13 @@ never run `git worktree` commands, and never dispatch a subagent in worktree iso
    `SplashImageGen`, which fails on the CLI toolchain (no CoreGraphics). Run `swift test` as well
    when the merge touched anything under `Sources/`.
 
-## NEVER commit or stage. This is a HARD rule, no exceptions
+## Don't stage or commit
 
-- Do NOT run `git add`, `git commit`, `git stage`, `git push`, or any combined form (e.g.
-  `git add -A && git commit -m ...`). These commands are DENIED and will fail.
-- This includes the merge commit. A conflicted merge stays conflicted-but-resolved in the working
-  tree; the user finishes it from Claudepit's Review Changes (Source Control) sheet, which is the
-  ONLY place commits happen.
+- `git add`, `git commit`, `git stage` and `git push` — alone or combined — are denied in this
+  worktree and will fail.
+- That includes the merge commit. A conflicted merge stays conflicted-but-resolved in the working
+  tree; the user finishes it from Claudepit's Review Changes (Source Control) sheet, the only
+  place commits happen.
 - `git status`, `git diff`, `git log`, `git fetch`, `git merge`, `git stash` and reads are all
   fine. Anything that stages or commits is not.
 - If a conflict proves unresolvable, run `git merge --abort`, restore the stash, and say so. Do

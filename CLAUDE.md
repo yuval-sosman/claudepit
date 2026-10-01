@@ -14,18 +14,38 @@ To change the hook's behavior, edit the source:
 
 The hook fires on `UserPromptSubmit`, reads `session_id` and `cwd` from stdin JSON, looks up existing bullets from `~/.claude/projects/<project-slug>/summary/<session-id>.json`, and injects a summary instruction into Claude's context via `additionalContext`.
 
+**Per prompt it injects only what changes** — the current bullets, the file to write, and the JSON
+shape with a fresh `updatedAt` (~430 chars). The rules for *how* to write them (silently, ≤15
+bullets, merge rather than duplicate, outcomes, tense, the one-bullet rule for a conversational
+session) are a separate catalog entry, **`summary-rules`** (`HookScripts.summaryRulesPrompt`),
+installed as `.claude/rules/claudepit-summary.md` and loaded once per session — they used to ride
+along in full on every prompt. It is installed only while `summary-hook` is on too. The rules file and
+`onDemandSummaryPrompt` both interpolate `HookScripts.summaryBulletRules`, so the two copies of the
+bullet rules cannot drift (they once disagreed on "this turn" vs "this session"). Verified live
+(2026-10-01): both rules files attach at session start **and again after `/compact`**; a
+conversational turn kept the existing bullets; a post-compaction edit merged into the existing bullet.
+
 ## Memory System Prompt
 
-On every `setActivePath` (when `memoryEnabled` is `true`), `ManagedInstaller.installMemorySystemPrompt()` writes a `systemPrompt.append` key into `<project>/.claude/settings.json` (project-scoped, not global).
+On every `setActivePath` (when `memoryEnabled` is `true`), `ManagedInstaller.syncRuleFiles()` writes the Custom Memory Strategy to **`<project>/.claude/rules/claudepit-memory.md`** (`Paths.memoryRuleFile`). Claude Code loads a rules file once at session start, like CLAUDE.md, and finds it from nested task worktrees by walking up from the cwd; `--safe-mode` suppresses it, so the app's own `claude -p` calls never see it. The installer adds the file to the checkout's `.git/info/exclude` (filesystem only, no `git` subprocess): a committed copy would load a second time inside every worktree.
 
-**Do not edit this key directly** — it is overwritten on each launch when enabled.
+**Claude Code has no settings key that appends to the system prompt.** Older builds wrote `systemPrompt.append` into `settings.json`; the CLI never read it, so the strategy reached no session while the Stop hook kept citing it. Both install and remove strip that dead key. The only real system-prompt channels are per-launch flags (`--append-system-prompt[-file]`) and output styles, which replace the default prompt rather than append to it.
+
+**Do not edit the rules file directly** — while its entry is on, an edit is overwritten **at once**,
+not just at the next launch: `AppState.reload()` (which every file-watcher tick runs) calls
+`ManagedInstaller.syncRuleFiles()`, and `restartWatching` watches the `rules/` folder *and* each
+managed rules file — a folder vnode reports only entries added or removed, so an in-place edit is
+seen only through the file. A deleted file is reinstalled the same way; toggled off, it is removed
+and stays removed. The sanctioned edit is the App Settings card (Edit, Reset, toggle), which writes
+the editable copy under `claudepit-config/`. The Rules page shows the installed file with the
+Claudepit badge and offers no Delete. The same applies to `claudepit-summary.md`.
 
 To change the memory instructions, edit:
 - **Instruction content**: `Sources/ClaudepitCore/Core/HookScripts.swift` — `memorySystemPrompt`
-- **Registration logic**: `Sources/ClaudepitCore/Core/ManagedInstaller.swift` — `installMemorySystemPrompt()`
+- **Registration logic**: `Sources/ClaudepitCore/Core/ManagedInstaller.swift` — `syncRuleFiles()`
 
-The injected instructions tell Claude to:
-- Use a feature-oriented memory strategy (ignore default auto-memory behavior)
+The instructions tell Claude to:
+- Use a feature-oriented memory strategy, which replaces Claude Code's default auto-memory format where the two disagree
 - Save one topic file per feature domain under `~/.claude/projects/<slug>/memory/`, accumulating all contributing session IDs
 - Read per-session bullet summaries from `~/.claude/projects/<slug>/summary/<session-id>.json`
 - Self-maintain `MEMORY.md` (cap at 20 lines, merge related topics)
@@ -54,9 +74,9 @@ own "When to skip" rule then short-circuits on the model side.
 
 ## Memory Toggle
 
-`AppState.memoryEnabled: Bool` controls both the system prompt injection and the Stop/StopFailure hooks together. It is **per-project, not global**: the value is read from and written to `appConfig.isEnabled(base, "memory-hook")`, which lives in `<project>/.claude/claudepit-config/config.json`, and toggling it sets both the `memory-hook` and `memory-system-prompt` entries. (An older build kept a global `memoryEnabled` key in `UserDefaults`; `AppState.migrateMemoryEnabledIfNeeded()` writes it into each recent project's `ProjectPrefs` and deletes the key, and `AppConfigStore.seedIfNeeded` folds that legacy value into the two memory entries on the project's first seed.) A `PillToggle` in `MemorySection` (left sidebar header) lets the user enable/disable the entire memory system:
-- **On**: installs `systemPrompt.append` + registers the Stop/StopFailure hooks, both in this project's `.claude/settings.json`.
-- **Off**: removes `systemPrompt.append` + prunes the Stop/StopFailure hooks from this project's `.claude/settings.json`.
+`AppState.memoryEnabled: Bool` controls both the memory rules file and the Stop/StopFailure hooks together. It is **per-project, not global**: the value is read from and written to `appConfig.isEnabled(base, "memory-hook")`, which lives in `<project>/.claude/claudepit-config/config.json`, and toggling it sets both the `memory-hook` and `memory-system-prompt` entries. (An older build kept a global `memoryEnabled` key in `UserDefaults`; `AppState.migrateMemoryEnabledIfNeeded()` writes it into each recent project's `ProjectPrefs` and deletes the key, and `AppConfigStore.seedIfNeeded` folds that legacy value into the two memory entries on the project's first seed.) A `PillToggle` in `MemorySection` (left sidebar header) lets the user enable/disable the entire memory system:
+- **On**: writes `.claude/rules/claudepit-memory.md` + registers the Stop/StopFailure hooks in this project's `.claude/settings.json`.
+- **Off**: deletes that rules file + prunes the Stop/StopFailure hooks from this project's `.claude/settings.json`.
 
 ## Managed Configs (installer + artifact index)
 
@@ -75,7 +95,8 @@ Everything Claudepit writes into a project's Claude config is one entry in `Mana
   and hook events each entry owns, which script it installs, every file it writes. Hook ownership
   is matched by **value** (`HookRegistration.isManaged` on the script filename, so a foreign home
   path still resolves); settings-key ownership is matched by **key plus layer** (claimed only in
-  the active project's `settings.json`).
+  the active project's `settings.json`), and a rules file by its path in the active project
+  (`owner(ofRuleFile:base:)`).
 
 `AppState.syncManagedConfigs()` is a thin delegation to `ManagedInstaller.sync()`; the one-time
 migrations are `static` on `ManagedInstaller` because they are project-independent.
@@ -179,15 +200,15 @@ then one automatic group per task, then Ungrouped — live status, shift/arrow r
   `AppState`, no writes.
 - **Interaction harness:** `--snapshot-sessions <project> --interaction-test [--out dir]`
   (`DevSessionsInteraction.swift`) drives the real list in an offscreen key window with synthetic
-  clicks and keys and asserts the outcome (54 checks: selection, ⌘/⇧-click, arrows, ⌘A, ⌫, Esc,
+  clicks and keys and asserts the outcome (selection, ⌘/⇧-click, arrows, ⌘A, ⌫, Esc,
   subagents, inline create/rename, duplicate names, fold, + button, ⌥⌘F, ↓ from search, deep
   links, every menu's items and actions, and drops). Menus are data (`SessionListMenus` →
   `MenuEntry`, rendered by `MenuEntriesView` for both the "…" and right-click menus) and drops
   resolve in `SessionListMenus.drop`, because a SwiftUI `Menu` can't be opened and a drag can't be
   performed offscreen — only the AppKit popup and drag gesture themselves go unexercised. Rows and headers report their frames through the DEBUG-only `debugFrame(_:)` hook —
   SwiftUI builds no accessibility tree offscreen, so they can't be found by identifier. Events
-  go to `window.sendEvent` (so `NSApp.currentEvent` is nil — don't read it in handlers). It
-  caught three real bugs, now fixed and worth knowing as SwiftUI-on-macOS traps:
+  go to `window.sendEvent` (so `NSApp.currentEvent` is nil — don't read it in handlers). The
+  SwiftUI-on-macOS traps it caught (all fixed):
   - `onTapGesture` on a `LazyVStack` **section header** never fired; headers are a `Button`.
     Double-click (rename) is two clicks within `NSEvent.doubleClickInterval`, timed by hand.
   - The **Delete key** (U+007F) never reaches `onKeyPress` — it becomes `deleteBackward:`;
@@ -220,7 +241,7 @@ Key files: `Sources/ClaudepitCore/Model/Task.swift` (model), `Core/TaskStore.swi
 - `waitForTurn` waits for **`working` first** (bounded, 20s) and only then for `idle`/`blocked`/`done`. Without the pick-up wait, `idle` would match the instant *before* the prompt reaches the agent and a phase that never ran would be reported as finished.
 - A `launching: Set<String>` guard on the actor holds a task id for the whole launch (`runPhase`/`openInHerdr`/`answer`), so the pollers below can't race a not-yet-prompted agent.
 
-**A finished turn is not a finished phase.** `idle` only means Claude is back at its prompt, which includes stopping *mid-phase* to ask the user something — so the **deliverable decides**, not the status. `TaskRunner.routeArtifact` returns whether the phase yielded one (its `CLAUDEPIT_ARTIFACT:` marker, which every task command echoes — `implement` included — or `TaskTransition.expectedArtifact`'s file on disk); `landFinishedTurn` maps that to `.awaitingReview` when true and **`.blocked`** when false, and `resolveBlocked` promotes it once the artifact appears. Getting this wrong parked task `5c0769f7`'s writeSpec phase in `.awaitingReview` with a nil `specPath` twelve minutes before the agent actually wrote spec.md. All poller writes go through `saveIfChanged` (a save on every tick would bump `updatedAt` → wake the FileWatcher → reload, forever), and the blocked poll skips its scrollback read while herdr's `state_change_seq` is unchanged.
+**A finished turn is not a finished phase.** `idle` only means Claude is back at its prompt, which includes stopping *mid-phase* to ask the user something — so the **deliverable decides**, not the status. `TaskRunner.routeArtifact` returns whether the phase yielded one (its `CLAUDEPIT_ARTIFACT:` marker, which every task command echoes — `implement` included — or `TaskTransition.expectedArtifact`'s file on disk); `landFinishedTurn` maps that to `.awaitingReview` when true and **`.blocked`** when false, and `resolveBlocked` promotes it once the artifact appears. All poller writes go through `saveIfChanged` (a save on every tick would bump `updatedAt` → wake the FileWatcher → reload, forever), and the blocked poll skips its scrollback read while herdr's `state_change_seq` is unchanged.
 
 **Link healing** — `TaskTransition.healArtifactLinks` adopts any deterministic deliverable that exists on disk but was never recorded, for **every** phase rather than just the current one. `AppState.loadTasks()` runs it beside `mergeBrainstormSuggestions`. Without it a phase that finished unobserved leaves `specPath`/`reviewPath` nil and the detail view's "Review spec" button disabled for a file that plainly exists.
 
@@ -299,7 +320,7 @@ steal the user's terminal focus once per phase.
 
 **Review findings → tasks.** A `codeReview` phase writes a `CLAUDEPIT_FINDINGS_BEGIN … END` block
 **into `review.md`**, and `routeArtifact` parses **the file** first (scrollback is only a fallback —
-it is a 400-line window a long review overruns, and it is gone once the pane closes). The block is a
+it is a fixed-length window a long review overruns, and it is gone once the pane closes). The block is a
 **JSON array**, one object per finding: `ruleId`, `severity`, `category`, `title`, `locations`
 (`"path:line"` strings), and the narrative triad `what` / `why` / `fix`. Field names follow **SARIF**
 — the industry standard for static-analysis results — wherever SARIF has an equivalent, so it
@@ -436,12 +457,17 @@ the session's worktree, where one applies). Without it the subprocess inherits w
 app was launched from. `--no-session-persistence` keeps these runs out of the project's
 session list.
 
+**JSON answers come from `--json-schema`, not the prompt.** A call that needs structured data
+passes `ClaudeCLI.structuredArgs(schema:)` and reads the validated object out of the result
+envelope with `ClaudeCLI.structuredOutput(fromEnvelope:)`. The prompt describes what each field
+means; it never asks for "only valid JSON", and nothing strips fences or salvages a preamble.
+
 | File | Purpose | Flags |
 |------|---------|-------|
 | `Sources/ClaudepitCore/Core/PlanQARunner.swift` | Plan & Memory Q&A, improvement generation | `ClaudeCLI.printArgs` + `cwd` |
-| `Sources/ClaudepitCore/Core/DiscoverRunner.swift` | Semantic session search | `ClaudeCLI.printArgs` + `cwd` |
+| `Sources/ClaudepitCore/Core/DiscoverRunner.swift` | Semantic session search | `ClaudeCLI.printArgs` + `structuredArgs` + `cwd` |
 | `Sources/ClaudepitCore/Core/UsageRunner.swift` | `/usage` report for Home's Usage card (also rewrites the CLI's own caches) | `ClaudeCLI.printArgs` + `cwd` |
-| `Sources/ClaudepitCore/Core/TaskDraftRunner.swift` | New Task "Create with AI" — fills the form from a free-text idea | via `PlanQARunner.ask` + `cwd` |
+| `Sources/ClaudepitCore/Core/TaskDraftRunner.swift` | New Task "Create with AI" — fills the form from a free-text idea | via `PlanQARunner.ask` + `structuredArgs` + `cwd` |
 | `Sources/ClaudepitApp/UI/Sections/SessionDetailView.swift` | `/context` report (shown in popover) | `ClaudeCLI.resumeArgs` + `cwd` |
 | `Sources/ClaudepitApp/UI/Sections/PluginsSection.swift` | `claude plugin …`, `/reload-plugins` | **none** — `--safe-mode` would disable the very plugins being managed |
 
@@ -500,7 +526,7 @@ finishes in a browser), on the banner's Recheck button, and whenever a failed ca
 
 ## Cross-Section Deep Links (Focus Pattern)
 
-There is **no** `navHistory`/`NavEntry`/breadcrumb system — it was removed (commit `69b1f29`). Cross-section navigation uses simple one-shot "focus" fields on `AppState`:
+There is **no** `navHistory`/`NavEntry`/breadcrumb system. Cross-section navigation uses simple one-shot "focus" fields on `AppState`:
 
 ```swift
 // Jump to a specific plan / session / managed config, then switch section:

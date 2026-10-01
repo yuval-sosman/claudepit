@@ -3,7 +3,7 @@ import Foundation
 /// The kind of Claude-config artifact a managed config produces.
 public enum ManagedConfigKind: String, Codable, Sendable {
     case shellScript       // *.sh installed to ~/.claude + registered in settings.json hooks
-    case promptText        // markdown injected into settings.json (systemPrompt.append)
+    case promptText        // markdown installed as a project rules file (.claude/rules/)
     case commandMarkdown   // *.md written to <project>/.claude/commands/
     case number            // integer written to a settings.json key (cleanupPeriodDays)
 }
@@ -27,13 +27,18 @@ public struct ManagedConfig: Identifiable, Sendable {
             kind: .shellScript, filename: "summary-hook.sh",
             builtinDefault: HookScripts.summaryHook, defaultEnabled: true, defaultNumber: nil),
         ManagedConfig(
+            id: "summary-rules", title: "Session Summary Rules",
+            detail: "How Claude writes the session summary, installed as .claude/rules/claudepit-summary.md in this project and loaded once at session start. The Session Summary Hook then injects only the current bullets and the file to write on each prompt. Installed only while the hook is on.",
+            kind: .promptText, filename: "summary-rules.md",
+            builtinDefault: HookScripts.summaryRulesPrompt, defaultEnabled: true, defaultNumber: nil),
+        ManagedConfig(
             id: "memory-hook", title: "Memory End-of-Session Hook",
             detail: "Reminds Claude to write memory before the session ends, and triggers the dreaming consolidation at ≥10 writes. Resolved script installs to ~/.claude/claudepit-memory-hook.sh and is registered under Stop + StopFailure in this project's .claude/settings.json.",
             kind: .shellScript, filename: "memory-hook.sh",
             builtinDefault: HookScripts.memoryHook, defaultEnabled: true, defaultNumber: nil),
         ManagedConfig(
             id: "memory-system-prompt", title: "Memory System Prompt",
-            detail: "The Custom Memory Strategy appended to Claude's system prompt via systemPrompt.append in this project's .claude/settings.json.",
+            detail: "The Custom Memory Strategy, installed as .claude/rules/claudepit-memory.md in this project. Claude Code loads it once at session start, like CLAUDE.md, including in task worktrees. While on, a direct edit to that file is overwritten from this copy.",
             kind: .promptText, filename: "memory-system-prompt.md",
             builtinDefault: HookScripts.memorySystemPrompt, defaultEnabled: true, defaultNumber: nil),
         ManagedConfig(

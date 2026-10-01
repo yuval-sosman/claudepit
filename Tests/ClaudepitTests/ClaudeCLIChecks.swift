@@ -49,6 +49,19 @@ func claudeCLIChecks() -> [Bool] {
             let parts = path.split(separator: ":").map(String.init)
             try expectEqual(parts.count, Set(parts).count, "PATH has duplicate entries")
         },
+        check("structuredOutput_readsTheEnvelope") {
+            let args = ClaudeCLI.structuredArgs(schema: #"{"type":"object"}"#)
+            try expectEqual(args, ["--output-format", "json", "--json-schema", #"{"type":"object"}"#], "args")
+            let envelope = #"{"type":"result","is_error":false,"result":"","structured_output":{"name":"X"}}"#
+            guard let data = ClaudeCLI.structuredOutput(fromEnvelope: envelope) else {
+                throw CheckFailure(message: "object extracted: nil")
+            }
+            let obj = try JSONSerialization.jsonObject(with: data) as? [String: String]
+            try expectEqual(obj ?? [:], ["name": "X"], "round-trips the object")
+            try expect(ClaudeCLI.structuredOutput(fromEnvelope: #"{"type":"result","is_error":true}"#) == nil,
+                       "no structured_output → nil")
+            try expect(ClaudeCLI.structuredOutput(fromEnvelope: "Not logged in") == nil, "plain text → nil")
+        },
         check("failureMessage_prefersStderrThenStdout") {
             // An unknown flag reports on stderr...
             try expectEqual(

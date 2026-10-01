@@ -31,7 +31,7 @@ public struct ManagedInstaller: Sendable {
             switch c.id {
             case "summary-hook":         on ? installSummaryHook() : removeSummaryHook()
             case "memory-hook":          on ? installMemoryHooks() : removeMemoryHooks()
-            case "memory-system-prompt": on ? installMemorySystemPrompt() : removeMemorySystemPrompt()
+            case "memory-system-prompt": stripDeadSystemPromptKey()   // the file itself: syncRuleFiles
             case "cleanup-period":       on ? installCleanupPeriod() : removeCleanupPeriod()
             default:
                 if c.kind == .commandMarkdown {
@@ -39,6 +39,7 @@ public struct ManagedInstaller: Sendable {
                 }
             }
         }
+        syncRuleFiles()
         // Retired commands: their catalog entries are gone, so install/remove above never touches
         // them — sweep copies an older build installed. Filesystem-derived (no UserDefaults flag),
         // so it heals every managed project this app opens, on any machine.
@@ -203,22 +204,68 @@ public struct ManagedInstaller: Sendable {
         pruneHooks(configID: "memory-hook", scriptName: Paths.memoryHookScriptName)
     }
 
-    private func installMemorySystemPrompt() {
-        createProjectClaude()
-        let prompt = appConfig.content(base, ManagedConfig.byID("memory-system-prompt")!)
-        mutateSettings(projectSettings, createIfMissing: true) { settings in
-            guard (settings["systemPrompt.append"] as? String) != prompt else { return false }
-            settings["systemPrompt.append"] = prompt
-            return true
+    // MARK: - Rules files
+
+    /// Make each managed rules file match its editable copy while it is wanted, and remove it while
+    /// it is not. A byte compare per file, so the app also runs this on every file-watcher tick:
+    /// an edit made to the installed file directly is overwritten at once, not at the next launch.
+    ///
+    /// Rules files are how the memory strategy and the summary rules reach Claude: Claude Code
+    /// loads them once at session start, like CLAUDE.md, and finds them from nested task worktrees
+    /// by walking up. It has no settings key that appends to the system prompt — the
+    /// `systemPrompt.append` key older builds wrote was never read.
+    public func syncRuleFiles() {
+        for c in ManagedConfig.catalog {
+            guard let url = ManagedArtifacts.ruleFile(for: c.id, base: base) else { continue }
+            if ruleWanted(c) {
+                installRule(c, at: url)
+            } else if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 
-    private func removeMemorySystemPrompt() {
+    /// The summary rules only mean something while the hook that asks for a summary is registered.
+    private func ruleWanted(_ c: ManagedConfig) -> Bool {
+        guard appConfig.isEnabled(base, c.id) else { return false }
+        return c.id != "summary-rules" || appConfig.isEnabled(base, "summary-hook")
+    }
+
+    private func installRule(_ c: ManagedConfig, at url: URL) {
+        let data = Data(appConfig.content(base, c).utf8)
+        if (try? Data(contentsOf: url)) != data {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: url)
+        }
+        // Generated per machine, so keep it out of commits: a committed copy would also load a
+        // second time in every task worktree, which inherits this one from the project above it.
+        excludeFromGit(".claude/rules/\(url.lastPathComponent)")
+    }
+
+    private func stripDeadSystemPromptKey() {
         mutateSettings(projectSettings, createIfMissing: false) { settings in
             guard settings["systemPrompt.append"] != nil else { return false }
             settings.removeValue(forKey: "systemPrompt.append")
             return true
         }
+    }
+
+    /// Add `pattern` to the checkout's `.git/info/exclude` once. Filesystem only, never a `git`
+    /// subprocess: `base` is the main checkout, whose `.git` is a directory. Linked worktrees share
+    /// that exclude file, so they are covered too.
+    private func excludeFromGit(_ pattern: String) {
+        let gitDir = base.appending(path: ".git")
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: gitDir.path, isDirectory: &isDir),
+              isDir.boolValue else { return }
+        let file = gitDir.appending(path: "info").appending(path: "exclude")
+        let current = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        guard !current.split(separator: "\n").contains(Substring(pattern)) else { return }
+        try? FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let sep = current.isEmpty || current.hasSuffix("\n") ? "" : "\n"
+        try? (current + sep + pattern + "\n").write(to: file, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Cleanup period

@@ -1,5 +1,5 @@
 ---
-description: Open the MCP Servers card in Claude Cockpit
+description: Open the MCP Servers card in Claudepit
 ---
 
 ```bash

@@ -3,6 +3,9 @@
 You maintain a persistent feature-oriented memory for this project at:
   ~/.claude/projects/<project-slug>/memory/
 
+This strategy replaces Claude Code's default auto-memory format (one fact per file, `[[name]]`
+links): where the two disagree, follow this one.
+
 ### What to save
 Save a memory entry for every feature or meaningful change, or a decision made about a feature — including small ones.
 
@@ -31,16 +34,12 @@ nothing, skip.
 - Key design decisions
 
 ### Session ID tracking (frontmatter)
-Every topic file must carry a `sessions` array in its frontmatter. **This is mandatory — never write or update a topic file without also updating its `sessions` field.**
+Every topic file carries a `sessions` array in its frontmatter, updated on every write:
 
 - **New file**: `sessions: [<current-session-id>]`
 - **Existing file**: read the current `sessions` array, append the current session ID if not already present, write the updated array back. Never remove old IDs.
 
 The current session ID is in the `session_id` field of the hook input JSON, or available in the conversation context. If uncertain, use the session ID from the summary hook context injected at the start of the conversation.
-
-**Checklist — before finishing any memory write:**
-1. Did I include/update the `sessions` array in this file's frontmatter? ✓
-2. Does the array contain the current session ID? ✓
 
 ### Writing rules
 - Recall before writing, but only what you are about to touch: read MEMORY.md, then read in full only the topic pages covering the areas this session changed. Never rely on the index summary alone for a page you are editing, and never read the whole memory/ directory to write one page.
@@ -83,5 +82,5 @@ The Stop hook first checks whether this session touched a file at all; if it did
 nothing and no memory work happens. Otherwise it reads log.json and counts write entries since the
 last dream entry.
 When the count reaches 10, it injects the full 11-step dreaming consolidation prompt instead of the normal memory reminder.
-That prompt runs the 11 steps in a subagent (Task tool, latest Sonnet model) rather than inline, so consolidation doesn't burn the session's own context.
+That prompt runs the 11 steps in a Sonnet subagent rather than inline, so consolidation doesn't burn the session's own context.
 The count resets after each dream — the next dream triggers after 10 more writes.

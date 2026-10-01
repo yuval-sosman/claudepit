@@ -41,7 +41,9 @@ public struct PlanQARunner {
         contentLabel: String = "plan"
     ) -> String {
         var parts = [
-            "You are a helpful assistant. Answer questions about the following \(contentLabel) concisely.",
+            "Answer the user's questions about the \(contentLabel) below, concisely. The working directory is "
+                + "the project it belongs to, so when an answer depends on code the \(contentLabel) refers to, "
+                + "read that code rather than guessing.",
         ]
         if contentLabel == "plan" {
             parts.append("If your response includes a concrete suggestion that would improve the plan, append the exact token [[SUGGEST_IMPROVEMENT]] on its own line at the very end of your response. Do not include it otherwise.")
@@ -66,8 +68,10 @@ public struct PlanQARunner {
     /// `cwd` is the project the answer is about — the app's active path. It lets the
     /// model read the repo it's being asked about; without it the subprocess inherits
     /// wherever the app happened to be launched from. Writes are auto-denied in `-p`
-    /// mode, so this grants reads only.
-    public static func ask(_ prompt: String, cwd: URL? = nil) async throws -> String {
+    /// mode, so this grants reads only. `output` replaces the plain-text format, e.g. with
+    /// `ClaudeCLI.structuredArgs(schema:)` for a call whose answer is data.
+    public static func ask(_ prompt: String, cwd: URL? = nil,
+                           output: [String] = ["--output-format", "text"]) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             Task.detached(priority: .userInitiated) {
                 guard let claudePath = resolveClaudePath() else {
@@ -76,8 +80,7 @@ public struct PlanQARunner {
                 }
                 let p = Process()
                 p.executableURL = URL(filePath: "/usr/bin/env")
-                p.arguments = ClaudeCLI.printArgs(
-                    claudePath: claudePath, extra: ["--output-format", "text"])
+                p.arguments = ClaudeCLI.printArgs(claudePath: claudePath, extra: output)
                 p.environment = ClaudeCLI.environment()
                 if let cwd { p.currentDirectoryURL = cwd }
 

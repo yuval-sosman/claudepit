@@ -143,9 +143,8 @@ enum CodeHighlight {
         if let hit = cache[key] { return hit }
         var out = lang == "swift" ? SwiftHighlighter.attributed(code)
                                   : GenericHighlighter.attributed(code, language: lang)
-        // Both highlighters stamp their theme's font on every run, which beats the view's
-        // monospaced `.font` — Splash's is proportional. Keep only their colours.
-        out.appKit.font = nil
+        // The highlighters drop their theme's NSFont before converting (`withoutFont`);
+        // a font left on the runs would beat the view's monospaced `.font`.
         out.font = nil
         cache[key] = out
         order.append(key)

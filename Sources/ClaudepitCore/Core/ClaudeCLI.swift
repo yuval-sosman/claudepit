@@ -28,6 +28,24 @@ public enum ClaudeCLI {
         [claudePath, "-p", "--no-session-persistence", isolationFlag] + extra
     }
 
+    /// Output args for a call whose answer is data: the CLI validates the answer against
+    /// `schema` and returns it as `structured_output` in its JSON result envelope, so the
+    /// prompt never has to ask for "only valid JSON" and nothing has to strip fences.
+    public static func structuredArgs(schema: String) -> [String] {
+        ["--output-format", "json", "--json-schema", schema]
+    }
+
+    /// The validated object out of a `structuredArgs` run's result envelope, re-encoded for a
+    /// `Decodable`. Nil when the envelope carries none (an error result, or a CLI that
+    /// predates `--json-schema`).
+    public static func structuredOutput(fromEnvelope stdout: String) -> Data? {
+        guard let data = stdout.data(using: .utf8),
+              let envelope = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let value = envelope["structured_output"],
+              JSONSerialization.isValidJSONObject(value) else { return nil }
+        return try? JSONSerialization.data(withJSONObject: value)
+    }
+
     /// Argv for resuming a session to run a built-in slash command (e.g. `/context`).
     /// No `--no-session-persistence` decision here: callers pass it in `extra` if the
     /// report should leave no trace.

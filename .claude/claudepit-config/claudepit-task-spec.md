@@ -18,7 +18,7 @@ implement, review) — ambiguity here becomes rework there.
 ## Step 1 — Explore the codebase first
 
 Read every file the task plausibly touches; follow the existing patterns you find. When the
-surface is wide, dispatch 2-3 read-only subagents IN PARALLEL (one message, multiple Task tool
+surface is wide, dispatch 2-3 read-only subagents IN PARALLEL (one message, multiple Agent tool
 calls — Explore type if available, else general-purpose), each with one precise question and
 told to return a compact summary with file:line references. Never design against imagined code.
 You are already inside the task's dedicated git worktree — never create another worktree or
@@ -60,7 +60,7 @@ Re-read the spec with fresh eyes and fix inline:
 3. Scope — one implementation plan's worth; if it needs decomposition, say so to the user.
 4. Ambiguity — any requirement readable two ways gets pinned to one reading.
 
-Then dispatch ONE reviewer subagent (Task tool, general-purpose) with this brief:
+Then dispatch ONE reviewer subagent (Agent tool, general-purpose) with this brief:
 
 > Review the spec at <absolute specPath>. Check: Completeness (TODOs, placeholders, missing
 > sections), Consistency (internal contradictions), Clarity (requirements ambiguous enough that

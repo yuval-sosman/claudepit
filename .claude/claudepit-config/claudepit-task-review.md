@@ -21,7 +21,7 @@ Concatenate into `<taskDir>/review-package.txt` (`taskDir=` is in the arguments)
 
 ## Step 2 — Dispatch two reviewers IN PARALLEL
 
-One message, two Task tool calls (general-purpose), so they run concurrently. Both get: the
+One message, two Agent tool calls (general-purpose), so they run concurrently. Both get: the
 package path, the absolute `specPath=` and `planPath=`, and these ground rules — read-only
 checkout; you may read worktree files for context but never modify anything; judge the code on
 its merits (rationales in comments or reports are claims, not verdicts); every finding needs

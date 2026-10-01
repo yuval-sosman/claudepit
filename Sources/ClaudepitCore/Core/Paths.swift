@@ -81,6 +81,17 @@ public enum Paths {
     public static func appConfigFile(_ base: URL) -> URL { appConfigDir(base).appending(path: "config.json") }
     public static func projectSettings(_ base: URL) -> URL { projectClaude(base).appending(path: "settings.json") }
     public static func projectLocalSettings(_ base: URL) -> URL { projectClaude(base).appending(path: "settings.local.json") }
+    /// Where the Custom Memory Strategy is installed: a project rules file, which Claude Code loads
+    /// once at session start like CLAUDE.md (and finds from nested worktrees by walking up).
+    public static let memoryRuleFileName = "claudepit-memory.md"
+    public static func memoryRuleFile(_ base: URL) -> URL {
+        projectClaude(base).appending(path: "rules").appending(path: memoryRuleFileName)
+    }
+    /// The session-summary rules, installed beside it so the summary hook injects only per-turn state.
+    public static let summaryRuleFileName = "claudepit-summary.md"
+    public static func summaryRuleFile(_ base: URL) -> URL {
+        projectClaude(base).appending(path: "rules").appending(path: summaryRuleFileName)
+    }
     /// Project MCP servers can be declared in `<project>/.mcp.json` (project root, not .claude/).
     public static func projectMcpJson(_ base: URL) -> URL { base.appending(path: ".mcp.json") }
 }

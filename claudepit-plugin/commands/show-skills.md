@@ -1,5 +1,5 @@
 ---
-description: Open the Skills card in Claude Cockpit
+description: Open the Skills card in Claudepit
 ---
 
 ```bash

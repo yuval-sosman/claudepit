@@ -627,7 +627,7 @@ func worktreeBaseChecks() -> [Bool] {
 
     results.append(check("the merge command carries the guardrails the deny-list requires") {
         let b = HookScripts.taskCommandMerge
-        try expect(b.contains("NEVER commit or stage"), "no-commit rule — git add/commit are DENIED in a task worktree")
+        try expect(b.contains("Don't stage or commit"), "no-commit rule — git add/commit are denied in a task worktree")
         try expect(b.contains("never run `git worktree` commands") || b.contains("never run `git worktree`"),
                    "worktree rule")
         try expect(b.contains("swift build --product ClaudepitApp"), "names the build that works on the CLI toolchain")
