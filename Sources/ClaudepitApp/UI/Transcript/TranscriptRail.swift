@@ -127,7 +127,8 @@ struct TranscriptRail: View {
             if let hover, let card = card(for: hover) {
                 card
                     .fixedSize()
-                    .offset(x: -26, y: max(0, min(h - 64, y(row: row(of: hover), height: h) - 24)))
+                    // Room for the tallest card (two-line prompt, wrapped facts) above the end.
+                    .offset(x: -26, y: max(0, min(h - 96, y(row: row(of: hover), height: h) - 24)))
                     .allowsHitTesting(false)
             }
         }
@@ -250,7 +251,7 @@ private struct RailLabel: View {
     let number: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        WrapToWidth(maxWidth: 300) { VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text("Turn \(number)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                 if let t = TranscriptFormat.clock(turn.startTime) {
@@ -263,7 +264,6 @@ private struct RailLabel: View {
             Text(turn.label)
                 .font(.system(size: 12))
                 .lineLimit(2)
-                .frame(maxWidth: 280, alignment: .leading)
             let facts = [
                 turn.toolCalls > 0 ? TranscriptFormat.plural(turn.toolCalls, "tool call") : nil,
                 turn.edits > 0 ? TranscriptFormat.plural(turn.edits, "edit") : nil,
@@ -278,7 +278,7 @@ private struct RailLabel: View {
                 Text(facts.joined(separator: " · "))
                     .font(.system(size: 10)).foregroundStyle(turn.errors > 0 ? TranscriptStyle.error : .secondary)
             }
-        }
+        } }
         .railCard()
     }
 }
@@ -291,7 +291,7 @@ private struct RailEventLabel: View {
     let turn: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        WrapToWidth(maxWidth: 300) { VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 1.5).fill(kind.color).frame(width: 10, height: 3)
                 Text("Turn \(turn)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
@@ -303,9 +303,27 @@ private struct RailEventLabel: View {
                 .font(.system(size: 12))
                 .foregroundStyle(kind == .error ? TranscriptStyle.error : Color.primary)
                 .lineLimit(2)
-                .frame(maxWidth: 280, alignment: .leading)
-        }
+        } }
         .railCard()
+    }
+}
+
+/// Shrink-wraps its content up to `maxWidth`, wrapping text at that width. The cards used
+/// `.fixedSize()` with a `.frame(maxWidth: 280)` on the prompt: SwiftUI then sizes the text's
+/// height as one unwrapped line but draws it wrapped, so a two-line prompt pushed the facts line
+/// out below the card's border. This asks for the height at the width actually used.
+private struct WrapToWidth: Layout {
+    var maxWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let content = subviews.first else { return .zero }
+        let width = min(content.sizeThatFits(.unspecified).width, maxWidth)
+        let fitted = content.sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return CGSize(width: width, height: fitted.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
     }
 }
 
