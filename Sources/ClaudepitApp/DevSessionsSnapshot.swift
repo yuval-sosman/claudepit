@@ -24,6 +24,7 @@ import ClaudepitCore
 ///   --empty               render as if the project had no sessions
 ///   --time-scan           print cold and warm listing times and exit
 ///   --palette             render the worktree colours (palette.png) and exit
+///   --time-stats          time the row-stats scan, and a transcript load with and without it
 ///   --interaction-test    drive the list with synthetic clicks and keys (DevSessionsInteraction)
 @MainActor
 enum DevSessionsSnapshot {
@@ -68,6 +69,32 @@ enum DevSessionsSnapshot {
             .background(GlassCard { Color.clear }.padding(4))
             .background(Color(red: 0.11, green: 0.115, blue: 0.13))
             write(sheet, size: CGSize(width: 420, height: 440), to: outDir.appending(path: "palette.png"))
+            exit(0)
+        }
+        if args.contains("--time-stats") {
+            // What the Sessions page's per-row stats cost, and what they do to a transcript load.
+            let scanner = ProjectUsageScanner()
+            let since = Date().addingTimeInterval(-90 * 86_400)
+            var t = Date()
+            _ = scanner.digest(for: base, since: since)
+            print("stats digest cold: \(Int(Date().timeIntervalSince(t) * 1000))ms")
+            t = Date(); _ = scanner.digest(for: base, since: since)
+            print("stats digest warm: \(Int(Date().timeIntervalSince(t) * 1000))ms")
+            let files = SessionScanner().list(activePath: base).map(\.fileURL)
+            let biggest = files.max { ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) < ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }!
+            func load() -> Int {
+                let t0 = Date()
+                var p = SessionTranscript()
+                let ev = p.parse(data: (try? Data(contentsOf: biggest)) ?? Data())
+                _ = TranscriptModel(events: ev, metadata: p.metadata)
+                return Int(Date().timeIntervalSince(t0) * 1000)
+            }
+            print("transcript load alone (\(biggest.lastPathComponent.prefix(8)), \((try? biggest.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0).map { $0 / 1_000_000 } ?? 0) MB): \(load())ms")
+            let cold = ProjectUsageScanner()
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .utility).async { _ = cold.digest(for: base, since: since); done.signal() }
+            print("transcript load while a cold stats scan runs: \(load())ms")
+            done.wait()
             exit(0)
         }
         if args.contains("--time-scan") {

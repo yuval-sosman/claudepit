@@ -148,7 +148,12 @@ then one automatic group per task, then Ungrouped — live status, shift/arrow r
   dot went stale. The page calls `AppState.refreshSessionLiveness()` every 10 s while visible
   (re-stat + herdr), moving dates only forward. It stats with `attributesOfItem`, **not**
   `url.resourceValues`: a URL from a listing that prefetched date/size answers with those cached
-  values forever, so `isActive` went false after a minute and flickered back on each rescan. One status slot per row: herdr's `working` /
+  values forever, so `isActive` went false after a minute and flickered back on each rescan.
+- **Row stats are throttled** (`AppState.reloadSessionStats`): prompts/cost come from a full
+  `TranscriptDigest` of each transcript, and a growing file is re-parsed whole. Run on every rescan
+  and liveness tick, it re-parsed a live 66 MB transcript every few seconds — the app's top idle
+  CPU in a `sample`. Now: 1.5 s after the page opens, then at most every 2 minutes, at background
+  priority. Measure with `--snapshot-sessions <p> --time-stats`. One status slot per row: herdr's `working` /
   `blocked` (waiting) / idle (open), else "written in the last minute".
 - **Selection** is `SessionListState` (Set + primary + anchor): click, ⌘-click, ⇧-click, ↑/↓
   (⇧ extends), ←/→ fold subagents, ⌘A, ⌫ trash, ⌥⌘F search. Clicking never scrolls the list; only
@@ -679,6 +684,11 @@ still shows (by its `rendered` text, else raw). Task-notification bodies are **X
   (only as far as needed), leaving 44pt for the floating End/Latest button. Its field takes focus
   only on that opening click, not each time the lazy list rebuilds the row.
 - Highlighters stamp their own fonts; `CodeHighlight` strips them (Splash's is proportional).
+- **Load cost** (66 MB transcript, debug build): ~1.13 s → ~0.30 s. Two fixes, both found with
+  `sample`: `SessionTranscript.parse` finds line ends with `memchr` (a generic
+  `Data.firstIndex(of:)` walk was ~45% of the load — the app runs debug builds), and
+  `TranscriptModel`'s per-event search text is built on first search, not for every event on
+  every load and live rebuild. Time a load with `--snapshot-transcript <f> --list`.
 - `PathText` parses markdown **once** and lays file links over the result. Splitting the text at
   each path first broke any bold or code span around it.
 

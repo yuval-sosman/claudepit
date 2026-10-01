@@ -38,7 +38,8 @@ struct SessionsSection: View {
         .onAppear {
             restoreMemory()
             app.reloadSessions()
-            app.reloadSessionStats()
+            // After the transcript being opened has had the CPU (throttled; see reloadSessionStats).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { app.reloadSessionStats() }
             applyDiscoverIntent()
             applyFocusIntent()
         }

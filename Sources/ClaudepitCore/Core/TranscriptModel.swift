@@ -194,8 +194,10 @@ public struct TranscriptModel: @unchecked Sendable {
     public private(set) var planLinkEvents: [Int: String] = [:]
     /// Where plan files live; a write there is a plan, not an ordinary edit.
     public let plansRoot: String
-    /// Lowercased searchable text per event (capped per event).
-    private var searchBlobs: [String] = []
+    /// Lowercased searchable text per event (capped per event), built on first use. Building it
+    /// for every event up front was ~60% of a transcript load (it re-serialises every tool input),
+    /// paid again on each live rebuild, for a search box most loads never touch.
+    private let search = SearchBlobs()
 
     /// Routine calls fold into a run once this many are consecutive.
     public static let runThreshold = 4
@@ -321,14 +323,14 @@ public struct TranscriptModel: @unchecked Sendable {
         guard filterOK else { return false }
         guard !q.isEmpty else { return true }
         guard let i = turns[row.turn].promptIndex else { return false }
-        return searchBlobs[i].contains(q)
+        return search.blob(i, in: events).contains(q)
     }
 
     private func matches(_ row: TranscriptRow, filters: Set<TranscriptFilter>, query q: String) -> Bool {
         if !filters.isEmpty && filters.isDisjoint(with: row.filters) { return false }
         if q.isEmpty { return true }
-        return row.eventIndices.contains { searchBlobs[$0].contains(q) }
-            || attachedIndices(row).contains { searchBlobs[$0].contains(q) }
+        return row.eventIndices.contains { search.blob($0, in: events).contains(q) }
+            || attachedIndices(row).contains { search.blob($0, in: events).contains(q) }
     }
 
     /// Hooks and context shown inside a tool row — a search must see them too.
@@ -344,7 +346,6 @@ public struct TranscriptModel: @unchecked Sendable {
     // MARK: - Build
 
     private mutating func build() {
-        searchBlobs = events.map { Self.searchText($0) }
         collectAttachments()
         collectTasks()
         collectPlanLinks()
@@ -797,6 +798,22 @@ public struct TranscriptModel: @unchecked Sendable {
 
     /// Everything a search should see in an event, lowercased. Long bodies are capped — a
     /// 200 KB Read result would otherwise dominate both memory and every keystroke.
+    /// Per-event search text, computed when a search first needs it and kept. A reference type,
+    /// so the (immutable) model's copies share one cache; locked, since a model is built off the
+    /// main thread and searched on it.
+    private final class SearchBlobs: @unchecked Sendable {
+        private var blobs: [Int: String] = [:]
+        private let lock = NSLock()
+
+        func blob(_ i: Int, in events: [SessionEvent]) -> String {
+            lock.lock(); defer { lock.unlock() }
+            if let b = blobs[i] { return b }
+            let b = events.indices.contains(i) ? TranscriptModel.searchText(events[i]) : ""
+            blobs[i] = b
+            return b
+        }
+    }
+
     static func searchText(_ e: SessionEvent) -> String {
         let cap = 20_000
         func c(_ s: String?) -> String? { s.map { $0.count > cap ? String($0.prefix(cap)) : $0 } }

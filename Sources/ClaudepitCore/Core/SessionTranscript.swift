@@ -46,8 +46,24 @@ public struct SessionTranscript: @unchecked Sendable {
         // multi-byte UTF-8 char split across chunks is never decoded prematurely.
         // Walk an index and copy the remainder once: removing each line from the front
         // re-copied the rest of the buffer per line — 48 s for a 59 MB transcript.
-        var start = partialBytes.startIndex
-        while let nl = partialBytes[start...].firstIndex(of: 0x0A) {
+        // Newlines found with memchr over the raw bytes (as `TranscriptDigest.parse` does): the
+        // app runs debug builds, where `Data.firstIndex(of:)` walks byte by byte through the
+        // generic Collection path — ~45% of loading a 66 MB transcript went to finding line ends.
+        var breaks: [Int] = []
+        partialBytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            var from = 0
+            while from < raw.count,
+                  let hit = memchr(base + from, 0x0A, raw.count - from) {
+                let at = base.distance(to: UnsafeRawPointer(hit))
+                breaks.append(at)
+                from = at + 1
+            }
+        }
+        let origin = partialBytes.startIndex
+        var start = origin
+        for offset in breaks {
+            let nl = origin + offset
             if nl > start { ingest(partialBytes.subdata(in: start..<nl)) }
             start = nl + 1
         }

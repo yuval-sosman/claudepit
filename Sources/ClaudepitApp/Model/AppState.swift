@@ -166,6 +166,9 @@ final class AppState: ObservableObject {
     @Published var sessionStats: [String: SessionStat] = [:]
     var isScanningSessionStats = false
     var sessionStatsRescanPending = false
+    /// When the per-session stats last ran, and for which project (`reloadSessionStats` throttle).
+    var sessionStatsRanAt: Date?
+    var sessionStatsBase: URL?
     /// The Sessions page's place — selection, expanded rows, search, filters — kept for the
     /// app's lifetime: the page is rebuilt on every visit, and coming back used to reset all of it
     /// and jump to the newest session. Not published; only that page reads it, on appear.

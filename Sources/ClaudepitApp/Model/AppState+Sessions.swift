@@ -155,7 +155,9 @@ extension AppState {
                 if updated[i].isActive != active { updated[i].isActive = active; changed = true }
             }
             if changed { self.sessions = updated.sorted { $0.modifiedAt > $1.modifiedAt } }
-            if grew { self.reloadSessionStats() }
+            // Deliberately no stats refresh here: a live session grows every few seconds, and
+            // re-parsing it (a whole 66 MB transcript, each time) was the app's top idle cost.
+            _ = grew
         }
     }
 
@@ -163,17 +165,28 @@ extension AppState {
 
     /// Prompts and cost per session, from the same scanner (and per-file cache) as Home's Usage
     /// card and over the same window, so the two never re-parse each other's files or disagree.
-    /// Coalesced like `reloadProjectUsage`.
-    func reloadSessionStats() {
+    ///
+    /// Throttled to one run per `sessionStatsInterval` per project: the first run parses every
+    /// transcript of the window, and any later one re-parses each transcript that grew — whole,
+    /// since a digest isn't incremental — so running it on every rescan and liveness tick kept a
+    /// live session's transcript being re-parsed every few seconds. Row numbers that are a couple
+    /// of minutes behind cost nothing; that CPU competed with the transcript being opened.
+    static let sessionStatsInterval: TimeInterval = 120
+
+    func reloadSessionStats(force: Bool = false) {
+        let base = activePath
+        if !force, sessionStatsBase == base, let ran = sessionStatsRanAt,
+           Date().timeIntervalSince(ran) < Self.sessionStatsInterval { return }
         if isScanningSessionStats {
             sessionStatsRescanPending = true
             return
         }
         isScanningSessionStats = true
-        let base = activePath
+        sessionStatsRanAt = Date()
+        sessionStatsBase = base
         let scanner = projectUsageScanner
         Task { [weak self] in
-            let table = await Task.detached(priority: .utility) {
+            let table = await Task.detached(priority: .background) {
                 let now = Date()
                 let since = UsagePeriod.allCases.map { $0.window(now: now).start }.min() ?? now
                 return SessionStat.table(from: scanner.digest(for: base, since: since))
@@ -182,9 +195,11 @@ extension AppState {
             self.isScanningSessionStats = false
             let stale = self.activePath != base
             if !stale, table != self.sessionStats { self.sessionStats = table }
-            if stale || self.sessionStatsRescanPending {
+            if stale {
                 self.sessionStatsRescanPending = false
-                self.reloadSessionStats()
+                self.reloadSessionStats(force: true)
+            } else {
+                self.sessionStatsRescanPending = false
             }
         }
     }
